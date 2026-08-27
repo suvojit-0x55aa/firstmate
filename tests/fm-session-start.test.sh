@@ -1182,7 +1182,7 @@ fm_test_day_offset() {
 }
 
 test_secondmate_digest_source_absent_heading_no_change() {
-  local rec root home fakebin mate out
+  local rec root home fakebin mate out status
   rec=$(new_world digest-source-absent)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1195,8 +1195,13 @@ EOF
   printf '# Firstmate\n\nJust prose. No Digest source heading here.\n' > "$mate/data/charter.md"
   fm_write_secondmate_meta "$home/state/sm-absent.meta" "$mate" "firstmate:fm-sm-absent" alpha
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
+  expect_code 0 "$status" "session start must still succeed for a secondmate that has not opted in"
+  assert_contains "$out" "FLEET STATE" "session start never reached the fleet-state digest"
+  assert_contains "$out" "--- sm-absent ---" \
+    "the opted-out secondmate's record was never reached by the Work under way loop"
   assert_not_contains "$out" "Digest source (sm-absent)" \
     "a secondmate charter with no ## Digest source heading must not add a digest section"
 
