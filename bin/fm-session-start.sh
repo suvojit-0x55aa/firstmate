@@ -168,7 +168,13 @@
 # per-secondmate, in the charter file, with zero code changes here. When
 # present, the heading's body supplies a `path:` line (the directory to scan)
 # and a `pattern:` line (prose documentation of the fixed convention below, not
-# a second parsing convention to interpret). The scan always applies the one
+# a second parsing convention to interpret). That `path:` must be absolute or
+# `~`-prefixed. A bare relative value is out of scope by convention: this hook
+# never chdir's, so a relative path would resolve against whatever working
+# directory the session-open process happened to inherit, which is the opened
+# project and differs session to session - a directory the secondmate never
+# declared. There is no sensible base to infer one against, so the convention
+# names the base instead. The scan always applies the one
 # `^due: YYYY-MM-DD` convention the source vault's own task-discovery already
 # uses, so there is only ever one date-matching convention in play. The date is
 # matched BARE, exactly as that task-discovery matches it; a quoted `due:
