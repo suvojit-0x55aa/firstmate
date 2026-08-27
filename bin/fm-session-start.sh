@@ -163,7 +163,7 @@
 # DIGEST SOURCE (per-secondmate, opt-in): for every state/*.meta record with
 # kind=secondmate, the fleet digest checks that secondmate's own
 # <home>/data/charter.md for an optional `## Digest source` heading. Absent
-# heading, absent/unreadable/non-directory declared path, or a non-secondmate
+# heading, absent/non-directory declared path, or a non-secondmate
 # record all print nothing and change nothing else - opting in is entirely
 # per-secondmate, in the charter file, with zero code changes here. When
 # present, the heading's body supplies a `path:` line (the directory to scan)
