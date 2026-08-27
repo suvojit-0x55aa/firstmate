@@ -1210,6 +1210,7 @@ EOF
 
 test_secondmate_digest_source_prints_overdue_and_due_today() {
   local rec root home fakebin mate tasks out today yesterday two_ago tomorrow
+  local due_today_line
   rec=$(new_world digest-source-live)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1262,8 +1263,11 @@ EOF
   assert_contains "$out" "Digest source (sm-digest)" "digest section missing for an opted-in secondmate"
   assert_contains "$out" "overdue: 2" \
     "overdue must count each open past-due task exactly once and exclude retired and body-only due: lines"
-  assert_contains "$out" "due today: today-only" "due-today title missing or wrong (must be the file name, not the body)"
-  assert_not_contains "$out" ", future" "a future due: date was wrongly listed as due today"
+  # The whole rendered line, not a fragment of it: grep -rl emits paths in
+  # readdir order, so a wrongly-included title can land in any position.
+  due_today_line=$(printf '%s\n' "$out" | grep -m1 '^due today: ' || true)
+  [ "$due_today_line" = "due today: today-only" ] || \
+    fail "due-today must render exactly the one open task due today, in any scan order (got: '$due_today_line')"
   assert_not_contains "$out" "finished-today" "a task retired under done/ was wrongly listed as due today"
   assert_not_contains "$out" "marked-completed" "a task with a completed frontmatter status was wrongly listed as due today"
 

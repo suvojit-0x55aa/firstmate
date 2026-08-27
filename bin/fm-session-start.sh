@@ -171,9 +171,11 @@
 # a second parsing convention to interpret). The scan always applies the one
 # `^due: YYYY-MM-DD` convention the source vault's own task-discovery already
 # uses, so there is only ever one date-matching convention in play: one grep
-# finds the *.md files carrying such a line, then one awk per matched file
-# keeps the `due:` only when it sits inside that file's YAML frontmatter - the
-# block between the leading `---` delimiters - and only the first one. A body
+# finds the *.md files carrying such a line, then one awk pass over that whole
+# matched set keeps the `due:` only when it sits inside a file's YAML
+# frontmatter - the block between its leading `---` delimiters - and only the
+# first one. One awk for the set rather than one per file: the fork, not the
+# parse, is what a scan this size actually costs. A body
 # line that happens to start with `due:` is not a task record, and no file is
 # ever counted twice. Finished work is excluded the two ways a markdown task
 # vault retires a record: a done/, archive/, or archived/ directory on the path,
@@ -400,29 +402,42 @@ DIGEST_SOURCE_DUE_RE='^due: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
 DIGEST_SOURCE_DONE_RE='^status:[[:space:]]*[^[:alnum:]]*(done|complete|completed|cancelled|canceled|archived)([^[:alnum:]].*)?$'
 # shellcheck disable=SC2016 # awk owns every $ expression in this literal program.
 DIGEST_SOURCE_AWK='
-  NR == 1 { if ($0 == "---") { infm = 1; next } else { exit 0 } }
-  infm && $0 == "---" { exit 0 }
+  function flush() {
+    if (path != "" && !done_task && due != "") print due "\t" path
+  }
+  FNR == 1 {
+    flush()
+    path = FILENAME
+    due = ""
+    done_task = 0
+    infm = ($0 == "---")
+    skip = !infm
+    next
+  }
+  skip { next }
+  infm && $0 == "---" { skip = 1; next }
   infm && due == "" && $0 ~ due_re {
     line = $0
     sub(/^due:[[:space:]]*/, "", line)
     due = substr(line, 1, 10)
   }
   infm && tolower($0) ~ done_re { done_task = 1 }
-  END { if (!done_task && due != "") print due }
+  END { flush() }
 '
 # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
 DIGEST_SOURCE_SCAN='
   src=$1 due_re=$2 done_re=$3 prog=$4
   shopt -s nocasematch
-  grep -rl --include="*.md" -e "$due_re" "$src" 2>/dev/null |
+  files=()
   while IFS= read -r file; do
     case "$file" in
       */done/*|*/archive/*|*/archived/*|*/.git/*) continue ;;
     esac
-    due=$(awk -v due_re="$due_re" -v done_re="$done_re" "$prog" "$file" 2>/dev/null) || continue
-    [ -n "$due" ] || continue
-    printf "%s\t%s\n" "$due" "$file"
-  done
+    files+=("$file")
+  done < <(grep -rl --include="*.md" -e "$due_re" "$src" 2>/dev/null)
+  [ ${#files[@]} -gt 0 ] || exit 0
+  printf "%s\0" "${files[@]}" |
+    xargs -0 awk -v due_re="$due_re" -v done_re="$done_re" "$prog" 2>/dev/null
 '
 
 RULE='================================================================================'
