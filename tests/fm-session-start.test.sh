@@ -1230,20 +1230,34 @@ EOF
   yesterday=$(fm_test_day_offset -1)
   two_ago=$(fm_test_day_offset -2)
   tomorrow=$(fm_test_day_offset 1)
-  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/overdue-a.md"
+  # An open task carrying a second `due:` line in its BODY is still one task:
+  # the frontmatter block is the record, the body is prose.
+  printf -- '---\ndue: %s\n---\nbody\ndue: %s\n' "$yesterday" "$two_ago" > "$tasks/overdue-a.md"
   printf -- '---\ndue: %s\n---\nbody\n' "$two_ago" > "$tasks/overdue-b.md"
   printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/today-only.md"
   printf -- '---\ndue: %s\n---\nbody\n' "$tomorrow" > "$tasks/future.md"
   printf -- 'no frontmatter at all\n' > "$tasks/no-date.md"
+  # A body-only `due:` line in a file with no frontmatter is prose, not a task.
+  printf -- 'notes about scheduling\ndue: %s\n' "$two_ago" > "$tasks/body-prose.md"
+  # Retired work keeps its `due:` line forever, both ways a vault retires it.
+  mkdir -p "$tasks/done" "$tasks/archive"
+  printf -- '---\ndue: %s\n---\nbody\n' "$two_ago" > "$tasks/done/finished.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/done/finished-today.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/archive/old.md"
+  printf -- '---\ndue: %s\nstatus: done\n---\nbody\n' "$two_ago" > "$tasks/marked-done.md"
+  printf -- '---\ndue: %s\nstatus: "completed"\n---\nbody\n' "$today" > "$tasks/marked-completed.md"
 
   fm_write_secondmate_meta "$home/state/sm-digest.meta" "$mate" "firstmate:fm-sm-digest" alpha
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "Digest source (sm-digest)" "digest section missing for an opted-in secondmate"
-  assert_contains "$out" "overdue: 2" "overdue count did not count both past-due fixtures"
+  assert_contains "$out" "overdue: 2" \
+    "overdue must count each open past-due task exactly once and exclude retired and body-only due: lines"
   assert_contains "$out" "due today: today-only" "due-today title missing or wrong (must be the file name, not the body)"
-  assert_not_contains "$out" "future" "a future due: date was wrongly counted as overdue or due today"
+  assert_not_contains "$out" ", future" "a future due: date was wrongly listed as due today"
+  assert_not_contains "$out" "finished-today" "a task retired under done/ was wrongly listed as due today"
+  assert_not_contains "$out" "marked-completed" "a task with a completed frontmatter status was wrongly listed as due today"
 
   pass "an opted-in secondmate's digest source prints the correct overdue count and due-today title"
 }
