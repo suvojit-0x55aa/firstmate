@@ -21,7 +21,8 @@
 #   - orphan status logs whose task meta has already disappeared
 #   - per-secondmate digest-source opt-in: no ## Digest source heading changes
 #     nothing, a declared path's overdue/due-today counts and titles print
-#     correctly, and a malformed or missing declared path fails safely
+#     correctly, a vault whose own root sits under an Archive/ ancestor still
+#     counts its tasks, and a malformed or missing declared path fails safely
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -1272,6 +1273,47 @@ EOF
   assert_not_contains "$out" "marked-completed" "a task with a completed frontmatter status was wrongly listed as due today"
 
   pass "an opted-in secondmate's digest source prints the correct overdue count and due-today title"
+}
+
+# A retirement directory only retires a task when it sits BELOW the declared
+# root. A vault that simply lives in ~/Documents/Archive/ has retired nothing,
+# so matching the whole absolute path would silently zero every count.
+test_secondmate_digest_source_root_under_archive_named_ancestor() {
+  local rec root home fakebin mate tasks out today yesterday
+  rec=$(new_world digest-source-ancestor)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-ancestor"
+  tasks="$mate/Documents/Archive/cos/tasks"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Chief of staff charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+
+  today=$(fm_test_day_offset 0)
+  yesterday=$(fm_test_day_offset -1)
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/still-open.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/due-now.md"
+
+  fm_write_secondmate_meta "$home/state/sm-ancestor.meta" "$mate" "firstmate:fm-sm-ancestor" alpha
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Digest source (sm-ancestor)" "digest section missing for an opted-in secondmate"
+  assert_contains "$out" "overdue: 1" \
+    "an Archive/ directory ABOVE the declared root must not retire the tasks under it"
+  assert_contains "$out" "due today: due-now" \
+    "an Archive/ directory ABOVE the declared root must not hide a task due today"
+
+  pass "a vault rooted under an Archive/ ancestor still counts its own tasks"
 }
 
 test_secondmate_digest_source_malformed_path_fails_safely() {
@@ -2630,6 +2672,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_secondmate_digest_source_absent_heading_no_change
 test_secondmate_digest_source_prints_overdue_and_due_today
+test_secondmate_digest_source_root_under_archive_named_ancestor
 test_secondmate_digest_source_malformed_path_fails_safely
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr

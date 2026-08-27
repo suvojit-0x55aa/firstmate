@@ -178,10 +178,12 @@
 # parse, is what a scan this size actually costs. A body
 # line that happens to start with `due:` is not a task record, and no file is
 # ever counted twice. Finished work is excluded the two ways a markdown task
-# vault retires a record: a done/, archive/, or archived/ directory on the path,
-# or a frontmatter `status:` of done/completed/cancelled/archived. Both halves
-# ignore case, because a vault that names those directories Done/ or Archive/
-# retires a task exactly as much as one that lowercases them. A completed task
+# vault retires a record: a done/, archive/, or archived/ directory BELOW the
+# declared root, or a frontmatter `status:` of done/completed/cancelled/archived.
+# Both halves ignore case, because a vault that names those directories Done/ or
+# Archive/ retires a task exactly as much as one that lowercases them. Only the
+# path below the declared root is read, since a vault that simply lives in
+# ~/Documents/Archive/ has retired nothing. A completed task
 # keeps its `due:` line forever, so an unfiltered count would only ever grow
 # and would never describe real work. It prints a count of dates before today
 # (overdue) and the file-name titles of dates equal to today (due today); that
@@ -194,7 +196,8 @@
 # digest's one shared FM_SESSION_START_TIMEOUT budget, and a scan that does not
 # finish omits only that secondmate's section - and says so on one named line,
 # because an omission an agent cannot see reads as an opt-out that never
-# happened. It stays local and synchronous,
+# happened. A scan that fails for any other reason discloses itself the same
+# way, for the same reason. It stays local and synchronous,
 # so it adds no network call and no live agent call. Weekly-review flags are
 # deliberately out of scope: summarizing prose needs more than a grep.
 #
@@ -426,11 +429,11 @@ DIGEST_SOURCE_AWK='
 '
 # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
 DIGEST_SOURCE_SCAN='
-  src=$1 due_re=$2 done_re=$3 prog=$4
+  src=${1%/} due_re=$2 done_re=$3 prog=$4
   shopt -s nocasematch
   files=()
   while IFS= read -r file; do
-    case "$file" in
+    case "${file#"$src"}" in
       */done/*|*/archive/*|*/archived/*|*/.git/*) continue ;;
     esac
     files+=("$file")
@@ -668,7 +671,10 @@ print_secondmate_digest_source() {
     fm_cap_line "digest source ($id): scan of $src_path did not finish within ${DIGEST_SOURCE_TIMEOUT}s - section omitted"
     return 0
   fi
-  [ "$scan_rc" -eq 0 ] || return 0
+  if [ "$scan_rc" -ne 0 ]; then
+    fm_cap_line "digest source ($id): scan of $src_path failed (exit $scan_rc) - section omitted"
+    return 0
+  fi
 
   today=$(date +%Y-%m-%d)
   today_num=${today//-/}
