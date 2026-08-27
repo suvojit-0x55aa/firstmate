@@ -19,6 +19,9 @@
 #     blocked row kept whole, the dispatchable queued listing bounded with an
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
+#   - per-secondmate digest-source opt-in: no ## Digest source heading changes
+#     nothing, a declared path's overdue/due-today counts and titles print
+#     correctly, and a malformed or missing declared path fails safely
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -1160,6 +1163,128 @@ EOF
   [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
 
   pass "orphan status logs are printed once with bounded tails"
+}
+
+# --- secondmate digest source (charter opt-in, AGENTS.md section 6 "fleet
+# digest" step) -------------------------------------------------------------
+
+# fm_test_day_offset <±days>: today (0) or an offset day, as YYYY-MM-DD.
+# Portable BSD/GNU `date` idiom (fm-watch-triage.test.sh's set_mtime uses the
+# same `date -r` / `date -d @` fallback pair for epoch conversion).
+fm_test_day_offset() {
+  local offset=$1 epoch out
+  epoch=$(( $(date +%s) + offset * 86400 ))
+  if out=$(date -r "$epoch" +%Y-%m-%d 2>/dev/null); then
+    printf '%s\n' "$out"
+  else
+    date -d "@$epoch" +%Y-%m-%d
+  fi
+}
+
+test_secondmate_digest_source_absent_heading_no_change() {
+  local rec root home fakebin mate out
+  rec=$(new_world digest-source-absent)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-absent"
+  mkdir -p "$mate/data"
+  printf '# Firstmate\n\nJust prose. No Digest source heading here.\n' > "$mate/data/charter.md"
+  fm_write_secondmate_meta "$home/state/sm-absent.meta" "$mate" "firstmate:fm-sm-absent" alpha
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "Digest source (sm-absent)" \
+    "a secondmate charter with no ## Digest source heading must not add a digest section"
+
+  pass "a secondmate charter without a ## Digest source heading changes nothing"
+}
+
+test_secondmate_digest_source_prints_overdue_and_due_today() {
+  local rec root home fakebin mate tasks out today yesterday two_ago tomorrow
+  rec=$(new_world digest-source-live)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-digest"
+  tasks="$mate/tasks"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Chief of staff charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+
+## Idle by default
+Prose after the section must not be pulled in.
+EOF
+
+  today=$(fm_test_day_offset 0)
+  yesterday=$(fm_test_day_offset -1)
+  two_ago=$(fm_test_day_offset -2)
+  tomorrow=$(fm_test_day_offset 1)
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/overdue-a.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$two_ago" > "$tasks/overdue-b.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/today-only.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$tomorrow" > "$tasks/future.md"
+  printf -- 'no frontmatter at all\n' > "$tasks/no-date.md"
+
+  fm_write_secondmate_meta "$home/state/sm-digest.meta" "$mate" "firstmate:fm-sm-digest" alpha
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Digest source (sm-digest)" "digest section missing for an opted-in secondmate"
+  assert_contains "$out" "overdue: 2" "overdue count did not count both past-due fixtures"
+  assert_contains "$out" "due today: today-only" "due-today title missing or wrong (must be the file name, not the body)"
+  assert_not_contains "$out" "future" "a future due: date was wrongly counted as overdue or due today"
+
+  pass "an opted-in secondmate's digest source prints the correct overdue count and due-today title"
+}
+
+test_secondmate_digest_source_malformed_path_fails_safely() {
+  local rec root home fakebin mate_dead mate_nopath out status
+  rec=$(new_world digest-source-malformed)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate_dead="${root%/root}/mate-dead-path"
+  mkdir -p "$mate_dead/data"
+  cat > "$mate_dead/data/charter.md" <<'EOF'
+## Digest source
+path: /this/path/does/not/exist/anywhere/fm-test
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  fm_write_secondmate_meta "$home/state/sm-dead-path.meta" "$mate_dead" "firstmate:fm-sm-dead-path" alpha
+
+  mate_nopath="${root%/root}/mate-no-path-line"
+  mkdir -p "$mate_nopath/data"
+  cat > "$mate_nopath/data/charter.md" <<'EOF'
+## Digest source
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  fm_write_secondmate_meta "$home/state/sm-no-path-line.meta" "$mate_nopath" "firstmate:fm-sm-no-path-line" alpha
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a malformed digest-source declaration must not crash session start"
+  assert_not_contains "$out" "Digest source (sm-dead-path)" \
+    "a declared path that does not exist must omit that secondmate's section rather than fail loudly"
+  assert_not_contains "$out" "Digest source (sm-no-path-line)" \
+    "a heading with no path: line must omit that secondmate's section rather than fail loudly"
+  assert_contains "$out" "FLEET STATE" "the rest of the digest must still complete after a malformed digest-source declaration"
+
+  pass "a malformed or missing declared digest-source path fails safely and omits only that secondmate's section"
 }
 
 # --- session-start secondmate recovery boundary -----------------------------
@@ -2477,6 +2602,9 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_secondmate_digest_source_absent_heading_no_change
+test_secondmate_digest_source_prints_overdue_and_due_today
+test_secondmate_digest_source_malformed_path_fails_safely
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

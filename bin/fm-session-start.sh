@@ -45,8 +45,9 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk, a cheap per-task endpoint-liveness read, and
+#                       (for a secondmate whose charter opted in) its digest-source
+#                       section: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -158,6 +159,23 @@
 # may be. Both bounds are safe because the section prints every task's full
 # status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
+#
+# DIGEST SOURCE (per-secondmate, opt-in): for every state/*.meta record with
+# kind=secondmate, the fleet digest checks that secondmate's own
+# <home>/data/charter.md for an optional `## Digest source` heading. Absent
+# heading, absent/unreadable/non-directory declared path, or a non-secondmate
+# record all print nothing and change nothing else - opting in is entirely
+# per-secondmate, in the charter file, with zero code changes here. When
+# present, the heading's body supplies a `path:` line (the directory to scan)
+# and a `pattern:` line (prose documentation of the fixed convention below, not
+# a second parsing convention to interpret). The scan itself is always the same
+# one grep over `^due: YYYY-MM-DD` frontmatter lines under that path - the exact
+# convention the source vault's own task-discovery already uses, so there is
+# only ever one date-matching convention in play. It prints a count of dates
+# before today (overdue) and the file-name titles of dates equal to today (due
+# today); it is local, synchronous, and bounded by the file count under the
+# declared path, so it adds no network call and no live agent call. Weekly-review
+# flags are deliberately out of scope: summarizing prose needs more than a grep.
 #
 # RUNTIME BOUND: the digest is now executed on a session-open hook (see
 # bin/fm-sessionstart-run.sh), which blocks session initialization while it
@@ -528,6 +546,65 @@ print_status_tail() {
   done < <(tail -n "$STATUS_TAIL" "$status")
 }
 
+# print_secondmate_digest_source <meta-file> <id>: the optional per-secondmate
+# overdue/due-today section documented above under DIGEST SOURCE. Prints
+# nothing and never fails when the record is not a secondmate, its charter has
+# no `## Digest source` heading, the heading has no usable `path:` line, or
+# that path is not a readable directory - every non-opted-in secondmate's
+# digest stays exactly what it always was.
+print_secondmate_digest_source() {
+  local meta=$1 id=$2 home charter body path_line src_path today
+  local overdue=0 due_today='' line due file title due_num today_num
+  [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 0
+  home=$(fm_meta_get "$meta" home)
+  [ -n "$home" ] || return 0
+  charter="$home/data/charter.md"
+  [ -f "$charter" ] || return 0
+
+  # The section body is every line after the heading up to the next heading of
+  # any level, or EOF.
+  body=$(awk '
+    found && /^#/ { exit }
+    found        { print }
+    /^## Digest source[[:space:]]*$/ { found = 1 }
+  ' "$charter")
+  [ -n "$body" ] || return 0
+
+  path_line=$(printf '%s\n' "$body" | grep -m1 '^path:') || return 0
+  src_path=${path_line#path:}
+  src_path=$(printf '%s' "$src_path" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  [ -n "$src_path" ] || return 0
+  # shellcheck disable=SC2088 # deliberate: '~/' below is a literal glob
+  # prefix matched against the on-disk path text, not a shell tilde to expand.
+  case "$src_path" in
+    '~') src_path=$HOME ;;
+    '~/'*) src_path=${src_path#'~/'}; src_path="$HOME/$src_path" ;;
+  esac
+  [ -d "$src_path" ] || return 0
+
+  today=$(date +%Y-%m-%d)
+  today_num=${today//-/}
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    due=${line##*due: }
+    due=${due:0:10}
+    file=${line%%:due:*}
+    due_num=${due//-/}
+    if [ "$due_num" -lt "$today_num" ] 2>/dev/null; then
+      overdue=$((overdue + 1))
+    elif [ "$due_num" -eq "$today_num" ] 2>/dev/null; then
+      title=$(basename "$file")
+      title=${title%.*}
+      due_today="${due_today:+$due_today, }$title"
+    fi
+  done < <(grep -r '^due: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' "$src_path" 2>/dev/null)
+
+  subsection "Digest source ($id)"
+  printf 'path: %s\n' "$src_path"
+  printf 'overdue: %s\n' "$overdue"
+  printf 'due today: %s\n' "${due_today:-(none)}"
+}
+
 hash_file_sha256() {
   local file=$1 digest
   [ -f "$file" ] || return 1
@@ -828,6 +905,8 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
+
+  print_secondmate_digest_source "$meta" "$id"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
