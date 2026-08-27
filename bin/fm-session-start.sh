@@ -163,9 +163,15 @@
 # DIGEST SOURCE (per-secondmate, opt-in): for every state/*.meta record with
 # kind=secondmate, the fleet digest checks that secondmate's own
 # <home>/data/charter.md for an optional `## Digest source` heading. Absent
-# heading, absent/non-directory declared path, or a non-secondmate
+# heading, absent/non-directory declared path, a record carrying a
+# remote_host= field, or a non-secondmate
 # record all print nothing and change nothing else - opting in is entirely
-# per-secondmate, in the charter file, with zero code changes here. When
+# per-secondmate, in the charter file, with zero code changes here. A remote
+# secondmate is skipped because its home= names a path on ITS host: this scan
+# is local and synchronous by design, and reading that path here would either
+# find nothing (reading as an opt-out that never happened) or, on a fleet that
+# provisions the same home layout on both hosts, find a LOCAL vault and report
+# another machine's data as that secondmate's. When
 # present, the heading's body supplies a `path:` line (the directory to scan)
 # and a `pattern:` line (prose documentation of the fixed convention below, not
 # a second parsing convention to interpret). That `path:` must be absolute or
@@ -642,7 +648,8 @@ print_status_tail() {
 
 # print_secondmate_digest_source <meta-file> <id>: the optional per-secondmate
 # overdue/due-today section documented above under DIGEST SOURCE. Prints
-# nothing and never fails when the record is not a secondmate, its charter has
+# nothing and never fails when the record is not a secondmate, the record is a
+# remote secondmate, its charter has
 # no `## Digest source` heading, the heading has no usable `path:` line, or the
 # declared path is not a directory - every non-opted-in secondmate's digest
 # stays exactly what it always was. A path that IS a directory but whose scan
@@ -652,6 +659,7 @@ print_secondmate_digest_source() {
   local meta=$1 id=$2 home charter body path_line src_path today
   local overdue=0 due_today='' scan scan_rc due file title due_num today_num
   [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 0
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 0
   home=$(fm_meta_get "$meta" home)
   [ -n "$home" ] || return 0
   charter="$home/data/charter.md"
@@ -690,11 +698,11 @@ print_secondmate_digest_source() {
     "$src_path" "$DIGEST_SOURCE_DUE_RE" "$DIGEST_SOURCE_DONE_RE" "$DIGEST_SOURCE_AWK" \
     2>/dev/null) || scan_rc=$?
   if [ "$scan_rc" -eq 124 ]; then
-    fm_cap_line "digest source ($id): scan of $src_path did not finish within ${DIGEST_SOURCE_TIMEOUT}s - section omitted"
+    fm_cap_line "digest source ($id): scan did not finish within ${DIGEST_SOURCE_TIMEOUT}s - section omitted (path: $src_path)"
     return 0
   fi
   if [ "$scan_rc" -ne 0 ]; then
-    fm_cap_line "digest source ($id): scan of $src_path failed (exit $scan_rc) - section omitted"
+    fm_cap_line "digest source ($id): scan failed (exit $scan_rc) - section omitted (path: $src_path)"
     return 0
   fi
 

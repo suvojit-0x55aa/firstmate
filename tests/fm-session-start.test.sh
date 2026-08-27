@@ -1366,6 +1366,103 @@ EOF
   pass "an unreadable declared digest-source path discloses instead of reporting zero"
 }
 
+# A remote secondmate's home= names a path on ITS host. The scan is local and
+# synchronous by design, so the record is skipped outright rather than having
+# that path read against this machine's filesystem - which, on a fleet that
+# provisions the same home layout on both hosts, would report another machine's
+# vault as this secondmate's data.
+test_secondmate_digest_source_remote_record_skipped() {
+  local rec root home fakebin mate tasks out status yesterday today
+  rec=$(new_world digest-source-remote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-remote"
+  tasks="$mate/tasks"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  yesterday=$(fm_test_day_offset -1)
+  today=$(fm_test_day_offset 0)
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/late.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/wrong-host-task.md"
+
+  # The charter and vault both exist locally, exactly as a homogeneous fleet
+  # would provision them, so only the remote_host= field can distinguish them.
+  fm_write_secondmate_meta "$home/state/sm-remote.meta" "$mate" "firstmate:fm-sm-remote" alpha
+  printf 'remote_host=%s\n' "fleet-host-b" >> "$home/state/sm-remote.meta"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a remote secondmate record must not crash session start"
+  assert_not_contains "$out" "Digest source (sm-remote)" \
+    "a remote secondmate's home= is a path on another host and must not be scanned locally"
+  assert_not_contains "$out" "wrong-host-task" \
+    "a remote secondmate must never have another machine's vault reported as its data"
+  assert_not_contains "$out" "digest source (sm-remote):" \
+    "a remote secondmate is skipped by design and must not emit a scan-failure disclosure"
+  assert_contains "$out" "FLEET STATE" \
+    "the rest of the digest must still complete alongside a remote secondmate record"
+
+  pass "a remote secondmate record is skipped rather than scanned against the local filesystem"
+}
+
+# The disclosure line exists to carry the failure REASON. A real vault path can
+# be long enough (an iCloud Drive path, a deeply nested project) to push the
+# line past the shared per-line cap, so the reason must sit ahead of the path
+# and survive the cut.
+test_secondmate_digest_source_disclosure_reason_survives_cap() {
+  local rec root home fakebin mate tasks deep out status disclosure
+  rec=$(new_world digest-source-longpath)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-longpath"
+  deep="a-very-long-vault-directory-segment-standing-in-for-a-real-sync-path"
+  tasks="$mate/$deep/$deep/$deep"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  printf -- '---\ndue: %s\n---\nbody\n' "$(fm_test_day_offset -1)" > "$tasks/hidden.md"
+  chmod 000 "$tasks"
+
+  fm_write_secondmate_meta "$home/state/sm-longpath.meta" "$mate" "firstmate:fm-sm-longpath" alpha
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  chmod 755 "$tasks"
+
+  expect_code 0 "$status" "a long unreadable declared path must not crash session start"
+  disclosure=$(printf '%s\n' "$out" | grep -m1 '^digest source (sm-longpath):' || true)
+  [ -n "$disclosure" ] || \
+    fail "an unreadable declared path must disclose the scan failure"
+  [ "${#tasks}" -gt 160 ] || \
+    fail "this test needs a declared path long enough to exceed the per-line cap (got ${#tasks} characters)"
+  case "$disclosure" in
+    *"section omitted"*) ;;
+    *) fail "the failure reason was cut off the disclosure line by the per-line cap (got: '$disclosure')" ;;
+  esac
+
+  pass "a scan-failure disclosure keeps its reason when a long declared path hits the per-line cap"
+}
+
 test_secondmate_digest_source_malformed_path_fails_safely() {
   local rec root home fakebin mate_dead mate_nopath out status
   rec=$(new_world digest-source-malformed)
@@ -2725,6 +2822,8 @@ test_secondmate_digest_source_prints_overdue_and_due_today
 test_secondmate_digest_source_root_under_archive_named_ancestor
 test_secondmate_digest_source_unreadable_path_discloses
 test_secondmate_digest_source_malformed_path_fails_safely
+test_secondmate_digest_source_remote_record_skipped
+test_secondmate_digest_source_disclosure_reason_survives_cap
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
