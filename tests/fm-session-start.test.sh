@@ -22,7 +22,8 @@
 #   - per-secondmate digest-source opt-in: no ## Digest source heading changes
 #     nothing, a declared path's overdue/due-today counts and titles print
 #     correctly, a vault whose own root sits under an Archive/ ancestor still
-#     counts its tasks, and a malformed or missing declared path fails safely
+#     counts its tasks, an unreadable declared path discloses instead of
+#     reporting zero, and a malformed or missing declared path fails safely
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -1256,14 +1257,17 @@ EOF
   printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/Archived/old-caps.md"
   printf -- '---\ndue: %s\nstatus: done\n---\nbody\n' "$two_ago" > "$tasks/marked-done.md"
   printf -- '---\ndue: %s\nstatus: "completed"\n---\nbody\n' "$today" > "$tasks/marked-completed.md"
+  # A vault synced from a Windows editor writes CRLF; its frontmatter delimiters
+  # still delimit, so this open task counts like any other.
+  printf -- '---\r\ndue: %s\r\n---\r\nbody\r\n' "$yesterday" > "$tasks/crlf-task.md"
 
   fm_write_secondmate_meta "$home/state/sm-digest.meta" "$mate" "firstmate:fm-sm-digest" alpha
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
   assert_contains "$out" "Digest source (sm-digest)" "digest section missing for an opted-in secondmate"
-  assert_contains "$out" "overdue: 2" \
-    "overdue must count each open past-due task exactly once and exclude retired and body-only due: lines"
+  assert_contains "$out" "overdue: 3" \
+    "overdue must count each open past-due task exactly once (CRLF included) and exclude retired and body-only due: lines"
   # The whole rendered line, not a fragment of it: grep -rl emits paths in
   # readdir order, so a wrongly-included title can land in any position.
   due_today_line=$(printf '%s\n' "$out" | grep -m1 '^due today: ' || true)
@@ -1314,6 +1318,52 @@ EOF
     "an Archive/ directory ABOVE the declared root must not hide a task due today"
 
   pass "a vault rooted under an Archive/ ancestor still counts its own tasks"
+}
+
+# A declared path can pass -d and still be unreadable: `[ -d ]` only needs
+# execute permission on the parent. A confident overdue: 0 would be worse than
+# an omission, so the scan discloses that it could not read the vault.
+test_secondmate_digest_source_unreadable_path_discloses() {
+  local rec root home fakebin mate tasks out status yesterday
+  rec=$(new_world digest-source-unreadable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-unreadable"
+  tasks="$mate/vault"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+
+  yesterday=$(fm_test_day_offset -1)
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/hidden.md"
+  chmod 000 "$tasks"
+
+  fm_write_secondmate_meta "$home/state/sm-unreadable.meta" "$mate" "firstmate:fm-sm-unreadable" alpha
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  chmod 755 "$tasks"
+
+  expect_code 0 "$status" "an unreadable declared path must not crash session start"
+  assert_contains "$out" "digest source (sm-unreadable):" \
+    "an unreadable declared path must disclose that the scan could not read it"
+  assert_contains "$out" "section omitted" \
+    "the unreadable-path disclosure must say the section was omitted"
+  assert_not_contains "$out" "overdue: 0" \
+    "an unreadable declared path must never report a fabricated overdue count"
+  assert_contains "$out" "FLEET STATE" \
+    "the rest of the digest must still complete after an unreadable declared path"
+
+  pass "an unreadable declared digest-source path discloses instead of reporting zero"
 }
 
 test_secondmate_digest_source_malformed_path_fails_safely() {
@@ -2673,6 +2723,7 @@ test_orphan_status_logs_are_printed
 test_secondmate_digest_source_absent_heading_no_change
 test_secondmate_digest_source_prints_overdue_and_due_today
 test_secondmate_digest_source_root_under_archive_named_ancestor
+test_secondmate_digest_source_unreadable_path_discloses
 test_secondmate_digest_source_malformed_path_fails_safely
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr

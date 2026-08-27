@@ -170,11 +170,16 @@
 # and a `pattern:` line (prose documentation of the fixed convention below, not
 # a second parsing convention to interpret). The scan always applies the one
 # `^due: YYYY-MM-DD` convention the source vault's own task-discovery already
-# uses, so there is only ever one date-matching convention in play: one grep
+# uses, so there is only ever one date-matching convention in play. The date is
+# matched BARE, exactly as that task-discovery matches it; a quoted `due:
+# "2026-01-23"` is deliberately out of scope, because accepting one here would
+# be the second convention this section exists to avoid. The scan is: one grep
 # finds the *.md files carrying such a line, then one awk pass over that whole
 # matched set keeps the `due:` only when it sits inside a file's YAML
 # frontmatter - the block between its leading `---` delimiters - and only the
-# first one. One awk for the set rather than one per file: the fork, not the
+# first one. A trailing CR is stripped before those delimiters are compared, so
+# a vault synced from a Windows editor is read rather than silently dropped.
+# One awk for the set rather than one per file: the fork, not the
 # parse, is what a scan this size actually costs. A body
 # line that happens to start with `due:` is not a task record, and no file is
 # ever counted twice. Finished work is excluded the two ways a markdown task
@@ -197,7 +202,11 @@
 # finish omits only that secondmate's section - and says so on one named line,
 # because an omission an agent cannot see reads as an opt-out that never
 # happened. A scan that fails for any other reason discloses itself the same
-# way, for the same reason. It stays local and synchronous,
+# way, for the same reason - including a declared path that exists but cannot
+# actually be read (a mode-0000 or TCC-protected directory passes the -d guard,
+# and grep then reports it could not read). A fabricated `overdue: 0` is worse
+# than an omission: the agent has no cue at all that the data was dropped.
+# It stays local and synchronous,
 # so it adds no network call and no live agent call. Weekly-review flags are
 # deliberately out of scope: summarizing prose needs more than a grep.
 #
@@ -405,6 +414,7 @@ DIGEST_SOURCE_DUE_RE='^due: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
 DIGEST_SOURCE_DONE_RE='^status:[[:space:]]*[^[:alnum:]]*(done|complete|completed|cancelled|canceled|archived)([^[:alnum:]].*)?$'
 # shellcheck disable=SC2016 # awk owns every $ expression in this literal program.
 DIGEST_SOURCE_AWK='
+  { sub(/\r$/, "") }
   function flush() {
     if (path != "" && !done_task && due != "") print due "\t" path
   }
@@ -431,13 +441,17 @@ DIGEST_SOURCE_AWK='
 DIGEST_SOURCE_SCAN='
   src=${1%/} due_re=$2 done_re=$3 prog=$4
   shopt -s nocasematch
+  grep_rc=0
+  list=$(grep -rl --include="*.md" -e "$due_re" "$src" 2>/dev/null) || grep_rc=$?
+  [ "$grep_rc" -le 1 ] || exit "$grep_rc"
   files=()
   while IFS= read -r file; do
+    [ -n "$file" ] || continue
     case "${file#"$src"}" in
       */done/*|*/archive/*|*/archived/*|*/.git/*) continue ;;
     esac
     files+=("$file")
-  done < <(grep -rl --include="*.md" -e "$due_re" "$src" 2>/dev/null)
+  done <<< "$list"
   [ ${#files[@]} -gt 0 ] || exit 0
   printf "%s\0" "${files[@]}" |
     xargs -0 awk -v due_re="$due_re" -v done_re="$done_re" "$prog" 2>/dev/null
@@ -623,9 +637,11 @@ print_status_tail() {
 # print_secondmate_digest_source <meta-file> <id>: the optional per-secondmate
 # overdue/due-today section documented above under DIGEST SOURCE. Prints
 # nothing and never fails when the record is not a secondmate, its charter has
-# no `## Digest source` heading, the heading has no usable `path:` line, that
-# path is not a readable directory, or the bounded scan does not finish - every
-# non-opted-in secondmate's digest stays exactly what it always was.
+# no `## Digest source` heading, the heading has no usable `path:` line, or the
+# declared path is not a directory - every non-opted-in secondmate's digest
+# stays exactly what it always was. A path that IS a directory but whose scan
+# cannot finish or cannot read it prints the one disclosure line instead, since
+# by then the secondmate has opted in and silence would misreport that.
 print_secondmate_digest_source() {
   local meta=$1 id=$2 home charter body path_line src_path today
   local overdue=0 due_today='' scan scan_rc due file title due_num today_num
