@@ -176,8 +176,10 @@
 # block between the leading `---` delimiters - and only the first one. A body
 # line that happens to start with `due:` is not a task record, and no file is
 # ever counted twice. Finished work is excluded the two ways a markdown task
-# vault retires a record: a done/ or archive/ directory on the path, or a
-# frontmatter `status:` of done/completed/cancelled/archived. A completed task
+# vault retires a record: a done/, archive/, or archived/ directory on the path,
+# or a frontmatter `status:` of done/completed/cancelled/archived. Both halves
+# ignore case, because a vault that names those directories Done/ or Archive/
+# retires a task exactly as much as one that lowercases them. A completed task
 # keeps its `due:` line forever, so an unfiltered count would only ever grow
 # and would never describe real work. It prints a count of dates before today
 # (overdue) and the file-name titles of dates equal to today (due today); that
@@ -188,7 +190,9 @@
 # (FM_SESSION_START_DIGEST_SOURCE_TIMEOUT, default 8s) through the same shared
 # fm_run_timed helper the rest of the fleet uses: `path: ~` cannot burn the
 # digest's one shared FM_SESSION_START_TIMEOUT budget, and a scan that does not
-# finish omits only that secondmate's section. It stays local and synchronous,
+# finish omits only that secondmate's section - and says so on one named line,
+# because an omission an agent cannot see reads as an opt-out that never
+# happened. It stays local and synchronous,
 # so it adds no network call and no live agent call. Weekly-review flags are
 # deliberately out of scope: summarizing prose needs more than a grep.
 #
@@ -409,6 +413,7 @@ DIGEST_SOURCE_AWK='
 # shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
 DIGEST_SOURCE_SCAN='
   src=$1 due_re=$2 done_re=$3 prog=$4
+  shopt -s nocasematch
   grep -rl --include="*.md" -e "$due_re" "$src" 2>/dev/null |
   while IFS= read -r file; do
     case "$file" in
@@ -605,7 +610,7 @@ print_status_tail() {
 # non-opted-in secondmate's digest stays exactly what it always was.
 print_secondmate_digest_source() {
   local meta=$1 id=$2 home charter body path_line src_path today
-  local overdue=0 due_today='' scan due file title due_num today_num
+  local overdue=0 due_today='' scan scan_rc due file title due_num today_num
   [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 0
   home=$(fm_meta_get "$meta" home)
   [ -n "$home" ] || return 0
@@ -636,12 +641,19 @@ print_secondmate_digest_source() {
   # The charter owns the path, so the scan's cost is the secondmate's to
   # declare, not this script's to predict: `path: ~` would walk a whole home
   # directory inside the digest's one shared budget and strand every later
-  # stage behind it. The scan therefore takes the shared per-command bound, and
-  # one that does not finish drops through to the caller having printed
-  # nothing at all for this secondmate.
+  # stage behind it. The scan therefore takes the shared per-command bound. A
+  # scan that runs out of that bound says so on one line: silence here would
+  # read as "this secondmate never opted in", which is the one thing an agent
+  # must not conclude when opted-in data was actually dropped.
+  scan_rc=0
   scan=$(fm_run_timed "$DIGEST_SOURCE_TIMEOUT" bash -c "$DIGEST_SOURCE_SCAN" _ \
     "$src_path" "$DIGEST_SOURCE_DUE_RE" "$DIGEST_SOURCE_DONE_RE" "$DIGEST_SOURCE_AWK" \
-    2>/dev/null) || return 0
+    2>/dev/null) || scan_rc=$?
+  if [ "$scan_rc" -eq 124 ]; then
+    fm_cap_line "digest source ($id): scan of $src_path did not finish within ${DIGEST_SOURCE_TIMEOUT}s - section omitted"
+    return 0
+  fi
+  [ "$scan_rc" -eq 0 ] || return 0
 
   today=$(date +%Y-%m-%d)
   today_num=${today//-/}

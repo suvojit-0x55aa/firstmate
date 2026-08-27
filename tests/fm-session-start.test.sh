@@ -1245,10 +1245,13 @@ EOF
   # A body-only `due:` line in a file with no frontmatter is prose, not a task.
   printf -- 'notes about scheduling\ndue: %s\n' "$two_ago" > "$tasks/body-prose.md"
   # Retired work keeps its `due:` line forever, both ways a vault retires it.
-  mkdir -p "$tasks/done" "$tasks/archive"
+  mkdir -p "$tasks/done" "$tasks/archive" "$tasks/Archived"
   printf -- '---\ndue: %s\n---\nbody\n' "$two_ago" > "$tasks/done/finished.md"
   printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/done/finished-today.md"
   printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/archive/old.md"
+  # A vault that capitalizes its retirement directory has retired the task too,
+  # and this one carries no frontmatter status: line to fall back on.
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/Archived/old-caps.md"
   printf -- '---\ndue: %s\nstatus: done\n---\nbody\n' "$two_ago" > "$tasks/marked-done.md"
   printf -- '---\ndue: %s\nstatus: "completed"\n---\nbody\n' "$today" > "$tasks/marked-completed.md"
 
