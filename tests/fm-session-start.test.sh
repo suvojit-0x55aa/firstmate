@@ -19,6 +19,11 @@
 #     blocked row kept whole, the dispatchable queued listing bounded with an
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
+#   - per-secondmate digest-source opt-in: no ## Digest source heading changes
+#     nothing, a declared path's overdue/due-today counts and titles print
+#     correctly, a vault whose own root sits under an Archive/ ancestor still
+#     counts its tasks, an unreadable declared path discloses instead of
+#     reporting zero, and a malformed or missing declared path fails safely
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -1160,6 +1165,341 @@ EOF
   [ "$orphan_count" -eq 1 ] || fail "orphan status log was printed $orphan_count times: $out"
 
   pass "orphan status logs are printed once with bounded tails"
+}
+
+# --- secondmate digest source (charter opt-in, AGENTS.md section 6 "fleet
+# digest" step) -------------------------------------------------------------
+
+# fm_test_day_offset <±days>: today (0) or an offset day, as YYYY-MM-DD.
+# Portable BSD/GNU `date` idiom (fm-watch-triage.test.sh's set_mtime uses the
+# same `date -r` / `date -d @` fallback pair for epoch conversion).
+fm_test_day_offset() {
+  local offset=$1 epoch out
+  epoch=$(( $(date +%s) + offset * 86400 ))
+  if out=$(date -r "$epoch" +%Y-%m-%d 2>/dev/null); then
+    printf '%s\n' "$out"
+  else
+    date -d "@$epoch" +%Y-%m-%d
+  fi
+}
+
+test_secondmate_digest_source_absent_heading_no_change() {
+  local rec root home fakebin mate out status
+  rec=$(new_world digest-source-absent)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-absent"
+  mkdir -p "$mate/data"
+  printf '# Firstmate\n\nJust prose. No Digest source heading here.\n' > "$mate/data/charter.md"
+  fm_write_secondmate_meta "$home/state/sm-absent.meta" "$mate" "firstmate:fm-sm-absent" alpha
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "session start must still succeed for a secondmate that has not opted in"
+  assert_contains "$out" "FLEET STATE" "session start never reached the fleet-state digest"
+  assert_contains "$out" "--- sm-absent ---" \
+    "the opted-out secondmate's record was never reached by the Work under way loop"
+  assert_not_contains "$out" "Digest source (sm-absent)" \
+    "a secondmate charter with no ## Digest source heading must not add a digest section"
+
+  pass "a secondmate charter without a ## Digest source heading changes nothing"
+}
+
+test_secondmate_digest_source_prints_overdue_and_due_today() {
+  local rec root home fakebin mate tasks out today yesterday two_ago tomorrow
+  local due_today_line
+  rec=$(new_world digest-source-live)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-digest"
+  tasks="$mate/tasks"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Chief of staff charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+
+## Idle by default
+Prose after the section must not be pulled in.
+EOF
+
+  today=$(fm_test_day_offset 0)
+  yesterday=$(fm_test_day_offset -1)
+  two_ago=$(fm_test_day_offset -2)
+  tomorrow=$(fm_test_day_offset 1)
+  # An open task carrying a second `due:` line in its BODY is still one task:
+  # the frontmatter block is the record, the body is prose.
+  printf -- '---\ndue: %s\n---\nbody\ndue: %s\n' "$yesterday" "$two_ago" > "$tasks/overdue-a.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$two_ago" > "$tasks/overdue-b.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/today-only.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$tomorrow" > "$tasks/future.md"
+  printf -- 'no frontmatter at all\n' > "$tasks/no-date.md"
+  # A body-only `due:` line in a file with no frontmatter is prose, not a task.
+  printf -- 'notes about scheduling\ndue: %s\n' "$two_ago" > "$tasks/body-prose.md"
+  # Retired work keeps its `due:` line forever, both ways a vault retires it.
+  mkdir -p "$tasks/done" "$tasks/archive" "$tasks/Archived"
+  printf -- '---\ndue: %s\n---\nbody\n' "$two_ago" > "$tasks/done/finished.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/done/finished-today.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/archive/old.md"
+  # A vault that capitalizes its retirement directory has retired the task too,
+  # and this one carries no frontmatter status: line to fall back on.
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/Archived/old-caps.md"
+  printf -- '---\ndue: %s\nstatus: done\n---\nbody\n' "$two_ago" > "$tasks/marked-done.md"
+  printf -- '---\ndue: %s\nstatus: "completed"\n---\nbody\n' "$today" > "$tasks/marked-completed.md"
+  # A vault synced from a Windows editor writes CRLF; its frontmatter delimiters
+  # still delimit, so this open task counts like any other.
+  printf -- '---\r\ndue: %s\r\n---\r\nbody\r\n' "$yesterday" > "$tasks/crlf-task.md"
+
+  fm_write_secondmate_meta "$home/state/sm-digest.meta" "$mate" "firstmate:fm-sm-digest" alpha
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Digest source (sm-digest)" "digest section missing for an opted-in secondmate"
+  assert_contains "$out" "overdue: 3" \
+    "overdue must count each open past-due task exactly once (CRLF included) and exclude retired and body-only due: lines"
+  # The whole rendered line, not a fragment of it: grep -rl emits paths in
+  # readdir order, so a wrongly-included title can land in any position.
+  due_today_line=$(printf '%s\n' "$out" | grep -m1 '^due today: ' || true)
+  [ "$due_today_line" = "due today: today-only" ] || \
+    fail "due-today must render exactly the one open task due today, in any scan order (got: '$due_today_line')"
+  assert_not_contains "$out" "finished-today" "a task retired under done/ was wrongly listed as due today"
+  assert_not_contains "$out" "marked-completed" "a task with a completed frontmatter status was wrongly listed as due today"
+
+  pass "an opted-in secondmate's digest source prints the correct overdue count and due-today title"
+}
+
+# A retirement directory only retires a task when it sits BELOW the declared
+# root. A vault that simply lives in ~/Documents/Archive/ has retired nothing,
+# so matching the whole absolute path would silently zero every count.
+test_secondmate_digest_source_root_under_archive_named_ancestor() {
+  local rec root home fakebin mate tasks out today yesterday
+  rec=$(new_world digest-source-ancestor)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-ancestor"
+  tasks="$mate/Documents/Archive/cos/tasks"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Chief of staff charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+
+  today=$(fm_test_day_offset 0)
+  yesterday=$(fm_test_day_offset -1)
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/still-open.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/due-now.md"
+
+  fm_write_secondmate_meta "$home/state/sm-ancestor.meta" "$mate" "firstmate:fm-sm-ancestor" alpha
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "Digest source (sm-ancestor)" "digest section missing for an opted-in secondmate"
+  assert_contains "$out" "overdue: 1" \
+    "an Archive/ directory ABOVE the declared root must not retire the tasks under it"
+  assert_contains "$out" "due today: due-now" \
+    "an Archive/ directory ABOVE the declared root must not hide a task due today"
+
+  pass "a vault rooted under an Archive/ ancestor still counts its own tasks"
+}
+
+# A declared path can pass -d and still be unreadable: `[ -d ]` only needs
+# execute permission on the parent. A confident overdue: 0 would be worse than
+# an omission, so the scan discloses that it could not read the vault.
+test_secondmate_digest_source_unreadable_path_discloses() {
+  local rec root home fakebin mate tasks out status yesterday
+  rec=$(new_world digest-source-unreadable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-unreadable"
+  tasks="$mate/vault"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+
+  yesterday=$(fm_test_day_offset -1)
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/hidden.md"
+  chmod 000 "$tasks"
+
+  fm_write_secondmate_meta "$home/state/sm-unreadable.meta" "$mate" "firstmate:fm-sm-unreadable" alpha
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  chmod 755 "$tasks"
+
+  expect_code 0 "$status" "an unreadable declared path must not crash session start"
+  assert_contains "$out" "digest source (sm-unreadable):" \
+    "an unreadable declared path must disclose that the scan could not read it"
+  assert_contains "$out" "section omitted" \
+    "the unreadable-path disclosure must say the section was omitted"
+  assert_not_contains "$out" "overdue: 0" \
+    "an unreadable declared path must never report a fabricated overdue count"
+  assert_contains "$out" "FLEET STATE" \
+    "the rest of the digest must still complete after an unreadable declared path"
+
+  pass "an unreadable declared digest-source path discloses instead of reporting zero"
+}
+
+# A remote secondmate's home= names a path on ITS host. The scan is local and
+# synchronous by design, so the record is skipped outright rather than having
+# that path read against this machine's filesystem - which, on a fleet that
+# provisions the same home layout on both hosts, would report another machine's
+# vault as this secondmate's data.
+test_secondmate_digest_source_remote_record_skipped() {
+  local rec root home fakebin mate tasks out status yesterday today
+  rec=$(new_world digest-source-remote)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-remote"
+  tasks="$mate/tasks"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  yesterday=$(fm_test_day_offset -1)
+  today=$(fm_test_day_offset 0)
+  printf -- '---\ndue: %s\n---\nbody\n' "$yesterday" > "$tasks/late.md"
+  printf -- '---\ndue: %s\n---\nbody\n' "$today" > "$tasks/wrong-host-task.md"
+
+  # The charter and vault both exist locally, exactly as a homogeneous fleet
+  # would provision them, so only the remote_host= field can distinguish them.
+  fm_write_secondmate_meta "$home/state/sm-remote.meta" "$mate" "firstmate:fm-sm-remote" alpha
+  printf 'remote_host=%s\n' "fleet-host-b" >> "$home/state/sm-remote.meta"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a remote secondmate record must not crash session start"
+  assert_not_contains "$out" "Digest source (sm-remote)" \
+    "a remote secondmate's home= is a path on another host and must not be scanned locally"
+  assert_not_contains "$out" "wrong-host-task" \
+    "a remote secondmate must never have another machine's vault reported as its data"
+  assert_not_contains "$out" "digest source (sm-remote):" \
+    "a remote secondmate is skipped by design and must not emit a scan-failure disclosure"
+  assert_contains "$out" "FLEET STATE" \
+    "the rest of the digest must still complete alongside a remote secondmate record"
+
+  pass "a remote secondmate record is skipped rather than scanned against the local filesystem"
+}
+
+# The disclosure line exists to carry the failure REASON. A real vault path can
+# be long enough (an iCloud Drive path, a deeply nested project) to push the
+# line past the shared per-line cap, so the reason must sit ahead of the path
+# and survive the cut.
+test_secondmate_digest_source_disclosure_reason_survives_cap() {
+  local rec root home fakebin mate tasks deep out status disclosure
+  rec=$(new_world digest-source-longpath)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate="${root%/root}/mate-longpath"
+  deep="a-very-long-vault-directory-segment-standing-in-for-a-real-sync-path"
+  tasks="$mate/$deep/$deep/$deep"
+  mkdir -p "$mate/data" "$tasks"
+  cat > "$mate/data/charter.md" <<EOF
+# Charter
+
+## Digest source
+path: $tasks
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  printf -- '---\ndue: %s\n---\nbody\n' "$(fm_test_day_offset -1)" > "$tasks/hidden.md"
+  chmod 000 "$tasks"
+
+  fm_write_secondmate_meta "$home/state/sm-longpath.meta" "$mate" "firstmate:fm-sm-longpath" alpha
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  chmod 755 "$tasks"
+
+  expect_code 0 "$status" "a long unreadable declared path must not crash session start"
+  disclosure=$(printf '%s\n' "$out" | grep -m1 '^digest source (sm-longpath):' || true)
+  [ -n "$disclosure" ] || \
+    fail "an unreadable declared path must disclose the scan failure"
+  [ "${#tasks}" -gt 160 ] || \
+    fail "this test needs a declared path long enough to exceed the per-line cap (got ${#tasks} characters)"
+  case "$disclosure" in
+    *"section omitted"*) ;;
+    *) fail "the failure reason was cut off the disclosure line by the per-line cap (got: '$disclosure')" ;;
+  esac
+
+  pass "a scan-failure disclosure keeps its reason when a long declared path hits the per-line cap"
+}
+
+test_secondmate_digest_source_malformed_path_fails_safely() {
+  local rec root home fakebin mate_dead mate_nopath out status
+  rec=$(new_world digest-source-malformed)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  mate_dead="${root%/root}/mate-dead-path"
+  mkdir -p "$mate_dead/data"
+  cat > "$mate_dead/data/charter.md" <<'EOF'
+## Digest source
+path: /this/path/does/not/exist/anywhere/fm-test
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  fm_write_secondmate_meta "$home/state/sm-dead-path.meta" "$mate_dead" "firstmate:fm-sm-dead-path" alpha
+
+  mate_nopath="${root%/root}/mate-no-path-line"
+  mkdir -p "$mate_nopath/data"
+  cat > "$mate_nopath/data/charter.md" <<'EOF'
+## Digest source
+pattern: "due: YYYY-MM-DD" frontmatter field, grep-based, overdue + due-today
+EOF
+  fm_write_secondmate_meta "$home/state/sm-no-path-line.meta" "$mate_nopath" "firstmate:fm-sm-no-path-line" alpha
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "a malformed digest-source declaration must not crash session start"
+  assert_not_contains "$out" "Digest source (sm-dead-path)" \
+    "a declared path that does not exist must omit that secondmate's section rather than fail loudly"
+  assert_not_contains "$out" "Digest source (sm-no-path-line)" \
+    "a heading with no path: line must omit that secondmate's section rather than fail loudly"
+  assert_contains "$out" "FLEET STATE" "the rest of the digest must still complete after a malformed digest-source declaration"
+
+  pass "a malformed or missing declared digest-source path fails safely and omits only that secondmate's section"
 }
 
 # --- session-start secondmate recovery boundary -----------------------------
@@ -2477,6 +2817,13 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_secondmate_digest_source_absent_heading_no_change
+test_secondmate_digest_source_prints_overdue_and_due_today
+test_secondmate_digest_source_root_under_archive_named_ancestor
+test_secondmate_digest_source_unreadable_path_discloses
+test_secondmate_digest_source_malformed_path_fails_safely
+test_secondmate_digest_source_remote_record_skipped
+test_secondmate_digest_source_disclosure_reason_survives_cap
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts

@@ -45,8 +45,9 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       state/.afk, and a cheap per-task endpoint-liveness read:
-#                       read-only, always runs.
+#                       state/.afk, a cheap per-task endpoint-liveness read, and
+#                       (for a secondmate whose charter opted in) its digest-source
+#                       section: read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
@@ -158,6 +159,70 @@
 # may be. Both bounds are safe because the section prints every task's full
 # status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
+#
+# DIGEST SOURCE (per-secondmate, opt-in): for every state/*.meta record with
+# kind=secondmate, the fleet digest checks that secondmate's own
+# <home>/data/charter.md for an optional `## Digest source` heading. Absent
+# heading, absent/non-directory declared path, a record carrying a
+# remote_host= field, or a non-secondmate
+# record all print nothing and change nothing else - opting in is entirely
+# per-secondmate, in the charter file, with zero code changes here. A remote
+# secondmate is skipped because its home= names a path on ITS host: this scan
+# is local and synchronous by design, and reading that path here would either
+# find nothing (reading as an opt-out that never happened) or, on a fleet that
+# provisions the same home layout on both hosts, find a LOCAL vault and report
+# another machine's data as that secondmate's. When
+# present, the heading's body supplies a `path:` line (the directory to scan)
+# and a `pattern:` line (prose documentation of the fixed convention below, not
+# a second parsing convention to interpret). That `path:` must be absolute or
+# `~`-prefixed. A bare relative value is out of scope by convention: this hook
+# never chdir's, so a relative path would resolve against whatever working
+# directory the session-open process happened to inherit, which is the opened
+# project and differs session to session - a directory the secondmate never
+# declared. There is no sensible base to infer one against, so the convention
+# names the base instead. The scan always applies the one
+# `^due: YYYY-MM-DD` convention the source vault's own task-discovery already
+# uses, so there is only ever one date-matching convention in play. The date is
+# matched BARE, exactly as that task-discovery matches it; a quoted `due:
+# "2026-01-23"` is deliberately out of scope, because accepting one here would
+# be the second convention this section exists to avoid. The scan is: one grep
+# finds the *.md files carrying such a line, then one awk pass over that whole
+# matched set keeps the `due:` only when it sits inside a file's YAML
+# frontmatter - the block between its leading `---` delimiters - and only the
+# first one. A trailing CR is stripped before those delimiters are compared, so
+# a vault synced from a Windows editor is read rather than silently dropped.
+# One awk for the set rather than one per file: the fork, not the
+# parse, is what a scan this size actually costs. A body
+# line that happens to start with `due:` is not a task record, and no file is
+# ever counted twice. Finished work is excluded the two ways a markdown task
+# vault retires a record: a done/, archive/, or archived/ directory BELOW the
+# declared root, or a frontmatter `status:` of
+# done/complete/completed/cancelled/canceled/archived - both spellings of
+# cancelled, because a vault picks one and never both.
+# Both halves ignore case, because a vault that names those directories Done/ or
+# Archive/ retires a task exactly as much as one that lowercases them. Only the
+# path below the declared root is read, since a vault that simply lives in
+# ~/Documents/Archive/ has retired nothing. A completed task
+# keeps its `due:` line forever, so an unfiltered count would only ever grow
+# and would never describe real work. It prints a count of dates before today
+# (overdue) and the file-name titles of dates equal to today (due today); that
+# due-today line takes the same per-line cap as the status tails above, since a
+# vault with forty tasks due today would otherwise emit the one unbounded line
+# in this digest. The path is declared by the secondmate rather than by this
+# script, so the scan runs under its own hard bound
+# (FM_SESSION_START_DIGEST_SOURCE_TIMEOUT, default 8s) through the same shared
+# fm_run_timed helper the rest of the fleet uses: `path: ~` cannot burn the
+# digest's one shared FM_SESSION_START_TIMEOUT budget, and a scan that does not
+# finish omits only that secondmate's section - and says so on one named line,
+# because an omission an agent cannot see reads as an opt-out that never
+# happened. A scan that fails for any other reason discloses itself the same
+# way, for the same reason - including a declared path that exists but cannot
+# actually be read (a mode-0000 or TCC-protected directory passes the -d guard,
+# and grep then reports it could not read). A fabricated `overdue: 0` is worse
+# than an omission: the agent has no cue at all that the data was dropped.
+# It stays local and synchronous,
+# so it adds no network call and no live agent call. Weekly-review flags are
+# deliberately out of scope: summarizing prose needs more than a grep.
 #
 # RUNTIME BOUND: the digest is now executed on a session-open hook (see
 # bin/fm-sessionstart-run.sh), which blocks session initialization while it
@@ -351,6 +416,61 @@ QUEUED_LIMIT=${FM_SESSION_START_QUEUED_LIMIT:-20}
 case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
+# DIGEST SOURCE scan (see the header). The `due:` convention is written down
+# once here and handed to both halves of the scan - the grep that finds
+# candidate files and the awk that confirms the match sits in that file's
+# frontmatter - so opting in never introduces a second date convention.
+DIGEST_SOURCE_TIMEOUT=${FM_SESSION_START_DIGEST_SOURCE_TIMEOUT:-8}
+case "$DIGEST_SOURCE_TIMEOUT" in ''|*[!0-9]*|0) DIGEST_SOURCE_TIMEOUT=8 ;; esac
+DIGEST_SOURCE_DUE_RE='^due: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+# The leading [^[:alnum:]]* and the trailing group absorb a quoted YAML scalar
+# without this pattern having to carry quote characters of its own.
+DIGEST_SOURCE_DONE_RE='^status:[[:space:]]*[^[:alnum:]]*(done|complete|completed|cancelled|canceled|archived)([^[:alnum:]].*)?$'
+# shellcheck disable=SC2016 # awk owns every $ expression in this literal program.
+DIGEST_SOURCE_AWK='
+  { sub(/\r$/, "") }
+  function flush() {
+    if (path != "" && !done_task && due != "") print due "\t" path
+  }
+  FNR == 1 {
+    flush()
+    path = FILENAME
+    due = ""
+    done_task = 0
+    infm = ($0 == "---")
+    skip = !infm
+    next
+  }
+  skip { next }
+  infm && $0 == "---" { skip = 1; next }
+  infm && due == "" && $0 ~ due_re {
+    line = $0
+    sub(/^due:[[:space:]]*/, "", line)
+    due = substr(line, 1, 10)
+  }
+  infm && tolower($0) ~ done_re { done_task = 1 }
+  END { flush() }
+'
+# shellcheck disable=SC2016 # Positional parameters expand inside the child bash, not here.
+DIGEST_SOURCE_SCAN='
+  src=${1%/} due_re=$2 done_re=$3 prog=$4
+  shopt -s nocasematch
+  grep_rc=0
+  list=$(grep -rl --include="*.md" -e "$due_re" "$src" 2>/dev/null) || grep_rc=$?
+  [ "$grep_rc" -le 1 ] || exit "$grep_rc"
+  files=()
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    case "${file#"$src"}" in
+      */done/*|*/archive/*|*/archived/*|*/.git/*) continue ;;
+    esac
+    files+=("$file")
+  done <<< "$list"
+  [ ${#files[@]} -gt 0 ] || exit 0
+  printf "%s\0" "${files[@]}" |
+    xargs -0 awk -v due_re="$due_re" -v done_re="$done_re" "$prog" 2>/dev/null
+'
+
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
 
@@ -526,6 +646,87 @@ print_status_tail() {
   while IFS= read -r line || [ -n "$line" ]; do
     fm_cap_line "$line"
   done < <(tail -n "$STATUS_TAIL" "$status")
+}
+
+# print_secondmate_digest_source <meta-file> <id>: the optional per-secondmate
+# overdue/due-today section documented above under DIGEST SOURCE. Prints
+# nothing and never fails when the record is not a secondmate, the record is a
+# remote secondmate, its charter has
+# no `## Digest source` heading, the heading has no usable `path:` line, or the
+# declared path is not a directory - every non-opted-in secondmate's digest
+# stays exactly what it always was. A path that IS a directory but whose scan
+# cannot finish or cannot read it prints the one disclosure line instead, since
+# by then the secondmate has opted in and silence would misreport that.
+print_secondmate_digest_source() {
+  local meta=$1 id=$2 home charter body path_line src_path today
+  local overdue=0 due_today='' scan scan_rc due file title due_num today_num
+  [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 0
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] || return 0
+  home=$(fm_meta_get "$meta" home)
+  [ -n "$home" ] || return 0
+  charter="$home/data/charter.md"
+  [ -f "$charter" ] || return 0
+
+  # The section body is every line after the heading up to the next heading of
+  # any level, or EOF.
+  body=$(awk '
+    found && /^#/ { exit }
+    found        { print }
+    /^## Digest source[[:space:]]*$/ { found = 1 }
+  ' "$charter")
+  [ -n "$body" ] || return 0
+
+  path_line=$(printf '%s\n' "$body" | grep -m1 '^path:') || return 0
+  src_path=${path_line#path:}
+  src_path=$(printf '%s' "$src_path" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  [ -n "$src_path" ] || return 0
+  # shellcheck disable=SC2088 # deliberate: '~/' below is a literal glob
+  # prefix matched against the on-disk path text, not a shell tilde to expand.
+  case "$src_path" in
+    '~') src_path=$HOME ;;
+    '~/'*) src_path=${src_path#'~/'}; src_path="$HOME/$src_path" ;;
+  esac
+  [ -d "$src_path" ] || return 0
+
+  # The charter owns the path, so the scan's cost is the secondmate's to
+  # declare, not this script's to predict: `path: ~` would walk a whole home
+  # directory inside the digest's one shared budget and strand every later
+  # stage behind it. The scan therefore takes the shared per-command bound. A
+  # scan that runs out of that bound says so on one line: silence here would
+  # read as "this secondmate never opted in", which is the one thing an agent
+  # must not conclude when opted-in data was actually dropped.
+  scan_rc=0
+  scan=$(fm_run_timed "$DIGEST_SOURCE_TIMEOUT" bash -c "$DIGEST_SOURCE_SCAN" _ \
+    "$src_path" "$DIGEST_SOURCE_DUE_RE" "$DIGEST_SOURCE_DONE_RE" "$DIGEST_SOURCE_AWK" \
+    2>/dev/null) || scan_rc=$?
+  if [ "$scan_rc" -eq 124 ]; then
+    fm_cap_line "digest source ($id): scan did not finish within ${DIGEST_SOURCE_TIMEOUT}s - section omitted (path: $src_path)"
+    return 0
+  fi
+  if [ "$scan_rc" -ne 0 ]; then
+    fm_cap_line "digest source ($id): scan failed (exit $scan_rc) - section omitted (path: $src_path)"
+    return 0
+  fi
+
+  today=$(date +%Y-%m-%d)
+  today_num=${today//-/}
+  while IFS=$'\t' read -r due file; do
+    [ -n "$due" ] && [ -n "$file" ] || continue
+    due_num=${due//-/}
+    case "$due_num" in ''|*[!0-9]*) continue ;; esac
+    if [ "$due_num" -lt "$today_num" ]; then
+      overdue=$((overdue + 1))
+    elif [ "$due_num" -eq "$today_num" ]; then
+      title=$(basename "$file")
+      title=${title%.*}
+      due_today="${due_today:+$due_today, }$title"
+    fi
+  done <<< "$scan"
+
+  subsection "Digest source ($id)"
+  printf 'path: %s\n' "$src_path"
+  printf 'overdue: %s\n' "$overdue"
+  fm_cap_line "due today: ${due_today:-(none)}"
 }
 
 hash_file_sha256() {
@@ -828,6 +1029,8 @@ for meta in "$STATE"/*.meta; do
   else
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
+
+  print_secondmate_digest_source "$meta" "$id"
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
