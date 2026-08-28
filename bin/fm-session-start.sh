@@ -196,7 +196,9 @@
 # line that happens to start with `due:` is not a task record, and no file is
 # ever counted twice. Finished work is excluded the two ways a markdown task
 # vault retires a record: a done/, archive/, or archived/ directory BELOW the
-# declared root, or a frontmatter `status:` of done/completed/cancelled/archived.
+# declared root, or a frontmatter `status:` of
+# done/complete/completed/cancelled/canceled/archived - both spellings of
+# cancelled, because a vault picks one and never both.
 # Both halves ignore case, because a vault that names those directories Done/ or
 # Archive/ retires a task exactly as much as one that lowercases them. Only the
 # path below the declared root is read, since a vault that simply lives in
