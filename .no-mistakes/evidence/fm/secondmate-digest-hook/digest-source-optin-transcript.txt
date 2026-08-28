@@ -1,0 +1,57 @@
+Work under way (state/*.meta)
+--------------------------------------------------------------------------------
+
+--- chief-of-staff ---
+window=firstmate:fm-cos
+endpoint_task_id=chief-of-staff
+worktree=/tmp/fm-digest-run/w-head/demo-head/chief-of-staff
+project=/tmp/fm-digest-run/w-head/demo-head/chief-of-staff
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=/tmp/fm-digest-run/w-head/demo-head/chief-of-staff
+projects=ops
+endpoint: alive (backend=tmux window=firstmate:fm-cos)
+status tail: (no status file yet: /tmp/fm-digest-run/w-head/demo-head/home/state/chief-of-staff.status)
+
+Digest source (chief-of-staff)
+--------------------------------------------------------------------------------
+path: /tmp/fm-digest-run/w-head/demo-head/chief-of-staff/vault/tasks
+overdue: 3
+due today: ship-the-board-deck, call-the-accountant
+
+--- remote-mate ---
+window=firstmate:fm-remote
+endpoint_task_id=remote-mate
+worktree=/tmp/fm-digest-run/w-head/demo-head/remote-mate
+project=/tmp/fm-digest-run/w-head/demo-head/remote-mate
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=/tmp/fm-digest-run/w-head/demo-head/remote-mate
+projects=alpha
+remote_host=fleet-box-2
+endpoint: alive (backend=tmux window=firstmate:fm-remote)
+status tail: (no status file yet: /tmp/fm-digest-run/w-head/demo-head/home/state/remote-mate.status)
+
+--- scribe ---
+window=firstmate:fm-scribe
+endpoint_task_id=scribe
+worktree=/tmp/fm-digest-run/w-head/demo-head/scribe
+project=/tmp/fm-digest-run/w-head/demo-head/scribe
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=/tmp/fm-digest-run/w-head/demo-head/scribe
+projects=alpha
+endpoint: alive (backend=tmux window=firstmate:fm-scribe)
+status tail: (no status file yet: /tmp/fm-digest-run/w-head/demo-head/home/state/scribe.status)
+
+Orphan status logs (state/*.status without matching .meta)
+--------------------------------------------------------------------------------
+(none)
+
+AFK

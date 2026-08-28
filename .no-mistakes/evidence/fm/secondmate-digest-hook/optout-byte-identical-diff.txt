@@ -1,0 +1,6 @@
+# Requirement (1): no '## Digest source' heading => byte-identical digest
+# base bin/fm-session-start.sh @1fd7ea2 vs HEAD @2f6dbd1, same fixture world,
+# same absolute paths; only the run's own harness PID masked.
+
+$ diff -u optout-base.norm optout-head.norm
+(no differences - 155 identical lines)

@@ -1,0 +1,47 @@
+Work under way (state/*.meta)
+--------------------------------------------------------------------------------
+
+--- mate-missing-path ---
+window=firstmate:fm-gone
+endpoint_task_id=mate-missing-path
+worktree=/tmp/fm-digest-run/w-fail/failsafe/mate-gone
+project=/tmp/fm-digest-run/w-fail/failsafe/mate-gone
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=/tmp/fm-digest-run/w-fail/failsafe/mate-gone
+projects=alpha
+endpoint: alive (backend=tmux window=firstmate:fm-gone)
+status tail: (no status file yet: /tmp/fm-digest-run/w-fail/failsafe/home/state/mate-missing-path.status)
+
+--- mate-no-path ---
+window=firstmate:fm-bad
+endpoint_task_id=mate-no-path
+worktree=/tmp/fm-digest-run/w-fail/failsafe/mate-bad
+project=/tmp/fm-digest-run/w-fail/failsafe/mate-bad
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=/tmp/fm-digest-run/w-fail/failsafe/mate-bad
+projects=alpha
+endpoint: alive (backend=tmux window=firstmate:fm-bad)
+status tail: (no status file yet: /tmp/fm-digest-run/w-fail/failsafe/home/state/mate-no-path.status)
+
+--- mate-unreadable ---
+window=firstmate:fm-locked
+endpoint_task_id=mate-unreadable
+worktree=/tmp/fm-digest-run/w-fail/failsafe/mate-locked
+project=/tmp/fm-digest-run/w-fail/failsafe/mate-locked
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=/tmp/fm-digest-run/w-fail/failsafe/mate-locked
+projects=alpha
+endpoint: alive (backend=tmux window=firstmate:fm-locked)
+status tail: (no status file yet: /tmp/fm-digest-run/w-fail/failsafe/home/state/mate-unreadable.status)
+digest source (mate-unreadable): scan failed (exit 2) - section omitted (path: /tmp/fm-digest-run/w-fail/failsafe/mate-locked/Library/Mobile Documents/com~apple~CloudDocs/Chief of Staff Vault/Operations/Quart [truncated]
+
+Orphan status logs (state/*.status without matching .meta)
