@@ -1,0 +1,89 @@
+Crew isolation from the captain's global Claude Code config - end-to-end evidence
+=================================================================================
+
+How this was produced (both runs, 2026-09-02, Claude Code 2.1.258):
+  1. A real `bin/fm-spawn.sh <id> <project> --scout` with harness=claude spawned a
+     scout into a fresh disposable git worktree. tmux was faked only so the launch
+     command is captured instead of typed; every other path (worktree, state,
+     busy-state arm, the .claude/settings.local.json turn-end wiring) is the real one.
+  2. That exact launch shape was then RUN for real, non-interactively
+     (`--output-format stream-json --verbose -p ...`), inside the spawned worktree,
+     against the captain's live ~/.claude config.
+  3. The scout's own context stream was searched for the three global-hook
+     injections that caused the incident, and firstmate's busy-state record was
+     sampled during and after the turn.
+
+The only difference between the two runs is whether `--setting-sources project,local`
+was passed to the manually executed launch. fm-spawn.sh always emits the flag now,
+so the "launch command" line is identical in both transcripts; the BASELINE run
+deliberately strips it when executing, to reproduce the pre-fix condition.
+
+RESULT
+------
+                                        BASELINE (pre-fix)   FIXED (--setting-sources project,local)
+  "MAGIC KEYWORDS DETECTED" in context          1                          0
+  "boulder never stops" pressure line           1                          0
+  "ULTRAWORK MODE RESTORED" banner              1                          0
+  busy-state busy during the turn              yes                        yes
+  busy-state idle after the turn               yes                        yes
+  <id>.turn-ended marker touched by Stop       yes                        yes
+  model answered (OAuth/keychain auth)         yes                        yes
+
+
+================================ FIXED RUN ======================================
+### launch command firstmate types into the scout pane
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local "$('<repo>/bin/fm-operational-input.sh' encode launch-brief < '<scratch>/home/data/scout-iso-with-flag/brief.md')"
+
+### firstmate's project-local turn-end wiring written into the scout worktree
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"'<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-with-flag' busy --gen 'g1788376083.22893.25260' --source claude-hook --event user-prompt-submit 2>/dev/null || true"}]}],"Stop":[{"hooks":[{"type":"command","command":"touch '/private<scratch>/home/state/scout-iso-with-flag.turn-ended'; '<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-with-flag' idle --gen 'g1788376083.22893.25260' --source claude-hook --event stop 2>/dev/null || true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"'<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-with-flag' idle --gen 'g1788376083.22893.25260' --source claude-hook --event stop-failure 2>/dev/null || true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"'<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-with-flag' idle --gen 'g1788376083.22893.25260' --source claude-hook --event session-end 2>/dev/null || true"}]}]}}
+
+### busy-state record before the turn
+v1 gen=g1788376083.22893.25260 seq=1 state=busy source=fm-spawn event=launch-brief ts=1788376083
+
+### busy-state record sampled WHILE the scout's turn was running
+v1 gen=g1788376083.22893.25260 seq=2 state=busy source=claude-hook event=user-prompt-submit ts=1788376085
+
+### busy-state record after the turn ended (Stop hook)
+v1 gen=g1788376083.22893.25260 seq=4 state=idle source=claude-hook event=session-end ts=1788376092
+
+### turn-end notification marker touched by the Stop hook
+-rw-r--r--@ 1 shin  wheel    0 Sep  3 00:38 scout-iso-with-flag.turn-ended
+
+### captain's global-hook injection seen inside the scout's context
+MAGIC KEYWORDS DETECTED occurrences: 0
+boulder-never-stops pressure occurrences: 0
+ULTRAWORK MODE RESTORED occurrences: 0
+
+### scout final answer (proves OAuth/keychain auth still works)
+"result":"I can't run that command — the harness blocks standalone `sleep` commands to prevent wasting time. The only workarounds available are:\n\n1. **Monitor with a condition** — e.g., wait until a file exists or a process finishes\n2. **run_in_background: true** — start a background task and return immediately (but this wouldn't make me wait the full 25 seconds before replying)\n\nIf you need me to wait for something specific to complete (a build, a file write, a network request), I can use Monitor. Otherwise, what are you trying to accomplish?"
+(scratch worktree removed)
+
+============================= BASELINE RUN (pre-fix) ============================
+(the launch line below is what fm-spawn emits; the executed command dropped
+ --setting-sources project,local to reproduce the leak)
+### launch command firstmate types into the scout pane
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local "$('<repo>/bin/fm-operational-input.sh' encode launch-brief < '<scratch>/home/data/scout-iso-no-flag/brief.md')"
+
+### firstmate's project-local turn-end wiring written into the scout worktree
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"'<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-no-flag' busy --gen 'g1788376100.30889.11985' --source claude-hook --event user-prompt-submit 2>/dev/null || true"}]}],"Stop":[{"hooks":[{"type":"command","command":"touch '/private<scratch>/home/state/scout-iso-no-flag.turn-ended'; '<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-no-flag' idle --gen 'g1788376100.30889.11985' --source claude-hook --event stop 2>/dev/null || true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"'<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-no-flag' idle --gen 'g1788376100.30889.11985' --source claude-hook --event stop-failure 2>/dev/null || true"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"'<repo>/bin/fm-busy-event.sh' apply '/private<scratch>/home/state' 'scout-iso-no-flag' idle --gen 'g1788376100.30889.11985' --source claude-hook --event session-end 2>/dev/null || true"}]}]}}
+
+### busy-state record before the turn
+v1 gen=g1788376100.30889.11985 seq=1 state=busy source=fm-spawn event=launch-brief ts=1788376100
+
+### busy-state record sampled WHILE the scout's turn was running
+v1 gen=g1788376100.30889.11985 seq=2 state=busy source=claude-hook event=user-prompt-submit ts=1788376103
+
+### busy-state record after the turn ended (Stop hook)
+v1 gen=g1788376100.30889.11985 seq=4 state=idle source=claude-hook event=session-end ts=1788376121
+
+### turn-end notification marker touched by the Stop hook
+-rw-r--r--@ 1 shin  wheel    0 Sep  3 00:38 scout-iso-no-flag.turn-ended
+
+### captain's global-hook injection seen inside the scout's context
+MAGIC KEYWORDS DETECTED occurrences: 1
+boulder-never-stops pressure occurrences: 1
+ULTRAWORK MODE RESTORED occurrences: 1
+
+### scout final answer (proves OAuth/keychain auth still works)
+"result":"Waiting for the 25-second background sleep to complete..."
+(scratch worktree removed)

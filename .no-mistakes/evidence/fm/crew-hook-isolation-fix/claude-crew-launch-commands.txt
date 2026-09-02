@@ -1,0 +1,16 @@
+Literal claude launch commands firstmate types into a crewmate pane
+===================================================================
+Produced by driving the real bin/fm-spawn.sh with a fake tmux that records the
+`send-keys -l` payload - i.e. these are the exact command lines a crewmate,
+scout, or profile-flagged ship spawn is launched with. Every claude kind now
+carries --setting-sources project,local immediately after
+--dangerously-skip-permissions, before --model/--effort.
+
+=== crew (ship) claude launch, default profile ===
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local "$('<repo>/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-crew-iso.ZzBt0s/ship/home/data/ship-z1/brief.md')"
+
+=== scout claude launch ===
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local "$('<repo>/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-crew-iso.ZzBt0s/scout/home/data/scout-z1/brief.md')"
+
+=== crew (ship) claude launch, --model sonnet --effort high ===
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local --model 'sonnet' --effort 'high' "$('<repo>/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-crew-iso.ZzBt0s/shipflags/home/data/ship-z2/brief.md')"
