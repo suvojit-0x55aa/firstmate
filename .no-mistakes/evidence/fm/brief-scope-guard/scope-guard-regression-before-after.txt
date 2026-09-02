@@ -1,0 +1,6 @@
+$ (base 2c621d4 bin/fm-brief.sh + target tests) bash tests/fm-brief.test.sh
+not ok - no-mistakes DOD must state the pipeline-widening scope guard
+
+$ (target 48a9167) bash tests/fm-brief.test.sh
+ok - fm-brief.sh: no-mistakes DOD gains the pipeline-widening scope guard beside the existing rules
+ok - fm-brief.sh: --scout and --secondmate scaffolds are unaffected by the no-mistakes scope guard
