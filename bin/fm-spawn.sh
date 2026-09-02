@@ -1135,7 +1135,15 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # --setting-sources project,local suppresses every global hook (both
+    # plugin-registered and hand-written in the captain's ~/.claude/settings.json)
+    # without touching OAuth/keychain auth, the project-local turn-end hook this
+    # script writes below, or project AGENTS.md/CLAUDE.md/.claude/skills (verified
+    # empirically; see the crew-global-config-isolation investigation report). It
+    # does not suppress the global CLAUDE.md/rules/*.md prose itself, which still
+    # loads as inert instruction text - see the harness-adapters skill's claude
+    # section for that residual and how to recognize it.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
