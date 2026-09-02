@@ -82,7 +82,7 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 The single longest script, `tests/fm-pr-check-security.test.sh` at 269682 ms, is the floor for any shard count.
 
 Before this refresh, twelve lane scripts had no hint and fell back to the 20000 ms default.
-Their real durations ranged from 72 ms to 181501 ms, which pushed `portable-serial-3of4` to 1110544 ms of real work against 694447 ms on `portable-serial-1of4`.
+Their real durations ranged from 17 ms to 62323 ms, and that guesswork, together with hints that had drifted since they were measured, pushed `portable-serial-3of4` to 1110544 ms of real work against 694447 ms on `portable-serial-1of4`.
 That 1.6x skew put shard 3 within seconds of the 20-minute job cap on a green main run and over it on a slower PR runner.
 
 Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:

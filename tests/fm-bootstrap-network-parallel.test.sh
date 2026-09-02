@@ -136,7 +136,19 @@ for arg in "\$@"; do
   fi
 done
 if [ "\$slow" -eq 1 ]; then
+  # The fetch window must always close, including when bootstrap's bounded
+  # clone refresh signals its process group at the timeout: an unterminated
+  # window would leave every later probe start looking like an overlap.
+  fetch_window_open=0
+  close_fetch_window() {
+    if [ "\$fetch_window_open" -eq 1 ]; then
+      fetch_window_open=0
+      printf 'END fleet-fetch git fetch\n' >> '$log'
+    fi
+  }
+  trap 'close_fetch_window; exit 143' INT TERM
   printf 'START fleet-fetch git fetch\n' >> '$log'
+  fetch_window_open=1
   # Count the probes logged ahead of this START, before the fetch window
   # opens: more starts than ends means a probe is already in flight and the
   # overlap is on the record. Otherwise hold this fetch open until the next
@@ -144,13 +156,15 @@ if [ "\$slow" -eq 1 ]; then
   # of the 0.4s probe windows - the fetch used to slip through the gap
   # between two sweeps and report no overlap on a loaded machine. A clone
   # refresh that truly ran before or after the sweeps sees no probe start and
-  # gives up at the deadline, which is the failure this fixture is for.
+  # gives up at the deadline, which is the failure this fixture is for. The
+  # hold stays well under the 20s floor on bootstrap's refresh timeout so the
+  # fetch reports its own outcome instead of being killed mid-window.
   probe_starts=\$(grep -c '^START host-' '$log' || true)
   probe_ends=\$(grep -c '^END host-' '$log' || true)
   sleep "\${FM_FAKE_GIT_FETCH_SLEEP:-0.4}"
   if [ "\$probe_starts" -le "\$probe_ends" ] && [ ! -e '$log.overlap-waited' ]; then
     : > '$log.overlap-waited'
-    deadline=\$(( \$(date +%s) + \${FM_FAKE_GIT_FETCH_OVERLAP_WAIT:-20} ))
+    deadline=\$(( \$(date +%s) + \${FM_FAKE_GIT_FETCH_OVERLAP_WAIT:-8} ))
     while [ "\$(date +%s)" -lt "\$deadline" ]; do
       if [ "\$(grep -c '^START host-' '$log' || true)" -gt "\$probe_starts" ]; then
         break
@@ -158,7 +172,8 @@ if [ "\$slow" -eq 1 ]; then
       sleep 0.05
     done
   fi
-  printf 'END fleet-fetch git fetch\n' >> '$log'
+  close_fetch_window
+  trap - INT TERM
 fi
 exec '$real_git' "\$@"
 SH
@@ -179,7 +194,7 @@ starts_before_first_end() { # <log> <pattern>
 
 test_remote_probe_scheduling_keeps_per_mate_lines() { # <parallel|fallback>
   local mode=$1
-  local dir home primary fakebin log out n doctor_overlap liveness_starts fetch_starts
+  local dir home primary fakebin log out n doctor_overlap liveness_starts fetch_starts fetch_ends
   local alpha_root alpha_home bravo_root bravo_home charlie_root charlie_home
   dir="$TMP_ROOT/parallel-lines-$mode"
   home="$dir/home"
@@ -306,6 +321,9 @@ EOF
   fetch_starts=$(grep -c '^START fleet-fetch ' "$log" || true)
   [ "$fetch_starts" -ge 1 ] \
     || fail "clone refresh did not start a fetch to overlap with secondmate probes"$'\n'"$(cat "$log")"
+  fetch_ends=$(grep -c '^END fleet-fetch ' "$log" || true)
+  [ "$fetch_ends" -eq "$fetch_starts" ] \
+    || fail "a clone refresh fetch window never closed (starts=$fetch_starts ends=$fetch_ends), so overlap cannot be judged"$'\n'"$(cat "$log")"
   awk '
     /^START fleet-fetch / { fleet = 1; if (remote) overlap = 1; next }
     /^END fleet-fetch / { fleet = 0; next }
