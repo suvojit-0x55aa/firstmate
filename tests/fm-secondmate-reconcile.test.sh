@@ -284,8 +284,14 @@ test_the_window_is_four_hours() {
   snap="$home/snapshot.json"
   write_snapshot "$snap" mate '{"kind":"terminal_in_flight","ids":["done-row"]}'
   run_notify "$home" "$fakebin" fourhours "$snap" >/dev/null || fail "the first ask failed"
-  # One second short of four hours is still inside; one second past is not.
-  age_cooldown "$home/state" mate 14399
+  # age_cooldown anchors the record against the clock at write time, but the
+  # script reads it seconds later - the run itself takes wall clock - so an
+  # anchor one second inside the window ages past the boundary before it is
+  # read and the cooldown never reports. Leave a minute of slack on the inside
+  # edge, which still pins the window to four hours and not to any other
+  # plausible value. The past-window edge needs no slack: elapsed time only
+  # ages the record further outside.
+  age_cooldown "$home/state" mate 14340
   out=$(run_notify "$home" "$fakebin" fourhours "$snap")
   assert_contains "$out" "cooldown: mate" "the window was shorter than four hours: $out"
   age_cooldown "$home/state" mate 14401

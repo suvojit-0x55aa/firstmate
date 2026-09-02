@@ -137,7 +137,27 @@ for arg in "\$@"; do
 done
 if [ "\$slow" -eq 1 ]; then
   printf 'START fleet-fetch git fetch\n' >> '$log'
+  # Count the probes logged ahead of this START, before the fetch window
+  # opens: more starts than ends means a probe is already in flight and the
+  # overlap is on the record. Otherwise hold this fetch open until the next
+  # probe starts inside it, rather than trusting a fixed sleep to land on one
+  # of the 0.4s probe windows - the fetch used to slip through the gap
+  # between two sweeps and report no overlap on a loaded machine. A clone
+  # refresh that truly ran before or after the sweeps sees no probe start and
+  # gives up at the deadline, which is the failure this fixture is for.
+  probe_starts=\$(grep -c '^START host-' '$log' || true)
+  probe_ends=\$(grep -c '^END host-' '$log' || true)
   sleep "\${FM_FAKE_GIT_FETCH_SLEEP:-0.4}"
+  if [ "\$probe_starts" -le "\$probe_ends" ] && [ ! -e '$log.overlap-waited' ]; then
+    : > '$log.overlap-waited'
+    deadline=\$(( \$(date +%s) + \${FM_FAKE_GIT_FETCH_OVERLAP_WAIT:-20} ))
+    while [ "\$(date +%s)" -lt "\$deadline" ]; do
+      if [ "\$(grep -c '^START host-' '$log' || true)" -gt "\$probe_starts" ]; then
+        break
+      fi
+      sleep 0.05
+    done
+  fi
   printf 'END fleet-fetch git fetch\n' >> '$log'
 fi
 exec '$real_git' "\$@"
