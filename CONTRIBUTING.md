@@ -14,6 +14,8 @@ The attestation must bind to the current PR head commit and report the review, t
 It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
 Because the attestation binds to one commit, any commit added to an already-open PR branch - including fixes the pipeline itself pushes while resolving CI findings - leaves the PR body bound to the previous head and turns the check red with `Pipeline attestation head_sha does not match the current PR head`.
 Recover by pushing the updated branch through the gate again (`git push no-mistakes`) so the pipeline re-signs the PR body against the new head; editing the body by hand does not restore compliance.
+That failure is a branch-state condition, not a repository defect: no source, test, or workflow change can clear it, and any commit written to try moves the head again and re-invalidates the attestation a second time.
+So when the only reported error on `Require no-mistakes` is the `head_sha` mismatch, leave the tree alone and let the next gate push re-sign it; exempting the pipeline's own pushes in `.github/workflows/no-mistakes-required.yml` is not an option either, because that is exactly the "later push passes on an older attestation" case the check exists to catch.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 
 ## Workflow
