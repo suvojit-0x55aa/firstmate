@@ -12,6 +12,8 @@ Pushing through it runs an AI-driven review/test/lint pipeline in an isolated wo
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires both the deterministic signature and a parseable structured attestation from no-mistakes v1.46.0 or newer.
 The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
 It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
+Because the attestation binds to one commit, any commit added to an already-open PR branch - including fixes the pipeline itself pushes while resolving CI findings - leaves the PR body bound to the previous head and turns the check red with `Pipeline attestation head_sha does not match the current PR head`.
+Recover by pushing the updated branch through the gate again (`git push no-mistakes`) so the pipeline re-signs the PR body against the new head; editing the body by hand does not restore compliance.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 
 ## Workflow
