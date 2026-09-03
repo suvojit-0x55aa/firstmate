@@ -41,16 +41,19 @@ jobs:
         run: |
           bin/fm-pr-attestation-await.sh \
             --repo "$GITHUB_REPOSITORY" \
-            --pr "${{ github.event.pull_request.number }}"
+            --pr "${{ github.event.pull_request.number }}" \
+            --head "${{ github.event.pull_request.head.sha }}"
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
         with:
           # Judge the live pull request, not the event payload snapshot. The
           # pipeline pushes the commit and re-signs the body moments later, so
           # the synchronize payload can carry the previous head's attestation
-          # for a PR that is already compliant. These stay empty when the
-          # awaiter could not read the PR, and the action falls back to the
-          # payload on its own.
+          # for a PR that is already compliant. The head stays this run's own
+          # commit, never whatever the branch has drifted to, so a green check
+          # on a commit always means the body attests that commit. These stay
+          # empty when the awaiter could not read the PR, and the action falls
+          # back to the payload on its own.
           pr-body: ${{ steps.pr.outputs.body }}
           pr-head-sha: ${{ steps.pr.outputs.head-sha }}
           pr-head-ref: ${{ steps.pr.outputs.head-ref }}

@@ -19,6 +19,13 @@
 #   fm-pr-attestation-await.sh --repo <owner/name> --pr <number> [options]
 #
 # Options:
+#   --head <sha>            commit this workflow run was triggered for. The
+#                           attestation must bind to *that* commit, and that
+#                           commit - never the live head - is the head handed
+#                           to the gate, so a green check on a commit always
+#                           means the body attests that same commit. Without
+#                           it the awaiter binds against whatever head the
+#                           forge currently reports.
 #   --timeout-seconds <n>   stop waiting after n seconds (default 300)
 #   --interval-seconds <n>  seconds between polls (default 10)
 #   -h, --help              print this header
@@ -35,7 +42,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="$SELF_DIR/fm-pr-attestation-await.sh"
 
 usage() {
-  sed -n '2,30{s/^# \{0,1\}//;p;}' "$SELF"
+  sed -n '2,38{s/^# \{0,1\}//;p;}' "$SELF"
 }
 
 die() {
@@ -49,6 +56,7 @@ note() {
 
 REPO=
 PR=
+HEAD=
 TIMEOUT=300
 INTERVAL=10
 
@@ -68,6 +76,11 @@ while [ "$#" -gt 0 ]; do
     --pr)
       [ "$#" -ge 2 ] || die "--pr requires a pull request number"
       PR=$2
+      shift 2
+      ;;
+    --head)
+      [ "$#" -ge 2 ] || die "--head requires a commit SHA"
+      HEAD=$2
       shift 2
       ;;
     --timeout-seconds)
@@ -98,6 +111,9 @@ case "$PR" in
   '' | *[!0-9]*) die "--pr requires a whole number" ;;
 esac
 [ "$INTERVAL" -gt 0 ] || die "--interval-seconds must be greater than zero"
+case "$HEAD" in
+  *[!0-9a-fA-F]*) die "--head requires a commit SHA" ;;
+esac
 
 # python3 parses the attestation, exactly as the gate action does. gh reads the
 # live pull request. Missing either is not a compliance verdict, so fall back to
@@ -186,12 +202,26 @@ read_fact() {
   cat "$FACTS/$1"
 }
 
+# The commit the gate judges. A check result is recorded against the commit its
+# workflow run was triggered for, so reporting the live head there would let a
+# run certify commit A using an attestation that names some other commit B - a
+# force-push back to an attested commit while this run polls would do exactly
+# that, and the green it leaves behind stays cached on A. Judging the
+# triggering commit keeps "green on A" meaning "the body attests A".
+judged_head() {
+  if [ -n "$HEAD" ]; then
+    printf '%s' "$HEAD"
+  else
+    read_fact head_sha
+  fi
+}
+
 emit_outputs() {
   local delim
   [ -n "${GITHUB_OUTPUT:-}" ] || return 0
   delim="fm-pr-body-$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
   {
-    printf 'head-sha=%s\n' "$(read_fact head_sha)"
+    printf 'head-sha=%s\n' "$(judged_head)"
     printf 'head-ref=%s\n' "$(read_fact head_ref)"
     printf 'author=%s\n' "$(read_fact author)"
     printf 'body<<%s\n' "$delim"
@@ -204,6 +234,7 @@ started=$(date +%s)
 deadline=$((started + TIMEOUT))
 have_facts=0
 bound=0
+superseded=0
 
 while :; do
   if gh api "repos/$REPO/pulls/$PR" > "$WORK/snapshot.json" 2>"$WORK/snapshot.err"; then
@@ -211,13 +242,19 @@ while :; do
       have_facts=1
       head_sha=$(read_fact head_sha)
       attested=$(read_fact attested)
-      if [ -n "$head_sha" ] && [ "$attested" = "$head_sha" ]; then
+      target=$(judged_head)
+      if [ -n "$target" ] && [ "$attested" = "$target" ]; then
         bound=1
+      elif [ -n "$HEAD" ] && [ -n "$head_sha" ] && [ "$head_sha" != "$HEAD" ]; then
+        # The branch moved on. Whatever the pipeline signs next names the new
+        # head, never this run's commit, so more waiting cannot bind it; the
+        # run triggered for the new head is the one that can go green.
+        superseded=1
       fi
     fi
   fi
 
-  [ "$bound" -eq 0 ] || break
+  [ "$bound" -eq 0 ] && [ "$superseded" -eq 0 ] || break
   now=$(date +%s)
   [ "$now" -lt "$deadline" ] || break
   remaining=$((deadline - now))
@@ -238,11 +275,15 @@ fi
 emit_outputs
 
 if [ "$bound" -eq 1 ]; then
-  note "attestation binds to the live PR head $(read_fact head_sha) after ${waited}s"
+  note "attestation binds to PR head $(judged_head) after ${waited}s"
   exit 0
 fi
 
 attested=$(read_fact attested)
 [ -n "$attested" ] || attested='(none)'
-note "attestation still names ${attested} after ${waited}s; the gate will judge the live body against head $(read_fact head_sha)"
+if [ "$superseded" -eq 1 ]; then
+  note "PR head moved to $(read_fact head_sha) after ${waited}s; the gate will judge the live body against the commit this run was triggered for, ${HEAD}"
+  exit 0
+fi
+note "attestation still names ${attested} after ${waited}s; the gate will judge the live body against head $(judged_head)"
 exit 0
