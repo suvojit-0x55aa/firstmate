@@ -202,6 +202,14 @@ Its broader dark-TRUECOLOR placeholder handling and dark-theme tradeoff are docu
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+**Crew isolation from the captain's global Claude Code config (verified 2026-09-02/03, Claude Code 2.1.258; `crew-global-config-isolation` investigation).**
+Every claude crewmate/scout/secondmate launches with `--setting-sources project,local` (the `claude)` case in `launch_template()`), which suppresses every global hook - both plugin-registered (`oh-my-claudecode`, `i-have-adhd`, etc.) and hand-written in the captain's own `~/.claude/settings.json` - without touching OAuth/keychain auth, the per-task turn-end hook in the worktree's own `.claude/settings.local.json`, or project `AGENTS.md`/`CLAUDE.md`/`.claude/skills`.
+The flag drops the entire `user` settings source, not only its hooks, so a captain whose `~/.claude/settings.json` sets `apiKeyHelper`, `env` (a gateway `ANTHROPIC_BASE_URL`, say), or a default `model` has to re-declare those at project or local scope for crew launches to pick them up; this account authenticates over OAuth/keychain, which is unaffected, and this repo sets none of those keys.
+It does not suppress the captain's global `~/.claude/CLAUDE.md` and `~/.claude/rules/*.md` prose itself, which still loads as inert instruction text: no hook forces a crewmate to act on it, but it still competes for context and can read like external pressure.
+If a crewmate reports being told to invoke an unrelated skill, "continue working," "don't stop," or similar pressure or redirection text that does not trace back to its brief or firstmate's own steering, that is very likely this residual leak rather than a real prompt injection.
+The crewmate is right to pause and flag it first; firstmate can then usually confirm-and-dismiss quickly from this fact rather than treating it as a security incident.
+`--bare` and `--safe-mode` were also tried and rejected: `--bare` breaks OAuth/keychain auth entirely, and `--safe-mode` kills the per-task turn-end hook too (`Found 0 total hooks in registry`, with no working escape hatch).
+
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
 The firstmate PRIMARY's own `.claude/settings.json` registers two Stop hooks: `bin/fm-turnend-guard.sh --claude` and the Stop-owned auto-arm `bin/fm-claude-stop-autoarm.sh` (`asyncRewake: true`, `timeout: 28800`), and exiting the guard with status 2 plus stderr reliably forces the model to continue.
