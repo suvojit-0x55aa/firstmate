@@ -336,7 +336,16 @@ SH
   chmod 0755 "$dir/no-mistakes-fixture"
   write_config "$home" '{"tools":[{"name":"no-mistakes","command":"no-mistakes-fixture","version_args":["--version"],"announce_args":["--help"],"announce_pattern":"A new version of no-mistakes is available: [^ ]+ -> [^ ]+"}]}'
   out="$home/out.txt"
-  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=1
+  # The version probe above is what must spend the budget, so the sweep has to
+  # reach it first. The deadline is whole seconds from a whole-second clock, so a
+  # budget of 1 leaves under a second of real room, and the config read before
+  # the first probe can eat all of it on a loaded runner - the sweep then stops
+  # at the tool with "the time budget ran out before no-mistakes" and never
+  # reaches the announcement step this case is about. 3 leaves at least two
+  # seconds of room against a setup cost measured at ~0.15s (0.73s cold), and
+  # stays under FM_TOOL_UPDATE_PROBE_SECS (default 5) so the hung probe is
+  # bounded by what is left of the sweep and runs exactly to the deadline.
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_BUDGET_SECS=3
   report=$(cat "$out")
   assert_contains "$report" "no-mistakes check failed: the time budget ran out before the update announcement was checked" "an announcement source that was never asked was not reported"
   pass "an announcement source the budget could not reach is reported, not read as current"
