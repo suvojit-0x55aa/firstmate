@@ -1,0 +1,17 @@
+=== label: after-fix
+=== repo root under test: /Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X
+=== launch template emitted by launch_template() for a claude crewmate:
+--- busy-state record after arm (fm-spawn's launch arm):
+v1 gen=g1788393422.15226.28399 seq=1 state=busy source=fm-spawn event=launch-brief ts=1788393422
+--- global-hook side-effect counter before run: 1
+=== command: CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local --model haiku -p <probe>
+--- claude exit: 0
+--- crewmate answer:
+adhd-banner: ABSENT
+boulder-pressure: ABSENT
+magic-keywords: ABSENT
+project-readme: ABSENT
+--- stderr (first 20 lines):
+--- busy-state record after the turn (project-local turn-end hooks):
+v1 gen=g1788393422.15226.28399 seq=4 state=idle source=claude-hook event=session-end ts=1788393427
+--- global-hook side-effect counter after run: 1

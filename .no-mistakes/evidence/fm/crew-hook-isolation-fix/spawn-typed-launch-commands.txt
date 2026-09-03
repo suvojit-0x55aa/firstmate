@@ -1,0 +1,22 @@
+# Launch commands firstmate actually types into a crewmate pane
+# Captured live from bin/fm-spawn.sh through the fake-tmux pane in
+# tests/fm-spawn-dispatch-profile.test.sh (the fake tmux records the literal
+# 'send-keys -l' payload), run at HEAD 7687e1d.
+
+## claude ship crewmate, --model sonnet --effort high
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local --model 'sonnet' --effort 'high' "$('/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-launch-capture/fm-spawn-dispatch-profile.rKJqLn/profile-claude/home/data/profile-claude-z2/brief.md')"
+
+## claude crewmate, dispatch profile off (no model/effort flags)
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local "$('/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-launch-capture/fm-spawn-dispatch-profile.rKJqLn/profile-off/home/data/profile-off-z1/brief.md')"
+
+## claude crewmate with the captain's CLAUDE_CONFIG_DIR forwarding (left untouched by this change)
+CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --setting-sources project,local "$('/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-launch-capture/fm-spawn-dispatch-profile.rKJqLn/profile-claude-cfgdir/home/data/profile-claude-cfgdir-z17/brief.md')"
+
+## codex crewmate (unchanged: no --setting-sources)
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex --model 'gpt-5' -c 'model_reasoning_effort="high"' --dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch '/private/tmp/fm-launch-capture/fm-spawn-dispatch-profile.rKJqLn/profile-codex/home/state/profile-codex-z3.turn-ended'\"]" "$('/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-launch-capture/fm-spawn-dispatch-profile.rKJqLn/profile-codex/home/data/profile-codex-z3/brief.md')"
+
+## grok crewmate (unchanged)
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS grok --always-approve --model 'grok-4' --reasoning-effort 'high' "$('/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-launch-capture/fm-spawn-dispatch-profile.rKJqLn/profile-grok/home/data/profile-grok-z5/brief.md')"
+
+## opencode crewmate (unchanged)
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt "$('/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-operational-input.sh' encode launch-brief < '/tmp/fm-launch-capture/fm-spawn-dispatch-profile.rKJqLn/profile-opencode/home/data/profile-opencode-z7/brief.md')"

@@ -1,0 +1,31 @@
+# Hook registry and hook execution, from Claude Code's own --debug-file log
+# Same probe prompt, same scratch project, same project-local turn-end hooks.
+
+## BEFORE (launch string without --setting-sources, i.e. base commit 2c621d4 behaviour)
+2026-09-02T23:56:55.904Z [DEBUG] Registered 34 hooks from 9 plugins
+  ran: [DEBUG] SessionEnd:other [/Users/shin/.claude/hooks/peon-ping/peon.sh]
+  ran: [DEBUG] SessionEnd:other [node
+  ran: [DEBUG] SessionEnd:other [node
+  ran: [DEBUG] SessionEnd:other [node
+  ran: [DEBUG] SessionEnd:other [/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-busy-event.sh
+  ran: [DEBUG] SessionEnd:other [node
+
+## AFTER (launch string with --setting-sources project,local, HEAD 7687e1d)
+2026-09-02T23:57:03.003Z [DEBUG] Registered 0 hooks from 0 plugins
+2026-09-02T23:57:03.530Z [DEBUG] Hooks: Found 0 total hooks in registry
+  ran: [DEBUG] SessionEnd:other [/Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M1HZSGQKAAT5G4VJG27Q1F9X/bin/fm-busy-event.sh
+
+## The leaked text itself, straight from Claude Code's hook log
+
+### BEFORE - global hooks injected into the crewmate's context
+  Hook SessionStart:startup (SessionStart) success:\nADHD MODE ACTIVE (always-on). The ruleset below applies to every response. \"stop adhd mode\" turns it off for this session; delete /Users/shin/.cla
+  Hook SessionStart:startup (SessionStart) success:\n{\"continue\":true,\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<session-restore>\\n\\n[ULTRAWORK MODE RESTORE
+  Hook SessionStart:startup (SessionStart) success:\npeon-ping update available: 2.7.0 → 2.37.0 — run: curl -fsSL https://raw.githubusercontent.com/PeonPing/peon-ping/main/install.sh | bash\npeon-ping:
+  additionalContext":"<session-restore>\n\n[ULTRAWORK MODE RESTORED]\n\nYou have an active ultrawork session from 2026-09-02T23:51:14.834Z.\nOriginal task: Workspace bou
+  additionalContext":"<session-restore>\n\n[ULTRAWORK MODE RESTORED]\n\nYou have an active ultrawork session from 2026-09-02T23:51:14.834Z.\nOriginal task: Workspace bou
+
+### AFTER - same greps against the isolated run
+  SessionStart hook successes: 0
+  additionalContext injections: 0
+  occurrences of ADHD MODE ACTIVE / ULTRAWORK MODE RESTORED / MAGIC KEYWORDS DETECTED: 0
+  (before-fix count of the same three strings: 7)
