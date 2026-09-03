@@ -66,7 +66,7 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
 The hints came from the `fm-test-timing-portable-serial-*` artifacts of green CI run [33177835155](https://github.com/suvojit-0x55aa/firstmate/actions/runs/33177835155) on 2026-08-28, where the lane ran 130 scripts in 3364754 ms of serial work.
 Every script in the lane on that run has a measured hint, so nothing currently falls back to the default weight.
-A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
+A script with no hint gets the `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default, a neutral guess near the measured per-script mean rather than a safe overestimate, so an unmeasured script can be weighed well under its real cost.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for a shard to time out.
