@@ -885,7 +885,7 @@ cmd_list() {
     fm_procevent_claim_state_locked "$id"
     case "$?" in 0) owner=live ;; 1) owner=none ;; 3) owner=orphaned ;; *) owner=uncertain ;; esac
     fm_procevent_source_lock_release "$id"
-    pending=$(fm_procevent_pending "$STATE" | grep -c "/$id\." || true)
+    pending=$(fm_procevent_pending_count "$STATE" "$id")
     printf '%-28s %-12s %-10s %s\n' "$id" "$adapter" "$owner" "$pending"
   done
 }

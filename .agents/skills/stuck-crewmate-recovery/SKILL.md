@@ -52,3 +52,10 @@ Escalate in order:
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+
+## A crewmate stuck on its own Claude quota
+
+If the pane shows a Claude usage-limit message rather than looping, confusion, or a stale worktree, do not run the interrupt/redirect/relaunch ladder above: quota is account-wide, not per-task, so freeing this one pane changes nothing and a relaunch will hit the same limit immediately.
+Arm `bin/fm-quota-reset-arm.sh <task-id>` once instead; it reads the reset time from `quota-axi`, never from the pane, and wakes firstmate at that time rather than polling the task.
+Its action, `bin/fm-quota-reset-notify.sh`, only re-peeks the task and names the manual state-check and relaunch commands; it never drives lifecycle itself.
+Once woken, decide interrupt, redirect, or relaunch through the ordinary escalation ladder above using the crewmate's actual state at that time.

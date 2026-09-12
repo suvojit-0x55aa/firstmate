@@ -425,6 +425,27 @@ fm_procevent_result_sequence() {
   printf '%s\n' "${base##*.}"
 }
 
+# fm_procevent_pending_count <state> <source-id>
+# How many unhandled captured results belong to exactly this source id. The
+# inbox names a result `<source-id>.<sequence>.result` and a source id may
+# itself contain dots, so ownership is decided by splitting the last dot the
+# way fm_procevent_result_source_id does. A prefix match would let a sibling
+# id - `a.b` against `a` - be counted against the wrong source. The split is
+# inlined rather than delegated because cmd_list calls this once per
+# registered source, and a subshell per pending result would make one listing
+# cost sources x results forks.
+fm_procevent_pending_count() {
+  local state=$1 id=$2 path base count=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    base=${path##*/}
+    base=${base%.result}
+    [ "${base%.*}" = "$id" ] || continue
+    count=$((count + 1))
+  done < <(fm_procevent_pending "$state")
+  printf '%s\n' "$count"
+}
+
 fm_procevent_result_adapter() {
   local result=$1 adapter_file="${1%.result}.adapter" adapter extra
   [ -f "$result" ] && [ ! -L "$result" ] || return 1
