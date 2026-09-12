@@ -6,7 +6,8 @@
 # through FM_QUOTA_AXI_CMD. The suite proves: a fresh arm registers a watch
 # targeting the resolved reset epoch plus buffer, a second arm on a still-
 # live watch is a no-op, a self-heal that cannot record an acknowledgement says
-# why, a heal that ran is disclosed even when the retry then fails, a sibling
+# why, a heal that ran is disclosed even when the retry then fails, a heal that
+# failed is reported as a failure rather than announced as a success, a sibling
 # task id's pending result neither blocks nor
 # is consumed by this arm, a task-id the watch name cannot carry is refused
 # before any quota-axi query, a self-heal that cannot clear its leftover says
@@ -303,9 +304,10 @@ pass "an acknowledgement the self-heal could not record reports its own cause"
 
 # --- a heal is disclosed even when the retry fails for another reason --------
 # The heal succeeds and irreversibly acknowledges the prior fire's outcome, but
-# an unwritable watch directory then blocks the re-arm. Without the disclosure
-# the operator reads only "retire it first" - the step the heal just completed
-# - and never learns an unread outcome was consumed.
+# an unwritable source registry then blocks the re-arm for a reason that has
+# nothing to do with the leftover state. Without the disclosure the operator
+# reads only the registration failure and never learns an unread outcome was
+# consumed on the way there.
 H12="$TMP_ROOT/h-heal-then-fail"; new_home "$H12"
 BLK_NAME="quota-reset-task-omega"
 BLK_SID="when-$BLK_NAME"
@@ -313,16 +315,45 @@ when "$H12" arm "$BLK_NAME" --interval 1 --stable 1 --condition true --action tr
 pe "$H12" start "$BLK_SID" >/dev/null 2>&1
 blk_result=$(printf '%s\n' "$H12/state/procevent-inbox/$BLK_SID".*.result)
 assert_present "$blk_result" "the fire left a captured, unhandled result"
-: > "$H12/state/when/$BLK_SID.fired"
-chmod 555 "$H12/state/when"
+assert_absent "${blk_result%.result}.handled" "the captured result starts out unhandled"
+chmod 555 "$H12/state/procevent"
 
 out=$(arm "$H12" task-omega 2>&1)
 code=$?
-chmod 755 "$H12/state/when"
+chmod 755 "$H12/state/procevent"
 expect_code 1 "$code" "heal-then-blocked-arm: exit code"
 assert_contains "$out" "cannot arm quota-reset watch for task-omega" "the refusal still names the task"
 assert_contains "$out" "self-healed leftover state for $BLK_SID" "the refusal discloses that a heal ran"
+assert_contains "$out" "handled: $BLK_SID" "the disclosure names the outcome the heal consumed"
+assert_present "${blk_result%.result}.handled" "the heal really did spend the unread outcome"
 pass "a heal that ran is disclosed even when the retried arm fails for another reason"
+
+# --- a heal that failed is never announced as a heal that succeeded ----------
+# Retiring cannot remove the leftover watch files here, so nothing was healed
+# and no unread outcome was spent. "self-healed ... before re-arming" would
+# tell the operator the opposite of what happened, on the one surface they read
+# to decide whether a captured outcome still awaits them.
+H13="$TMP_ROOT/h-heal-claim"; new_home "$H13"
+FLS_NAME="quota-reset-task-sigma"
+FLS_SID="when-$FLS_NAME"
+when "$H13" arm "$FLS_NAME" --interval 1 --stable 1 --condition true --action true >/dev/null
+pe "$H13" start "$FLS_SID" >/dev/null 2>&1
+fls_result=$(printf '%s\n' "$H13/state/procevent-inbox/$FLS_SID".*.result)
+assert_present "$fls_result" "the fire left a captured, unhandled result"
+chmod 555 "$H13/state/when"
+
+out=$(arm "$H13" task-sigma 2>&1)
+code=$?
+chmod 755 "$H13/state/when"
+expect_code 1 "$code" "failed-heal disclosure: exit code"
+assert_not_contains "$out" "self-healed leftover state" "a heal that failed is not announced as one that succeeded"
+assert_contains "$out" "the self-heal of leftover state for $FLS_SID did not complete" \
+  "the refusal says plainly that the heal did not complete"
+assert_contains "$out" "the watch file could not be removed" "the refusal carries the reason the heal failed"
+assert_absent "${fls_result%.result}.handled" "a heal that failed spent no unread outcome"
+[ "$(printf '%s\n' "$out" | grep -c "^retired: $FLS_SID$")" = 1 ] ||
+  fail "the heal's output is reported once, not repeated inside the refusal: $out"
+pass "a self-heal that failed is reported as a failure, once, not as a success"
 
 # --- a sibling task's pending result does not block this task ----------------
 # Task ids may contain dots, so `a.b` derives a source id that extends `a`'s

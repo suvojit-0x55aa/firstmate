@@ -198,12 +198,19 @@ fi
 # acknowledging any captured outcome nobody had read, which is irreversible.
 # Report it whichever way the retry then went: on failure the caller otherwise
 # reads only the arm's own message, which names a step the heal already took.
-[ -z "$HEAL_OUT" ] ||
-  printf 'self-healed leftover state for %s before re-arming:\n%s\n' "$SID" "$HEAL_OUT"
+# The header states which of the two happened, because a heal that failed
+# consumed nothing and announcing it as healed says the opposite of the truth.
+if [ -n "$HEAL_OUT" ]; then
+  if [ "$HEAL_STATUS" -eq 0 ]; then
+    printf 'self-healed leftover state for %s before re-arming:\n%s\n' "$SID" "$HEAL_OUT"
+  else
+    printf 'the self-heal of leftover state for %s did not complete:\n%s\n' "$SID" "$HEAL_OUT" >&2
+  fi
+fi
 
 if [ "$STATUS" -ne 0 ]; then
   [ "$HEAL_STATUS" -eq 0 ] ||
-    die "cannot arm quota-reset watch for $TASK_ID: $OUT; the self-heal could not clear it either: $HEAL_OUT"
+    die "cannot arm quota-reset watch for $TASK_ID: $OUT; the self-heal could not clear it either (its output is above)"
   die "cannot arm quota-reset watch for $TASK_ID: $OUT"
 fi
 
