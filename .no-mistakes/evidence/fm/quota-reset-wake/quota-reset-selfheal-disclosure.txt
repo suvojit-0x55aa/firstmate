@@ -1,0 +1,40 @@
+### Case A - a second stuck-quota cycle hits leftover state from the first
+The prior watch fired; nobody read its outcome. Re-arming self-heals and says so.
+
+$ ls state/procevent-inbox/
+  when-quota-reset-task-gamma.1.adapter
+  when-quota-reset-task-gamma.1.result
+
+$ bin/fm-quota-reset-arm.sh task-gamma
+self-healed leftover state for when-quota-reset-task-gamma before re-arming:
+retired: when-quota-reset-task-gamma
+retired: when-quota-reset-task-gamma
+handled: when-quota-reset-task-gamma 1
+armed: when-quota-reset-task-gamma
+starts on the watcher's next cycle; or run: bin/fm-procevent.sh reconcile
+reminder: deterministic, safe, reversible actions only; judgment and destructive actions stay on the wake-and-decide path
+(exit 0)
+
+$ ls state/procevent-inbox/   # the acknowledgement is now durable
+  when-quota-reset-task-gamma.1.adapter
+  when-quota-reset-task-gamma.1.handled
+  when-quota-reset-task-gamma.1.result
+
+
+### Case B - the self-heal itself cannot complete
+state/when is unwritable, so retire cannot remove the leftover watch files.
+Nothing was healed, and nothing may claim it was.
+
+$ bin/fm-quota-reset-arm.sh task-sigma
+the self-heal of leftover state for when-quota-reset-task-sigma did not complete:
+retired: when-quota-reset-task-sigma
+rm: /tmp/fm-quota-e2e.WsdBew/home-b/state/when/when-quota-reset-task-sigma.spec: Permission denied
+rm: /tmp/fm-quota-e2e.WsdBew/home-b/state/when/when-quota-reset-task-sigma.trust: Permission denied
+rm: /tmp/fm-quota-e2e.WsdBew/home-b/state/when/when-quota-reset-task-sigma.fired: Permission denied
+error: the watch file could not be removed and remains on disk: /tmp/fm-quota-e2e.WsdBew/home-b/state/when/when-quota-reset-task-sigma.spec
+error: cannot arm quota-reset watch for task-sigma: error: watch already exists or left state behind: /tmp/fm-quota-e2e.WsdBew/home-b/state/when/when-quota-reset-task-sigma.spec (retire it first); the self-heal could not clear it either (its output is above)
+(exit 1)
+
+$ ls state/procevent-inbox/   # no .handled: the unread outcome survives
+  when-quota-reset-task-sigma.1.adapter
+  when-quota-reset-task-sigma.1.result

@@ -1,0 +1,49 @@
+Scenario: crewmate `parser-refactor` is stuck on a Claude quota limit.
+quota-axi reports the binding all_models window resets at 2026-09-12T14:42:39Z (in ~45s).
+The operator arms a detection-only wake and walks away.
+
+[14:41:54Z] $ bin/fm-quota-reset-epoch.sh --provider claude
+1789224159
+
+[14:41:54Z] $ bin/fm-quota-reset-arm.sh parser-refactor --buffer-secs 0
+armed: when-quota-reset-parser-refactor
+starts on the watcher's next cycle; or run: bin/fm-procevent.sh reconcile
+reminder: deterministic, safe, reversible actions only; judgment and destructive actions stay on the wake-and-decide path
+
+[14:41:54Z] $ bin/fm-procevent.sh list
+SOURCE                       ADAPTER      OWNER      PENDING
+when-quota-reset-parser-refactor when         none       0
+
+[14:41:55Z] --- the watch is now live. Starting its runner (firstmate normally does this
+            on the watcher cycle via `fm-procevent.sh reconcile`). It polls every
+            120s and needs 2 consecutive trues, so it CANNOT fire before the reset.
+
+[14:41:55Z] $ bin/fm-procevent.sh start when-quota-reset-parser-refactor
+retired: when-quota-reset-parser-refactor (adapter classified the captured result terminal)
+not-autohandled: when-quota-reset-parser-refactor (left for the handler; still unacknowledged)
+captured: /tmp/fm-quota-e2e.WsdBew/fm-home/state/procevent-inbox/when-quota-reset-parser-refactor.1.result
+
+[14:45:56Z] --- the runner published a terminal outcome. Firstmate sees it here:
+
+[14:45:56Z] $ bin/fm-procevent.sh list
+no sources registered
+
+[14:45:56Z] $ bin/fm-procevent-when.sh classify <result>
+fired
+
+[14:45:56Z] $ cat <the captured wake document>
+when: when-quota-reset-parser-refactor
+status: fired
+detail: the condition held and the action exited 0
+condition_polls: 3
+action_exit: 0
+output:
+quota reset reached for task parser-refactor - re-peeked pane follows (read-only):
+=== pane tail for parser-refactor (60 lines) ===
+  > implement the parser change
+  Claude usage limit reached. Your limit will reset at 9am.
+  (crewmate idle, awaiting quota)
+---
+This notice is detection-only and takes no action. To resume the task by hand:
+  1. Check current state:  bin/fm-crew-state.sh parser-refactor
+  2. If it is still stuck on the cleared quota, relaunch it:  bin/fm-control.sh parser-refactor relaunch
