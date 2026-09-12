@@ -142,19 +142,29 @@ heal_leftover_registration() {
 
 # Marks every unhandled captured result for this watch's source id handled.
 # Safe to call when there is nothing pending (the loop body then never runs).
+# Ownership is an exact comparison, never a prefix: a sibling task whose id
+# extends this one after a dot owns its own results.
 heal_unhandled_results() {
-  local path base seq
+  local path
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    case "$path" in
-      */"$SID".*.result) ;;
-      *) continue ;;
-    esac
-    base=${path##*/}
-    seq=${base%.result}
-    seq=${seq##*.}
-    "$SCRIPT_DIR/fm-procevent.sh" handled "$SID" "$seq" 2>&1
+    [ "$(fm_procevent_result_source_id "$path")" = "$SID" ] || continue
+    "$SCRIPT_DIR/fm-procevent.sh" handled "$SID" "$(fm_procevent_result_sequence "$path")" 2>&1
   done < <(fm_procevent_pending "$STATE")
+}
+
+# Acknowledging a captured result is irreversible: once its handled marker
+# exists the outcome can never be re-announced. So it only runs on a path that
+# can actually re-arm - when retiring the leftover registration succeeded.
+run_self_heal() {
+  local retire_out results_out
+  retire_out=$(heal_leftover_registration) || {
+    printf '%s\n' "$retire_out"
+    return 1
+  }
+  results_out=$(heal_unhandled_results)
+  printf '%s\n' "$retire_out"
+  [ -z "$results_out" ] || printf '%s\n' "$results_out"
 }
 
 try_arm() {
@@ -171,7 +181,7 @@ STATUS=$?
 if [ "$STATUS" -ne 0 ]; then
   case "$OUT" in
     *"already exists or left state behind"*|*"an unhandled captured result exists for"*)
-      HEAL_OUT=$(heal_leftover_registration; heal_unhandled_results)
+      HEAL_OUT=$(run_self_heal)
       OUT=$(try_arm 2>&1)
       STATUS=$?
       ;;

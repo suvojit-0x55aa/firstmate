@@ -5,7 +5,8 @@
 # bin/fm-procevent-when.sh in an isolated FM_HOME, with quota-axi mocked
 # through FM_QUOTA_AXI_CMD. The suite proves: a fresh arm registers a watch
 # targeting the resolved reset epoch plus buffer, a second arm on a still-
-# live watch is a no-op, a task-id the watch name cannot carry is refused
+# live watch is a no-op, a sibling task id's pending result neither blocks nor
+# is consumed by this arm, a task-id the watch name cannot carry is refused
 # before any quota-axi query, a self-heal that cannot clear its leftover says
 # why, a watch that already fired is re-armed rather than
 # reported as still armed, a help invocation arms nothing at all, the watch's
@@ -246,6 +247,8 @@ STUCK_SID="when-$STUCK_NAME"
 when "$H9" arm "$STUCK_NAME" --interval 1 --stable 1 --condition true --action true >/dev/null
 pe "$H9" start "$STUCK_SID" >/dev/null 2>&1
 assert_present "$H9/state/when/$STUCK_SID.fired" "the fire left its durable marker behind"
+stuck_result=$(printf '%s\n' "$H9/state/procevent-inbox/$STUCK_SID".*.result)
+assert_present "$stuck_result" "the fire left a captured, unhandled result"
 printf 'not-a-valid-claim\n' > "$FM_PROCEVENT_CLAIM_ROOT/$STUCK_SID.claim"
 
 out=$(arm "$H9" task-epsilon 2>&1)
@@ -254,6 +257,34 @@ expect_code 1 "$code" "unhealable leftover: exit code"
 assert_contains "$out" "cannot arm quota-reset watch for task-epsilon" "the refusal still names the task"
 assert_contains "$out" "cannot safely read source ownership" "the refusal carries the reason the self-heal failed"
 pass "a self-heal that cannot clear the leftover reports its own cause, not just 'retire it first'"
+
+# Acknowledging the captured result is irreversible - a handled marker stops
+# fm-procevent's pending list and its re-announcement forever - so a heal that
+# could not clear the leftover must not spend it for nothing.
+assert_absent "${stuck_result%.result}.handled" "an unread outcome keeps its re-announcement when the heal failed"
+assert_present "$stuck_result" "the captured result itself is untouched"
+pass "a failed self-heal leaves the prior fire's captured result still pending"
+
+# --- a sibling task's pending result does not block this task ----------------
+# Task ids may contain dots, so `a.b` derives a source id that extends `a`'s
+# after a dot. Result ownership therefore has to split on the last dot, not
+# prefix-match: an unhandled result belonging to `a.b` is none of `a`'s
+# business and must not refuse `a`'s arm.
+H10="$TMP_ROOT/h-sibling"; new_home "$H10"
+SIB_NAME="quota-reset-a.b"
+SIB_SID="when-$SIB_NAME"
+when "$H10" arm "$SIB_NAME" --interval 1 --stable 1 --condition true --action true >/dev/null
+pe "$H10" start "$SIB_SID" >/dev/null 2>&1
+sib_result=$(printf '%s\n' "$H10/state/procevent-inbox/$SIB_SID".*.result)
+assert_present "$sib_result" "the sibling task left a captured, unhandled result"
+assert_absent "${sib_result%.result}.handled" "the sibling's result starts out unhandled"
+
+out=$(arm "$H10" a --buffer-secs 30 2>&1)
+code=$?
+expect_code 0 "$code" "sibling-result arm exit code: $out"
+assert_contains "$out" "armed: when-quota-reset-a" "task a is armed despite task a.b's pending result"
+assert_absent "${sib_result%.result}.handled" "task a's arm never acknowledged the sibling's result"
+pass "an unhandled result belonging to a sibling task id neither blocks nor is consumed by this arm"
 
 # --- the healed re-arm is itself idempotent ----------------------------------
 out=$(arm "$H4" task-gamma --buffer-secs 30)

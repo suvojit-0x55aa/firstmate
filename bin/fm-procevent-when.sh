@@ -181,7 +181,7 @@ cmd_arm() {
     fi
   done
   local pending
-  pending=$(fm_procevent_pending "$STATE" | grep -c "/$sid\." || true)
+  pending=$(fm_procevent_pending_count "$STATE" "$sid")
   [ "$pending" -eq 0 ] || die "an unhandled captured result exists for $sid; handle it before re-arming"
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
