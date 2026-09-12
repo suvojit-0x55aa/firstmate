@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Arm a detection-only watch that wakes firstmate when a stuck task's quota
+# provider resets, using bin/fm-procevent-when.sh as the condition->action
+# primitive. This never drives task lifecycle - see bin/fm-quota-reset-
+# notify.sh's own header for that boundary.
+#
+# The reset time this reads from quota-axi is account-wide, not per-task:
+# every task stuck on the same account shares one binding window. This arm
+# is still scoped per task (one watch named quota-reset-<task-id>) rather
+# than fleet-wide, on purpose:
+#   - the task-id is exactly the context the caller (stuck-crewmate-recovery,
+#     investigating one specific stuck task) already has in hand;
+#   - the epoch is resolved ONCE here and baked into the condition argv, so
+#     polling never re-queries quota-axi - arming N stuck tasks costs N
+#     one-time lookups at arm time, not N ongoing queries;
+#   - a fleet-wide arm would need new machinery to discover and notify every
+#     currently-stuck task at fire time, which is more moving parts, not
+#     fewer, for a feature that must stay detection-only.
+#
+# Usage: fm-quota-reset-arm.sh <task-id> [--buffer-secs <secs>] [--provider <name>]
+#   --buffer-secs <secs>  extra delay after the reported reset epoch, to
+#                         absorb poll granularity (default: 60)
+#   --provider <name>     quota-axi provider id, passed through to
+#                         fm-quota-reset-epoch.sh (default: claude)
+#
+# Idempotent: if a watch for this task is already armed and has not fired,
+# calling this again is a no-op. If a prior watch for this task fired and
+# was left unretired (its captured result never marked handled, or its
+# spec/trust/fired state never retired), this self-heals - marks the
+# captured result handled and retires the leftover registration - then
+# arms fresh, rather than silently reporting success without actually
+# re-arming, or refusing forever.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+
+# shellcheck source=bin/fm-procevent-lib.sh
+. "$SCRIPT_DIR/fm-procevent-lib.sh"
+
+POLL_INTERVAL_SECS=120
+BUFFER_DEFAULT_SECS=60
+
+TASK_ID=${1:-}
+[ -n "$TASK_ID" ] || die "usage: fm-quota-reset-arm.sh <task-id> [--buffer-secs <secs>] [--provider <name>]"
+shift
+
+BUFFER_SECS=$BUFFER_DEFAULT_SECS
+PROVIDER=claude
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --buffer-secs)
+      [ $# -ge 2 ] || die "--buffer-secs requires a value"
+      case "$2" in ''|*[!0-9]*) die "--buffer-secs must be a non-negative integer" ;; esac
+      BUFFER_SECS=$2
+      shift 2
+      ;;
+    --provider)
+      [ $# -ge 2 ] || die "--provider requires a value"
+      PROVIDER=$2
+      shift 2
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+case "$TASK_ID" in
+  *[!A-Za-z0-9._-]*) die "task-id must be path-safe (letters, digits, dot, dash, underscore): $TASK_ID" ;;
+esac
+
+NAME="quota-reset-$TASK_ID"
+SID="when-$NAME"
+
+# --- idempotency: leave a genuinely still-active watch untouched -----------
+row=$("$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null | awk -v sid="$SID" '$1 == sid { print; found=1 } END { exit !found }')
+if [ -n "$row" ]; then
+  pending=$(printf '%s\n' "$row" | awk '{print $NF}')
+  if [ "$pending" = 0 ]; then
+    printf 'already armed: %s (task %s) - nothing to do\n' "$SID" "$TASK_ID"
+    exit 0
+  fi
+  # Registered with a pending captured result: leftover from a prior fired
+  # cycle, not a live watch. Fall through to resolve-and-self-heal below.
+fi
+
+# --- resolve the target epoch once, up front --------------------------------
+EPOCH=$("$SCRIPT_DIR/fm-quota-reset-epoch.sh" --provider "$PROVIDER") ||
+  die "cannot resolve quota reset time from quota-axi for provider $PROVIDER; not arming"
+TARGET=$((EPOCH + BUFFER_SECS))
+
+# --- self-heal helpers -------------------------------------------------------
+# Retiring is safe even when there is nothing to retire: fm-procevent-when.sh
+# retire only fails when the watch was never armed at all, which the retry
+# below reports through the normal die() path if arming still fails after.
+heal_leftover_registration() {
+  "$SCRIPT_DIR/fm-procevent-when.sh" retire "$NAME" >/dev/null 2>&1
+}
+
+# Marks every unhandled captured result for this watch's source id handled.
+# Safe to call when there is nothing pending (the loop body then never runs).
+heal_unhandled_results() {
+  local path base seq
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      */"$SID".*.result) ;;
+      *) continue ;;
+    esac
+    base=${path##*/}
+    seq=${base%.result}
+    seq=${seq##*.}
+    "$SCRIPT_DIR/fm-procevent.sh" handled "$SID" "$seq" >/dev/null 2>&1
+  done < <(fm_procevent_pending "$STATE")
+}
+
+try_arm() {
+  "$SCRIPT_DIR/fm-procevent-when.sh" arm "$NAME" \
+    --interval "$POLL_INTERVAL_SECS" \
+    --condition "$SCRIPT_DIR/fm-time-reached.sh" "$TARGET" \
+    --action "$SCRIPT_DIR/fm-quota-reset-notify.sh" "$TASK_ID"
+}
+
+OUT=$(try_arm 2>&1)
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then
+  case "$OUT" in
+    *"already exists or left state behind"*|*"an unhandled captured result exists for"*)
+      heal_leftover_registration
+      heal_unhandled_results
+      OUT=$(try_arm 2>&1)
+      STATUS=$?
+      ;;
+  esac
+fi
+
+[ "$STATUS" -eq 0 ] || die "cannot arm quota-reset watch for $TASK_ID: $OUT"
+
+printf '%s\n' "$OUT"
