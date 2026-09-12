@@ -148,6 +148,36 @@ expect_code 1 "$code" "no all_models scope: exit code"
 assert_contains "$out" "error:" "no all_models scope: reports a loud error"
 pass "a response with no all_models limiting window fails loudly instead of guessing"
 
+# --- a limiting window with no windows[] entry ---------------------------------
+# The unresolvable id must not be dropped in favour of whatever else resolved:
+# five_hour is the window that actually binds availability here, and answering
+# with seven_day's later epoch would spend the single wake days late.
+CMD=$(fake_quota_axi missing-window "quota-axi 0.1.32" <<'SH'
+cat <<'JSON'
+{"providers":[{"provider":"claude","windows":[{"id":"seven_day","resetsAt":"2026-09-17T18:00:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["five_hour","seven_day"]}]}}]}
+JSON
+SH
+)
+out=$(FM_QUOTA_AXI_CMD="$CMD" "$EPOCH_SH" 2>&1)
+code=$?
+expect_code 1 "$code" "unresolvable limiting window: exit code"
+assert_contains "$out" "error:" "unresolvable limiting window: reports a loud error"
+assert_contains "$out" "five_hour" "the error names the window that could not be resolved"
+pass "a limiting window absent from windows[] fails loudly instead of answering with a later epoch"
+
+# --- a limiting window whose resetsAt is null ---------------------------------
+CMD=$(fake_quota_axi null-resets-at "quota-axi 0.1.32" <<'SH'
+cat <<'JSON'
+{"providers":[{"provider":"claude","windows":[{"id":"five_hour","resetsAt":null},{"id":"seven_day","resetsAt":"2026-09-17T18:00:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["five_hour","seven_day"]}]}}]}
+JSON
+SH
+)
+out=$(FM_QUOTA_AXI_CMD="$CMD" "$EPOCH_SH" 2>&1)
+code=$?
+expect_code 1 "$code" "null resetsAt: exit code"
+assert_contains "$out" "error:" "null resetsAt: reports a loud error"
+pass "a limiting window with a null resetsAt fails loudly instead of answering with a later epoch"
+
 # --- unparseable resetsAt ------------------------------------------------------
 CMD=$(fake_quota_axi bad-timestamp "quota-axi 0.1.32" <<'SH'
 cat <<'JSON'

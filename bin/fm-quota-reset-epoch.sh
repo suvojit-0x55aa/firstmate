@@ -14,7 +14,9 @@
 #      FM_QUOTA_AXI_TIMEOUT_SECS, default 15s).
 #   2. Find the provider's effectiveAvailability entry with scope=all_models,
 #      then read its limitingWindowIds - the window(s) actually binding
-#      account-wide availability right now.
+#      account-wide availability right now. Every named id must resolve to a
+#      windows[] entry; one that does not is a loud failure, never a window
+#      quietly dropped from the comparison.
 #   3. Look up each named window in windows[], parse every one of their
 #      ISO8601 resetsAt values to an epoch second, and print the SMALLEST
 #      (an account can be bound by more than one limiting window at once;
@@ -24,7 +26,8 @@
 #
 # On any failure - quota-axi missing/incompatible, the query timing out or
 # exiting nonzero, or a response with no all_models scope, no limiting
-# windows, or an unparseable resetsAt - this prints nothing and exits
+# windows, a limiting window id absent from windows[], or an unparseable
+# resetsAt - this prints nothing and exits
 # nonzero with a distinct message on stderr. There is no silent fallback:
 # a caller must never treat a missing epoch as "no reset pending".
 #
@@ -72,15 +75,19 @@ JSON=$(fm_quota_axi_query_json "$PROVIDER" "$TIMEOUT_SECS" "$QUOTA_AXI_CMD") ||
 printf '%s\n' "$JSON" | jq -e . >/dev/null 2>&1 ||
   die "quota-axi returned output that is not valid JSON"
 
-RESETS_AT_LIST=$(printf '%s\n' "$JSON" | jq -r --arg provider "$PROVIDER" '
+# One line per limiting window id, as "<id><TAB><resetsAt>". The resetsAt
+# field is empty when the id names no windows[] entry at all, which the loop
+# below refuses rather than comparing whatever happened to resolve.
+LIMITING_WINDOWS=$(printf '%s\n' "$JSON" | jq -r --arg provider "$PROVIDER" '
   (.providers[]? | select(.provider == $provider)) as $p |
   ($p.quotaSemantics.effectiveAvailability[]? | select(.scope == "all_models")) as $avail |
   ($avail.limitingWindowIds // [])[] as $wid |
-  ($p.windows[]? | select(.id == $wid) | .resetsAt)
+  [$p.windows[]? | select(.id == $wid)] as $matched |
+  "\($wid)\t\(if ($matched | length) == 0 then "" else ($matched[0].resetsAt // "null") end)"
 ' 2>/dev/null)
 
-[ -n "$RESETS_AT_LIST" ] ||
-  die "quota-axi response for provider $PROVIDER has no all_models limiting window with a resolvable resetsAt"
+[ -n "$LIMITING_WINDOWS" ] ||
+  die "quota-axi response for provider $PROVIDER has no all_models limiting window"
 
 # Normalize ISO8601 for portable parsing: drop fractional seconds, and turn a
 # trailing Z or +HH:MM/-HH:MM offset into the form each date implementation
@@ -105,18 +112,20 @@ resets_at_to_epoch() {
 # the same instant with different UTC offsets, and a lexicographic comparison
 # would then pick the later one and wake firstmate after the quota cleared.
 EPOCH=''
-while IFS= read -r resets_at; do
-  [ -n "$resets_at" ] || continue
+while IFS=$'\t' read -r wid resets_at; do
+  [ -n "$wid" ] || continue
+  [ -n "$resets_at" ] ||
+    die "quota-axi response for provider $PROVIDER names limiting window $wid, which has no entry in windows[]"
   candidate=$(resets_at_to_epoch "$resets_at") ||
-    die "could not parse resetsAt timestamp: $resets_at"
+    die "could not parse resetsAt timestamp for limiting window $wid: $resets_at"
   if [ -z "$EPOCH" ] || [ "$candidate" -lt "$EPOCH" ]; then
     EPOCH=$candidate
   fi
 done <<EOF
-$RESETS_AT_LIST
+$LIMITING_WINDOWS
 EOF
 
 [ -n "$EPOCH" ] ||
-  die "quota-axi response for provider $PROVIDER has no all_models limiting window with a resolvable resetsAt"
+  die "quota-axi response for provider $PROVIDER has no all_models limiting window"
 
 printf '%s\n' "$EPOCH"

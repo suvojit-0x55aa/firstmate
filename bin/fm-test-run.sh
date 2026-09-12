@@ -978,8 +978,16 @@ families_for_changed_path() {
       ;;
     bin/fm-session-start.sh|bin/fm-bootstrap.sh|bin/fm-fleet-sync.sh|\
     bin/fm-sessionstart-nudge.sh|bin/fm-startup-network.sh|bin/fm-tangle*|bin/fm-update.sh|\
-    bin/fm-gate-refuse*|bin/fm-lock*|bin/fm-quota-axi-lib.sh)
+    bin/fm-gate-refuse*|bin/fm-lock*)
       printf '%s\n' session-bootstrap
+      ;;
+    bin/fm-quota-axi-lib.sh)
+      # Two consumers of the shared version floor and timeout mechanics:
+      # bin/fm-bootstrap.sh's MISSING diagnostic (session-bootstrap) and
+      # bin/fm-quota-reset-epoch.sh's --json query, whose suite is
+      # unclassified and so is named directly rather than by family.
+      printf '%s\n' session-bootstrap
+      printf '%s\n' "__script__:fm-quota-reset-epoch.test.sh"
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

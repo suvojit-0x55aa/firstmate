@@ -57,8 +57,26 @@ expect_code 0 $? "fresh arm exit code"
 assert_contains "$out" "armed: when-quota-reset-task-alpha" "fresh arm reports the canonical source id"
 assert_present "$H/state/when/when-quota-reset-task-alpha.spec" "arm writes the spec"
 target=$((EXPECTED_EPOCH + 90))
-assert_grep "$target" "$H/state/when/when-quota-reset-task-alpha.spec" "the spec's condition targets epoch + buffer"
-pass "a fresh arm registers a watch targeting the resolved epoch plus buffer"
+# The spec is fm-procevent-when.sh's own persisted watch record: header fields,
+# then an `argv:` line followed by condition_argc condition elements and the
+# action elements. Read the condition argv back as a vector rather than
+# grepping the file, so the target has to be the condition's argument and not
+# merely a number appearing somewhere in the record.
+spec="$H/state/when/when-quota-reset-task-alpha.spec"
+spec_field() { sed -n "s/^$1=//p" "$2"; }
+condition_argv() {
+  local file=$1 argc
+  argc=$(spec_field condition_argc "$file")
+  sed -n '/^argv:$/,$p' "$file" | sed -n "2,$((argc + 1))p"
+}
+cond=()
+while IFS= read -r arg; do cond+=("$arg"); done < <(condition_argv "$spec")
+[ "${#cond[@]}" -eq 2 ] || fail "condition argv has ${#cond[@]} elements, want 2: ${cond[*]-}"
+[ "$(basename "${cond[0]}")" = fm-time-reached.sh ] ||
+  fail "condition is ${cond[0]}, want fm-time-reached.sh"
+[ "${cond[1]}" = "$target" ] ||
+  fail "condition target is ${cond[1]}, want $target (resolved epoch + 90s buffer)"
+pass "a fresh arm registers a watch whose condition is fm-time-reached.sh at epoch plus buffer"
 
 # --- a far-future reset cannot expire the watch before its own target --------
 # fm-procevent-when.sh counts the deadline from `armed` and defaults it to one
@@ -83,7 +101,6 @@ out=$(FM_HOME="$H6" FM_QUOTA_AXI_CMD="$FAR_AXI" "$ARM_SH" task-far --buffer-secs
 expect_code 0 $? "far-future arm exit code: $out"
 far_spec="$H6/state/when/when-quota-reset-task-far.spec"
 far_target=$((FAR_EPOCH + 60))
-spec_field() { sed -n "s/^$1=//p" "$2"; }
 armed_at=$(spec_field armed "$far_spec")
 deadline=$(spec_field deadline "$far_spec")
 [ -n "$armed_at" ] && [ -n "$deadline" ] || fail "the spec records no armed/deadline pair"
