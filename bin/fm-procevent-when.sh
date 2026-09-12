@@ -48,7 +48,11 @@
 # retire     Stop the watch: retire the registration and remove the spec, trust
 #            record, and fired marker. Idempotent. Captured results and their
 #            handled acknowledgements are never touched. Warns when the action
-#            had already fired without a captured outcome.
+#            had already fired without a captured outcome; a result owned by a
+#            sibling source id that merely extends this name after a dot never
+#            suppresses that warning. Exit 0 is a proof the leftover state is
+#            really gone - a file that survived removal fails loudly and names
+#            itself - so a caller may act irreversibly on a successful retire.
 # run        The blocking child the generic runner executes; never run it in a
 #            conversational turn. It polls the condition on the registered
 #            cadence, requires the stable count of consecutive trues, claims a

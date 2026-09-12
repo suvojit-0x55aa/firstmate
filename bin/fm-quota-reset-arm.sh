@@ -33,10 +33,16 @@
 # Idempotent: if a watch for this task is already armed and has not fired,
 # calling this again is a no-op. If a prior watch for this task fired and
 # was left unretired (its captured result never marked handled, or its
-# spec/trust/fired state never retired), this self-heals - marks the
-# captured result handled and retires the leftover registration - then
-# arms fresh, rather than silently reporting success without actually
-# re-arming, or refusing forever.
+# spec/trust/fired state never retired), this self-heals - retiring the
+# leftover registration first, and marking the captured result handled only
+# once that retire succeeded - then arms fresh, rather than silently
+# reporting success without actually re-arming, or refusing forever.
+#
+# A self-heal that ran is always reported, whichever way the retried arm then
+# went, because acknowledging a captured outcome nobody had read is
+# irreversible: that outcome can never be re-announced. The report states
+# which of the two happened - the heal completed, or it did not - so a heal
+# that failed is never announced as one that worked.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
