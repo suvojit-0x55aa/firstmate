@@ -5,7 +5,8 @@
 # bin/fm-procevent-when.sh in an isolated FM_HOME, with quota-axi mocked
 # through FM_QUOTA_AXI_CMD. The suite proves: a fresh arm registers a watch
 # targeting the resolved reset epoch plus buffer, a second arm on a still-
-# live watch is a no-op, a help invocation arms nothing at all, the watch's
+# live watch is a no-op, a watch that already fired is re-armed rather than
+# reported as still armed, a help invocation arms nothing at all, the watch's
 # give-up deadline always outlasts its own target, and a watch left fired-
 # with-an-unhandled-result from a prior cycle is healed (marked handled,
 # retired) and re-armed rather than refused forever or silently reported as
@@ -171,6 +172,33 @@ assert_contains "$out" "armed: $SID" "the watch is re-armed after self-healing"
 assert_present "${result%.result}.handled" "self-heal marks the earlier captured result handled"
 assert_present "$H4/state/when/$SID.spec" "self-heal leaves a fresh spec behind"
 pass "a fired-but-unhandled watch is healed (marked handled) and re-armed, not refused forever"
+
+# --- a registered watch that already fired is re-armed, not reported armed ---
+# fm-procevent-when.sh's runner answers `ambiguous` without polling once the
+# fired marker exists, so this state is a spent watch, not a live one. It is
+# reachable whenever the post-fire retire cannot re-prove ownership: the
+# registration survives, firstmate acknowledges the result, and the next stuck
+# cycle arms again. Built here out of public commands only.
+H7="$TMP_ROOT/h-spent"; new_home "$H7"
+SPENT_NAME="quota-reset-task-delta"
+SPENT_SID="when-$SPENT_NAME"
+when "$H7" arm "$SPENT_NAME" --interval 1 --stable 1 --condition true --action true >/dev/null
+pe "$H7" start "$SPENT_SID" >/dev/null 2>&1
+spent_result=$(printf '%s\n' "$H7/state/procevent-inbox/$SPENT_SID".*.result)
+assert_present "$H7/state/when/$SPENT_SID.fired" "the fire left its durable marker behind"
+spent_seq=${spent_result##*/}
+spent_seq=${spent_seq%.result}
+spent_seq=${spent_seq##*.}
+pe "$H7" handled "$SPENT_SID" "$spent_seq" >/dev/null
+pe "$H7" register when "$SPENT_SID" -- "$ROOT/bin/fm-procevent-when.sh" run "$SPENT_SID" >/dev/null
+
+out=$(arm "$H7" task-delta --buffer-secs 30)
+code=$?
+expect_code 0 "$code" "spent-watch re-arm exit code: $out"
+assert_not_contains "$out" "already armed" "a fired watch is not reported as still armed"
+assert_contains "$out" "armed: $SPENT_SID" "the spent watch is armed fresh"
+assert_absent "$H7/state/when/$SPENT_SID.fired" "the stale fired marker is cleared by the re-arm"
+pass "a watch that already fired is re-armed instead of silently reported as still armed"
 
 # --- the healed re-arm is itself idempotent ----------------------------------
 out=$(arm "$H4" task-gamma --buffer-secs 30)

@@ -47,6 +47,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
@@ -96,15 +100,21 @@ NAME="quota-reset-$TASK_ID"
 SID="when-$NAME"
 
 # --- idempotency: leave a genuinely still-active watch untouched -----------
+# A registration alone does not mean the watch is still live. A fire leaves a
+# durable marker behind, and fm-procevent-when.sh's runner answers `ambiguous`
+# without ever polling once that marker exists, so a spent watch must re-arm
+# rather than report success.
+FIRED="$STATE/when/$SID.fired"
 row=$("$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null | awk -v sid="$SID" '$1 == sid { print; found=1 } END { exit !found }')
 if [ -n "$row" ]; then
   pending=$(printf '%s\n' "$row" | awk '{print $NF}')
-  if [ "$pending" = 0 ]; then
+  if [ "$pending" = 0 ] && [ ! -e "$FIRED" ] && [ ! -L "$FIRED" ]; then
     printf 'already armed: %s (task %s) - nothing to do\n' "$SID" "$TASK_ID"
     exit 0
   fi
-  # Registered with a pending captured result: leftover from a prior fired
-  # cycle, not a live watch. Fall through to resolve-and-self-heal below.
+  # Either a captured result is still pending or the watch already fired:
+  # leftover from a prior cycle, not a live watch. Fall through to
+  # resolve-and-self-heal below.
 fi
 
 # --- resolve the target epoch once, up front --------------------------------
