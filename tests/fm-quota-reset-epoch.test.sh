@@ -57,7 +57,28 @@ expect_code 0 $? "multiple limiting windows: exit code"
 [ "$epoch" = "$expected" ] || fail "multiple limiting windows: earliest window did not win (got $epoch, want $expected)"
 pass "picks the earliest resetsAt when more than one window is limiting"
 
+# --- mixed UTC offsets: the earliest true instant wins, not the earliest
+# --- string. 09:20+05:30 is 03:50Z, so it precedes 09:00Z even though it
+# --- sorts after it lexicographically.
+CMD=$(fake_quota_axi good-mixed-offsets "quota-axi 0.1.32" <<'SH'
+cat <<'JSON'
+{"providers":[{"provider":"claude","windows":[{"id":"five_hour","resetsAt":"2026-09-12T09:20:00+05:30"},{"id":"seven_day","resetsAt":"2026-09-12T09:00:00Z"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["five_hour","seven_day"]}]}}]}
+JSON
+SH
+)
+epoch=$(FM_QUOTA_AXI_CMD="$CMD" "$EPOCH_SH" --provider claude)
+expect_code 0 $? "mixed UTC offsets: exit code"
+mixed_expected=$(date -u -d '2026-09-12T03:50:00+00:00' +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S%z' '2026-09-12T03:50:00+0000' +%s)
+[ "$epoch" = "$mixed_expected" ] || fail "mixed UTC offsets: expected $mixed_expected, got $epoch"
+pass "compares limiting windows chronologically when their UTC offsets differ"
+
 # --- default provider is claude ---------------------------------------------
+CMD=$(fake_quota_axi good-default "quota-axi 0.1.32" <<'SH'
+cat <<'JSON'
+{"providers":[{"provider":"claude","windows":[{"id":"five_hour","resetsAt":"2026-09-12T09:20:00+00:00"},{"id":"seven_day","resetsAt":"2026-09-17T18:00:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["seven_day","five_hour"]}]}}]}
+JSON
+SH
+)
 epoch=$(FM_QUOTA_AXI_CMD="$CMD" "$EPOCH_SH")
 [ "$epoch" = "$expected" ] || fail "default provider did not resolve claude's window"
 pass "defaults to provider claude when --provider is omitted"

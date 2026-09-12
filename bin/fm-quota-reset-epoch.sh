@@ -15,10 +15,12 @@
 #   2. Find the provider's effectiveAvailability entry with scope=all_models,
 #      then read its limitingWindowIds - the window(s) actually binding
 #      account-wide availability right now.
-#   3. Look up each named window in windows[] and take the EARLIEST resetsAt
-#      among them (an account can be bound by more than one limiting window
-#      at once; the earliest one is what actually unblocks the account).
-#   4. Parse that ISO8601 timestamp to an epoch second and print it.
+#   3. Look up each named window in windows[], parse every one of their
+#      ISO8601 resetsAt values to an epoch second, and print the SMALLEST
+#      (an account can be bound by more than one limiting window at once;
+#      the earliest one is what actually unblocks the account). Comparing
+#      parsed epochs rather than the raw strings keeps the answer correct
+#      when the windows carry different UTC offsets.
 #
 # On any failure - quota-axi missing/incompatible, the query timing out or
 # exiting nonzero, or a response with no all_models scope, no limiting
@@ -33,6 +35,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+usage() { sed -n '2,${/^set -u$/q; s/^# \{0,1\}//; p;}' "$0"; }
 
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
@@ -46,7 +49,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+      usage
       exit 0
       ;;
     *)
@@ -69,30 +72,51 @@ JSON=$(fm_quota_axi_query_json "$PROVIDER" "$TIMEOUT_SECS" "$QUOTA_AXI_CMD") ||
 printf '%s\n' "$JSON" | jq -e . >/dev/null 2>&1 ||
   die "quota-axi returned output that is not valid JSON"
 
-RESETS_AT=$(printf '%s\n' "$JSON" | jq -r --arg provider "$PROVIDER" '
+RESETS_AT_LIST=$(printf '%s\n' "$JSON" | jq -r --arg provider "$PROVIDER" '
   (.providers[]? | select(.provider == $provider)) as $p |
   ($p.quotaSemantics.effectiveAvailability[]? | select(.scope == "all_models")) as $avail |
   ($avail.limitingWindowIds // [])[] as $wid |
   ($p.windows[]? | select(.id == $wid) | .resetsAt)
-' 2>/dev/null | sort | head -1)
+' 2>/dev/null)
 
-[ -n "$RESETS_AT" ] ||
+[ -n "$RESETS_AT_LIST" ] ||
   die "quota-axi response for provider $PROVIDER has no all_models limiting window with a resolvable resetsAt"
 
 # Normalize ISO8601 for portable parsing: drop fractional seconds, and turn a
 # trailing Z or +HH:MM/-HH:MM offset into the form each date implementation
 # accepts (BSD date wants "+HHMM", GNU date accepts the colon form as-is).
-NORMALIZED=$(printf '%s\n' "$RESETS_AT" | sed -E 's/\.[0-9]+//; s/Z$/+0000/')
-case "$NORMALIZED" in
-  *+[0-9][0-9]:[0-9][0-9]) NORMALIZED=${NORMALIZED%:*}${NORMALIZED##*:} ;;
-  *-[0-9][0-9]:[0-9][0-9]) NORMALIZED=${NORMALIZED%:*}${NORMALIZED##*:} ;;
-esac
+resets_at_to_epoch() {
+  local raw=$1 normalized epoch
+  normalized=$(printf '%s\n' "$raw" | sed -E 's/\.[0-9]+//; s/Z$/+0000/')
+  case "$normalized" in
+    *+[0-9][0-9]:[0-9][0-9]|*-[0-9][0-9]:[0-9][0-9])
+      normalized=${normalized%:*}${normalized##*:}
+      ;;
+  esac
+  epoch=$(date -u -d "$normalized" +%s 2>/dev/null) ||
+    epoch=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$normalized" +%s 2>/dev/null)
+  case "$epoch" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$epoch"
+}
 
-EPOCH=$(date -u -d "$NORMALIZED" +%s 2>/dev/null) ||
-  EPOCH=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$NORMALIZED" +%s 2>/dev/null)
+# Compare parsed epochs, never the raw strings: two limiting windows can report
+# the same instant with different UTC offsets, and a lexicographic comparison
+# would then pick the later one and wake firstmate after the quota cleared.
+EPOCH=''
+while IFS= read -r resets_at; do
+  [ -n "$resets_at" ] || continue
+  candidate=$(resets_at_to_epoch "$resets_at") ||
+    die "could not parse resetsAt timestamp: $resets_at"
+  if [ -z "$EPOCH" ] || [ "$candidate" -lt "$EPOCH" ]; then
+    EPOCH=$candidate
+  fi
+done <<EOF
+$RESETS_AT_LIST
+EOF
 
-case "$EPOCH" in
-  ''|*[!0-9]*) die "could not parse resetsAt timestamp: $RESETS_AT" ;;
-esac
+[ -n "$EPOCH" ] ||
+  die "quota-axi response for provider $PROVIDER has no all_models limiting window with a resolvable resetsAt"
 
 printf '%s\n' "$EPOCH"

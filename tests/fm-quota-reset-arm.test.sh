@@ -5,9 +5,11 @@
 # bin/fm-procevent-when.sh in an isolated FM_HOME, with quota-axi mocked
 # through FM_QUOTA_AXI_CMD. The suite proves: a fresh arm registers a watch
 # targeting the resolved reset epoch plus buffer, a second arm on a still-
-# live watch is a no-op, and a watch left fired-with-an-unhandled-result from
-# a prior cycle is healed (marked handled, retired) and re-armed rather than
-# refused forever or silently reported as armed with nothing actually done.
+# live watch is a no-op, a help invocation arms nothing at all, the watch's
+# give-up deadline always outlasts its own target, and a watch left fired-
+# with-an-unhandled-result from a prior cycle is healed (marked handled,
+# retired) and re-armed rather than refused forever or silently reported as
+# armed with nothing actually done.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -58,6 +60,37 @@ target=$((EXPECTED_EPOCH + 90))
 assert_grep "$target" "$H/state/when/when-quota-reset-task-alpha.spec" "the spec's condition targets epoch + buffer"
 pass "a fresh arm registers a watch targeting the resolved epoch plus buffer"
 
+# --- a far-future reset cannot expire the watch before its own target --------
+# fm-procevent-when.sh counts the deadline from `armed` and defaults it to one
+# week, so a weekly window resetting further out than that would otherwise
+# publish `never-true` and retire before the real reset ever arrived. The spec
+# is that script's own persisted watch record: read `armed` and `deadline` back
+# and require their sum to land after the target.
+H6="$TMP_ROOT/h-far"; new_home "$H6"
+FAR_EPOCH=$(( $(date +%s) + 2592000 ))
+FAR_ISO=$(date -u -d "@$FAR_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$FAR_EPOCH" +%Y-%m-%dT%H:%M:%SZ)
+FAR_AXI="$TMP_ROOT/far-quota-axi.sh"
+cat > "$FAR_AXI" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'quota-axi 0.1.32\n'
+  exit 0
+fi
+printf '%s\n' '{"providers":[{"provider":"claude","windows":[{"id":"seven_day","resetsAt":"$FAR_ISO"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["seven_day"]}]}}]}'
+SH
+chmod +x "$FAR_AXI"
+out=$(FM_HOME="$H6" FM_QUOTA_AXI_CMD="$FAR_AXI" "$ARM_SH" task-far --buffer-secs 60)
+expect_code 0 $? "far-future arm exit code: $out"
+far_spec="$H6/state/when/when-quota-reset-task-far.spec"
+far_target=$((FAR_EPOCH + 60))
+spec_field() { sed -n "s/^$1=//p" "$2"; }
+armed_at=$(spec_field armed "$far_spec")
+deadline=$(spec_field deadline "$far_spec")
+[ -n "$armed_at" ] && [ -n "$deadline" ] || fail "the spec records no armed/deadline pair"
+[ $((armed_at + deadline)) -gt "$far_target" ] ||
+  fail "the watch gives up at $((armed_at + deadline)), before its own target $far_target"
+pass "the give-up deadline is derived from the target, so a far-future reset is still detected"
+
 # --- a second arm on the still-live watch is a no-op -------------------------
 out=$(arm "$H" task-alpha --buffer-secs 90)
 expect_code 0 $? "idempotent re-arm exit code"
@@ -80,6 +113,18 @@ expect_code 1 "$code" "quota-axi failure: exit code"
 assert_contains "$out" "error:" "quota-axi failure refuses to arm"
 assert_absent "$H2/state/when/when-quota-reset-task-beta.spec" "nothing was armed when quota-axi failed"
 pass "a quota-axi failure refuses to arm instead of guessing a target"
+
+# --- a help invocation arms nothing ------------------------------------------
+H5="$TMP_ROOT/h-help"; new_home "$H5"
+for flag in -h --help; do
+  out=$(FM_HOME="$H5" FM_QUOTA_AXI_CMD="$QUOTA_AXI" "$ARM_SH" "$flag" 2>&1)
+  expect_code 0 $? "$flag: exit code"
+  assert_contains "$out" "Usage: fm-quota-reset-arm.sh" "$flag: prints the usage header"
+  assert_absent "$H5/state/when" "$flag: no watch state was written"
+  [ -z "$(FM_HOME="$H5" "$ROOT/bin/fm-procevent.sh" list 2>/dev/null | grep quota-reset || true)" ] ||
+    fail "$flag: registered a quota-reset watch source"
+done
+pass "a help invocation prints usage and arms nothing"
 
 # --- task-id validation -------------------------------------------------------
 H3="$TMP_ROOT/h-badid"; new_home "$H3"

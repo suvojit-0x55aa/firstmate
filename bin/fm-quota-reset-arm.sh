@@ -22,6 +22,13 @@
 #                         absorb poll granularity (default: 60)
 #   --provider <name>     quota-axi provider id, passed through to
 #                         fm-quota-reset-epoch.sh (default: claude)
+#   -h, --help            print this header and exit without arming anything
+#
+# The watch's give-up deadline is derived from the resolved target rather than
+# left at fm-procevent-when.sh's default, which is measured from arming: a
+# weekly window resetting further out than that default would otherwise expire
+# the watch before its own target, waking firstmate with `never-true` and
+# never detecting the real reset.
 #
 # Idempotent: if a watch for this task is already armed and has not fired,
 # calling this again is a no-op. If a prior watch for this task fired and
@@ -34,6 +41,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+usage() { sed -n '2,${/^set -u$/q; s/^# \{0,1\}//; p;}' "$0"; }
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -44,6 +52,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 POLL_INTERVAL_SECS=120
 BUFFER_DEFAULT_SECS=60
+# Slack after the target for the stable-poll count, the action run, and clock
+# skew, so the deadline only ever fires when the target itself went unmet.
+DEADLINE_MARGIN_SECS=3600
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+esac
 
 TASK_ID=${1:-}
 [ -n "$TASK_ID" ] || die "usage: fm-quota-reset-arm.sh <task-id> [--buffer-secs <secs>] [--provider <name>]"
@@ -94,6 +112,10 @@ EPOCH=$("$SCRIPT_DIR/fm-quota-reset-epoch.sh" --provider "$PROVIDER") ||
   die "cannot resolve quota reset time from quota-axi for provider $PROVIDER; not arming"
 TARGET=$((EPOCH + BUFFER_SECS))
 
+NOW=$(date +%s)
+DEADLINE_SECS=$((TARGET - NOW + DEADLINE_MARGIN_SECS))
+[ "$DEADLINE_SECS" -ge "$DEADLINE_MARGIN_SECS" ] || DEADLINE_SECS=$DEADLINE_MARGIN_SECS
+
 # --- self-heal helpers -------------------------------------------------------
 # Retiring is safe even when there is nothing to retire: fm-procevent-when.sh
 # retire only fails when the watch was never armed at all, which the retry
@@ -122,6 +144,7 @@ heal_unhandled_results() {
 try_arm() {
   "$SCRIPT_DIR/fm-procevent-when.sh" arm "$NAME" \
     --interval "$POLL_INTERVAL_SECS" \
+    --deadline "$DEADLINE_SECS" \
     --condition "$SCRIPT_DIR/fm-time-reached.sh" "$TARGET" \
     --action "$SCRIPT_DIR/fm-quota-reset-notify.sh" "$TASK_ID"
 }
