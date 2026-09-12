@@ -209,6 +209,16 @@ assert_present "${result%.result}.handled" "self-heal marks the earlier captured
 assert_present "$H4/state/when/$SID.spec" "self-heal leaves a fresh spec behind"
 pass "a fired-but-unhandled watch is healed (marked handled) and re-armed, not refused forever"
 
+# Acknowledging that result is irreversible - it can never be re-announced -
+# so a successful arm must still say the heal consumed it, not report only
+# success and leave the operator unaware an unread outcome is gone.
+result_seq=${result##*/}
+result_seq=${result_seq%.result}
+result_seq=${result_seq##*.}
+assert_contains "$out" "self-healed leftover state for $SID" "the arm reports that a heal ran"
+assert_contains "$out" "handled: $SID $result_seq" "the arm names the captured outcome it acknowledged"
+pass "a self-heal that consumes an unread outcome says so instead of reporting bare success"
+
 # --- a registered watch that already fired is re-armed, not reported armed ---
 # fm-procevent-when.sh's runner answers `ambiguous` without polling once the
 # fired marker exists, so this state is a spent watch, not a live one. It is

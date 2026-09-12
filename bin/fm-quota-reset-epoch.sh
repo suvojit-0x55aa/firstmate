@@ -18,9 +18,11 @@
 #      windows[] entry; one that does not is a loud failure, never a window
 #      quietly dropped from the comparison.
 #   3. Look up each named window in windows[], parse every one of their
-#      ISO8601 resetsAt values to an epoch second, and print the SMALLEST
-#      (an account can be bound by more than one limiting window at once;
-#      the earliest one is what actually unblocks the account). Comparing
+#      ISO8601 resetsAt values to an epoch second, and print the LARGEST.
+#      Several windows tie at the same limiting floor exactly when each of
+#      them is equally exhausted, and the account stays blocked until the
+#      LAST of them clears - waking at an earlier one would spend the
+#      watch's single fire while the crewmate is still blocked. Comparing
 #      parsed epochs rather than the raw strings keeps the answer correct
 #      when the windows carry different UTC offsets.
 #
@@ -108,9 +110,9 @@ resets_at_to_epoch() {
   printf '%s\n' "$epoch"
 }
 
-# Compare parsed epochs, never the raw strings: two limiting windows can report
-# the same instant with different UTC offsets, and a lexicographic comparison
-# would then pick the later one and wake firstmate after the quota cleared.
+# Compare parsed epochs, never the raw strings: two limiting windows can carry
+# different UTC offsets, and a lexicographic comparison would then order them
+# by wall-clock text rather than by instant.
 EPOCH=''
 while IFS=$'\t' read -r wid resets_at; do
   [ -n "$wid" ] || continue
@@ -118,7 +120,7 @@ while IFS=$'\t' read -r wid resets_at; do
     die "quota-axi response for provider $PROVIDER names limiting window $wid, which has no entry in windows[]"
   candidate=$(resets_at_to_epoch "$resets_at") ||
     die "could not parse resetsAt timestamp for limiting window $wid: $resets_at"
-  if [ -z "$EPOCH" ] || [ "$candidate" -lt "$EPOCH" ]; then
+  if [ -z "$EPOCH" ] || [ "$candidate" -gt "$EPOCH" ]; then
     EPOCH=$candidate
   fi
 done <<EOF

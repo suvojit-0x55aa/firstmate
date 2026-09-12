@@ -45,7 +45,11 @@ expected=$(date -u -d '2026-09-12T09:20:00+00:00' +%s 2>/dev/null || date -j -f 
 [ "$epoch" = "$expected" ] || fail "single limiting window: expected $expected, got $epoch"
 pass "resolves the single all_models limiting window's resetsAt"
 
-# --- multiple limiting windows: earliest resetsAt wins ----------------------
+# --- multiple limiting windows: the LAST one to reset wins -------------------
+# Windows tie at the limiting floor when each is equally exhausted, so the
+# account is still blocked until the last of them clears. The watch fires once,
+# so answering with the earlier reset would spend that fire while the crewmate
+# is still stuck.
 CMD=$(fake_quota_axi good-multi "quota-axi 0.1.32" <<'SH'
 cat <<'JSON'
 {"providers":[{"provider":"claude","windows":[{"id":"five_hour","resetsAt":"2026-09-12T09:20:00+00:00"},{"id":"seven_day","resetsAt":"2026-09-17T18:00:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["seven_day","five_hour"]}]}}]}
@@ -54,12 +58,13 @@ SH
 )
 epoch=$(FM_QUOTA_AXI_CMD="$CMD" "$EPOCH_SH" --provider claude)
 expect_code 0 $? "multiple limiting windows: exit code"
-[ "$epoch" = "$expected" ] || fail "multiple limiting windows: earliest window did not win (got $epoch, want $expected)"
-pass "picks the earliest resetsAt when more than one window is limiting"
+latest=$(date -u -d '2026-09-17T18:00:00+00:00' +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S%z' '2026-09-17T18:00:00+0000' +%s)
+[ "$epoch" = "$latest" ] || fail "multiple limiting windows: latest window did not win (got $epoch, want $latest)"
+pass "picks the last resetsAt to clear when more than one window is limiting"
 
-# --- mixed UTC offsets: the earliest true instant wins, not the earliest
-# --- string. 09:20+05:30 is 03:50Z, so it precedes 09:00Z even though it
-# --- sorts after it lexicographically.
+# --- mixed UTC offsets: ordering is by instant, not by wall-clock text.
+# --- 09:20+05:30 is 03:50Z, so 09:00Z is the later instant even though it
+# --- sorts first lexicographically.
 CMD=$(fake_quota_axi good-mixed-offsets "quota-axi 0.1.32" <<'SH'
 cat <<'JSON'
 {"providers":[{"provider":"claude","windows":[{"id":"five_hour","resetsAt":"2026-09-12T09:20:00+05:30"},{"id":"seven_day","resetsAt":"2026-09-12T09:00:00Z"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["five_hour","seven_day"]}]}}]}
@@ -68,19 +73,20 @@ SH
 )
 epoch=$(FM_QUOTA_AXI_CMD="$CMD" "$EPOCH_SH" --provider claude)
 expect_code 0 $? "mixed UTC offsets: exit code"
-mixed_expected=$(date -u -d '2026-09-12T03:50:00+00:00' +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S%z' '2026-09-12T03:50:00+0000' +%s)
+mixed_expected=$(date -u -d '2026-09-12T09:00:00+00:00' +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S%z' '2026-09-12T09:00:00+0000' +%s)
 [ "$epoch" = "$mixed_expected" ] || fail "mixed UTC offsets: expected $mixed_expected, got $epoch"
 pass "compares limiting windows chronologically when their UTC offsets differ"
 
 # --- default provider is claude ---------------------------------------------
+# One limiting window, so this case turns only on which provider was selected.
 CMD=$(fake_quota_axi good-default "quota-axi 0.1.32" <<'SH'
 cat <<'JSON'
-{"providers":[{"provider":"claude","windows":[{"id":"five_hour","resetsAt":"2026-09-12T09:20:00+00:00"},{"id":"seven_day","resetsAt":"2026-09-17T18:00:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["seven_day","five_hour"]}]}}]}
+{"providers":[{"provider":"other","windows":[{"id":"five_hour","resetsAt":"2026-09-17T18:00:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["five_hour"]}]}},{"provider":"claude","windows":[{"id":"five_hour","resetsAt":"2026-09-12T09:20:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["five_hour"]}]}}]}
 JSON
 SH
 )
 epoch=$(FM_QUOTA_AXI_CMD="$CMD" "$EPOCH_SH")
-[ "$epoch" = "$expected" ] || fail "default provider did not resolve claude's window"
+[ "$epoch" = "$expected" ] || fail "default provider did not resolve claude's window (got $epoch, want $expected)"
 pass "defaults to provider claude when --provider is omitted"
 
 # --- missing quota-axi command -----------------------------------------------

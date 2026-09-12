@@ -176,12 +176,14 @@ try_arm() {
 }
 
 HEAL_OUT=''
+HEAL_STATUS=0
 OUT=$(try_arm 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ]; then
   case "$OUT" in
     *"already exists or left state behind"*|*"an unhandled captured result exists for"*)
       HEAL_OUT=$(run_self_heal)
+      HEAL_STATUS=$?
       OUT=$(try_arm 2>&1)
       STATUS=$?
       ;;
@@ -189,9 +191,14 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 if [ "$STATUS" -ne 0 ]; then
-  [ -z "$HEAL_OUT" ] ||
+  [ "$HEAL_STATUS" -eq 0 ] ||
     die "cannot arm quota-reset watch for $TASK_ID: $OUT; the self-heal could not clear it either: $HEAL_OUT"
   die "cannot arm quota-reset watch for $TASK_ID: $OUT"
 fi
 
+# A heal that ran consumed durable state - retiring the leftover watch, and
+# acknowledging any captured outcome nobody had read, which is irreversible.
+# Say so before the arm line rather than leaving the caller with only success.
+[ -z "$HEAL_OUT" ] ||
+  printf 'self-healed leftover state for %s before re-arming:\n%s\n' "$SID" "$HEAL_OUT"
 printf '%s\n' "$OUT"

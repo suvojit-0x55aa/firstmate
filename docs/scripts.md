@@ -71,6 +71,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-secondmate-report.sh` | Optional helper to append a correlated parent status or document-pointer report       |
 | `fm-procevent-remote-reply.sh` | Relay the remote-secondmate status stream through non-destructive process-event deltas |
 | `fm-procevent-when.sh`   | Fire a trust-bound deterministic action at most once when its registered condition holds, then wake with the outcome |
+| `fm-quota-reset-arm.sh`  | Arm a detection-only watch that wakes firstmate when a stuck task's quota provider resets |
+| `fm-quota-reset-epoch.sh`| Print the epoch second at which a quota provider's binding usage window resets, read from `quota-axi --json` |
+| `fm-quota-reset-notify.sh`| Wake action for a fired quota-reset watch: re-peek the task read-only and name the manual next steps, never driving lifecycle |
+| `fm-time-reached.sh`     | Exit 0 once a given epoch second has been reached, as a watch condition            |
 | `fm-gate-refuse-lib.sh`  | Shared no-mistakes gate-context refusal for fleet lifecycle entrypoints               |
 | `fm-watch-arm.sh`        | Verified home-scoped watcher arm wrapper with loud cycle endings and bounded lifecycle ledger |
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
