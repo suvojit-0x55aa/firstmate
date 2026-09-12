@@ -476,12 +476,17 @@ cmd_terminal() {
 # --- retire ------------------------------------------------------------------
 
 cmd_retire() {
-  local name=${1-} sid captured=0 result
+  local name=${1-} sid captured=0 result leftover
   when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
   sid="when-$name"
   if [ -e "$(fired_file "$sid")" ]; then
+    # The glob is a prefix match, so each hit is still tested for exact
+    # ownership: a sibling id that extends this one after a dot owns its own
+    # results and must not suppress this watch's missing-outcome warning.
     for result in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
-      [ -e "$result" ] && captured=1
+      [ -e "$result" ] || continue
+      [ "$(fm_procevent_result_source_id "$result")" = "$sid" ] || continue
+      captured=1
     done
     if [ "$captured" -eq 0 ]; then
       printf 'warning: the action had fired but no outcome was captured; verify its effect manually\n' >&2
@@ -489,6 +494,13 @@ cmd_retire() {
   fi
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
   rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
+  # Callers read this exit code as "the leftover state is gone", and act
+  # irreversibly on it, so prove it rather than trusting rm's own status.
+  for leftover in "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"; do
+    if [ -e "$leftover" ] || [ -L "$leftover" ]; then
+      die "the watch file could not be removed and remains on disk: $leftover"
+    fi
+  done
   printf 'retired: %s\n' "$sid"
 }
 

@@ -119,6 +119,38 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
 pass "arm binds, refuses duplicates, and retire cleans up"
 
+# --- retire's exit code means the leftover state is really gone -------------
+# Callers act irreversibly on a successful retire, so it must not report
+# success while the spec, trust, and fired files survive on disk.
+H="$TMP_ROOT/h-retire-blocked"; new_home "$H"
+when "$H" arm blocked --interval 1 --stable 1 --condition true --action true >/dev/null
+chmod 555 "$H/state/when"
+out=$(when "$H" retire blocked 2>&1)
+code=$?
+chmod 755 "$H/state/when"
+if [ "$code" -eq 0 ]; then
+  fail "retire reported success while its files survived: $out"
+fi
+assert_contains "$out" "remains on disk" "the refusal names the file that could not be removed"
+assert_present "$H/state/when/when-blocked.spec" "the spec really did survive"
+when "$H" retire blocked >/dev/null
+pass "retire refuses to report success when the watch files could not be removed"
+
+# --- a sibling id's captured result does not mask a missing outcome ---------
+# Source ids may contain dots, so `q-a.b` extends `q-a` after one. Ownership of
+# a captured result splits on the last dot: the sibling's result belongs to the
+# sibling, and must not silence this watch's verify-by-hand warning.
+H="$TMP_ROOT/h-retire-sibling"; new_home "$H"
+when "$H" arm q-a --interval 1 --stable 1 --condition true --action true >/dev/null
+when "$H" arm q-a.b --interval 1 --stable 1 --condition true --action true >/dev/null
+pe "$H" start when-q-a.b >/dev/null 2>&1
+sib=$(printf '%s\n' "$H/state/procevent-inbox/when-q-a.b".*.result)
+assert_present "$sib" "the sibling watch captured a result of its own"
+: > "$H/state/when/when-q-a.fired"
+err=$(when "$H" retire q-a 2>&1 >/dev/null)
+assert_contains "$err" "no outcome was captured" "the sibling's result does not mask the missing outcome"
+pass "a captured result belonging to a sibling source id does not suppress the retire warning"
+
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"
 (

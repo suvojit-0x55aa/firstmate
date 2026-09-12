@@ -988,6 +988,7 @@ families_for_changed_path() {
       # unclassified and so is named directly rather than by family.
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-quota-reset-epoch.test.sh"
+      printf '%s\n' "__script__:fm-quota-reset-arm.test.sh"
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

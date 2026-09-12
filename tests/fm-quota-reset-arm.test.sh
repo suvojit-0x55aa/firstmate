@@ -6,7 +6,8 @@
 # through FM_QUOTA_AXI_CMD. The suite proves: a fresh arm registers a watch
 # targeting the resolved reset epoch plus buffer, a second arm on a still-
 # live watch is a no-op, a self-heal that cannot record an acknowledgement says
-# why, a sibling task id's pending result neither blocks nor
+# why, a heal that ran is disclosed even when the retry then fails, a sibling
+# task id's pending result neither blocks nor
 # is consumed by this arm, a task-id the watch name cannot carry is refused
 # before any quota-axi query, a self-heal that cannot clear its leftover says
 # why, a watch that already fired is re-armed rather than
@@ -299,6 +300,29 @@ assert_contains "$out" "the self-heal could not clear it either" "the refusal sa
 assert_contains "$out" "cannot durably record handling" "the refusal carries the reason the acknowledgement failed"
 assert_absent "${ack_result%.result}.handled" "no handled marker was written when recording failed"
 pass "an acknowledgement the self-heal could not record reports its own cause"
+
+# --- a heal is disclosed even when the retry fails for another reason --------
+# The heal succeeds and irreversibly acknowledges the prior fire's outcome, but
+# an unwritable watch directory then blocks the re-arm. Without the disclosure
+# the operator reads only "retire it first" - the step the heal just completed
+# - and never learns an unread outcome was consumed.
+H12="$TMP_ROOT/h-heal-then-fail"; new_home "$H12"
+BLK_NAME="quota-reset-task-omega"
+BLK_SID="when-$BLK_NAME"
+when "$H12" arm "$BLK_NAME" --interval 1 --stable 1 --condition true --action true >/dev/null
+pe "$H12" start "$BLK_SID" >/dev/null 2>&1
+blk_result=$(printf '%s\n' "$H12/state/procevent-inbox/$BLK_SID".*.result)
+assert_present "$blk_result" "the fire left a captured, unhandled result"
+: > "$H12/state/when/$BLK_SID.fired"
+chmod 555 "$H12/state/when"
+
+out=$(arm "$H12" task-omega 2>&1)
+code=$?
+chmod 755 "$H12/state/when"
+expect_code 1 "$code" "heal-then-blocked-arm: exit code"
+assert_contains "$out" "cannot arm quota-reset watch for task-omega" "the refusal still names the task"
+assert_contains "$out" "self-healed leftover state for $BLK_SID" "the refusal discloses that a heal ran"
+pass "a heal that ran is disclosed even when the retried arm fails for another reason"
 
 # --- a sibling task's pending result does not block this task ----------------
 # Task ids may contain dots, so `a.b` derives a source id that extends `a`'s

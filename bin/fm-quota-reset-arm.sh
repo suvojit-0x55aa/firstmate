@@ -49,8 +49,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 
@@ -196,15 +194,17 @@ if [ "$STATUS" -ne 0 ]; then
   esac
 fi
 
+# A heal that ran consumed durable state - retiring the leftover watch, and
+# acknowledging any captured outcome nobody had read, which is irreversible.
+# Report it whichever way the retry then went: on failure the caller otherwise
+# reads only the arm's own message, which names a step the heal already took.
+[ -z "$HEAL_OUT" ] ||
+  printf 'self-healed leftover state for %s before re-arming:\n%s\n' "$SID" "$HEAL_OUT"
+
 if [ "$STATUS" -ne 0 ]; then
   [ "$HEAL_STATUS" -eq 0 ] ||
     die "cannot arm quota-reset watch for $TASK_ID: $OUT; the self-heal could not clear it either: $HEAL_OUT"
   die "cannot arm quota-reset watch for $TASK_ID: $OUT"
 fi
 
-# A heal that ran consumed durable state - retiring the leftover watch, and
-# acknowledging any captured outcome nobody had read, which is irreversible.
-# Say so before the arm line rather than leaving the caller with only success.
-[ -z "$HEAL_OUT" ] ||
-  printf 'self-healed leftover state for %s before re-arming:\n%s\n' "$SID" "$HEAL_OUT"
 printf '%s\n' "$OUT"
