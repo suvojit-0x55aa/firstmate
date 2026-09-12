@@ -144,27 +144,33 @@ heal_leftover_registration() {
 # Safe to call when there is nothing pending (the loop body then never runs).
 # Ownership is an exact comparison, never a prefix: a sibling task whose id
 # extends this one after a dot owns its own results.
+# A failed acknowledgement is remembered across the whole loop rather than
+# left as the last iteration's status, so one failure among several still
+# reaches the caller.
 heal_unhandled_results() {
-  local path
+  local path status=0
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     [ "$(fm_procevent_result_source_id "$path")" = "$SID" ] || continue
-    "$SCRIPT_DIR/fm-procevent.sh" handled "$SID" "$(fm_procevent_result_sequence "$path")" 2>&1
+    "$SCRIPT_DIR/fm-procevent.sh" handled "$SID" "$(fm_procevent_result_sequence "$path")" 2>&1 ||
+      status=1
   done < <(fm_procevent_pending "$STATE")
+  return "$status"
 }
 
 # Acknowledging a captured result is irreversible: once its handled marker
 # exists the outcome can never be re-announced. So it only runs on a path that
 # can actually re-arm - when retiring the leftover registration succeeded.
 run_self_heal() {
-  local retire_out results_out
+  local retire_out results_out status=0
   retire_out=$(heal_leftover_registration) || {
     printf '%s\n' "$retire_out"
     return 1
   }
-  results_out=$(heal_unhandled_results)
+  results_out=$(heal_unhandled_results) || status=1
   printf '%s\n' "$retire_out"
   [ -z "$results_out" ] || printf '%s\n' "$results_out"
+  return "$status"
 }
 
 try_arm() {

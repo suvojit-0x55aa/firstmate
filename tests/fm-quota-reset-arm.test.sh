@@ -5,7 +5,8 @@
 # bin/fm-procevent-when.sh in an isolated FM_HOME, with quota-axi mocked
 # through FM_QUOTA_AXI_CMD. The suite proves: a fresh arm registers a watch
 # targeting the resolved reset epoch plus buffer, a second arm on a still-
-# live watch is a no-op, a sibling task id's pending result neither blocks nor
+# live watch is a no-op, a self-heal that cannot record an acknowledgement says
+# why, a sibling task id's pending result neither blocks nor
 # is consumed by this arm, a task-id the watch name cannot carry is refused
 # before any quota-axi query, a self-heal that cannot clear its leftover says
 # why, a watch that already fired is re-armed rather than
@@ -274,6 +275,30 @@ pass "a self-heal that cannot clear the leftover reports its own cause, not just
 assert_absent "${stuck_result%.result}.handled" "an unread outcome keeps its re-announcement when the heal failed"
 assert_present "$stuck_result" "the captured result itself is untouched"
 pass "a failed self-heal leaves the prior fire's captured result still pending"
+
+# --- an acknowledgement the heal could not record names its own cause --------
+# The retire half succeeds here, so only the `handled` half fails: an
+# unwritable inbox makes fm-procevent record nothing durably. Without that
+# status reaching the caller the refusal just says "handle it before
+# re-arming" - the exact step the heal already proved impossible.
+H11="$TMP_ROOT/h-ack-fails"; new_home "$H11"
+ACK_NAME="quota-reset-task-zeta"
+ACK_SID="when-$ACK_NAME"
+when "$H11" arm "$ACK_NAME" --interval 1 --stable 1 --condition true --action true >/dev/null
+pe "$H11" start "$ACK_SID" >/dev/null 2>&1
+ack_result=$(printf '%s\n' "$H11/state/procevent-inbox/$ACK_SID".*.result)
+assert_present "$ack_result" "the fire left a captured, unhandled result"
+chmod 555 "$H11/state/procevent-inbox"
+
+out=$(arm "$H11" task-zeta 2>&1)
+code=$?
+chmod 755 "$H11/state/procevent-inbox"
+expect_code 1 "$code" "unrecordable acknowledgement: exit code"
+assert_contains "$out" "cannot arm quota-reset watch for task-zeta" "the refusal still names the task"
+assert_contains "$out" "the self-heal could not clear it either" "the refusal says the self-heal failed too"
+assert_contains "$out" "cannot durably record handling" "the refusal carries the reason the acknowledgement failed"
+assert_absent "${ack_result%.result}.handled" "no handled marker was written when recording failed"
+pass "an acknowledgement the self-heal could not record reports its own cause"
 
 # --- a sibling task's pending result does not block this task ----------------
 # Task ids may contain dots, so `a.b` derives a source id that extends `a`'s
