@@ -5,7 +5,9 @@
 # bin/fm-procevent-when.sh in an isolated FM_HOME, with quota-axi mocked
 # through FM_QUOTA_AXI_CMD. The suite proves: a fresh arm registers a watch
 # targeting the resolved reset epoch plus buffer, a second arm on a still-
-# live watch is a no-op, a watch that already fired is re-armed rather than
+# live watch is a no-op, a task-id the watch name cannot carry is refused
+# before any quota-axi query, a self-heal that cannot clear its leftover says
+# why, a watch that already fired is re-armed rather than
 # reported as still armed, a help invocation arms nothing at all, the watch's
 # give-up deadline always outlasts its own target, and a watch left fired-
 # with-an-unhandled-result from a prior cycle is healed (marked handled,
@@ -152,6 +154,39 @@ expect_code 1 "$code" "path-unsafe task-id: exit code"
 assert_contains "$out" "error:" "path-unsafe task-id is refused"
 pass "a path-unsafe task-id is refused"
 
+# --- refusals that must cost no quota-axi query -------------------------------
+# Both shapes are refused by the task-id itself, so neither should reach the
+# provider. The recorder proves that by leaving no file behind.
+H8="$TMP_ROOT/h-reject"; new_home "$H8"
+AXI_CALLS="$TMP_ROOT/axi-calls"
+RECORDING_AXI="$TMP_ROOT/recording-quota-axi.sh"
+cat > "$RECORDING_AXI" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf 'quota-axi 0.1.32\n'
+  exit 0
+fi
+printf '%s\n' "\$*" >> "$AXI_CALLS"
+printf '%s\n' '{"providers":[{"provider":"claude","windows":[{"id":"five_hour","resetsAt":"2026-09-12T09:20:00+00:00"}],"quotaSemantics":{"effectiveAvailability":[{"scope":"all_models","limitingWindowIds":["five_hour"]}]}}]}'
+SH
+chmod +x "$RECORDING_AXI"
+
+out=$(FM_HOME="$H8" FM_QUOTA_AXI_CMD="$RECORDING_AXI" "$ARM_SH" .. 2>&1)
+code=$?
+expect_code 1 "$code" "leading-dot task-id: exit code"
+assert_contains "$out" "error:" "leading-dot task-id is refused"
+assert_absent "$H8/state/when/when-quota-reset-...spec" "no watch was armed for a leading-dot task-id"
+
+LONG_ID=$(printf 'a%.0s' $(seq 48))
+out=$(FM_HOME="$H8" FM_QUOTA_AXI_CMD="$RECORDING_AXI" "$ARM_SH" "$LONG_ID" 2>&1)
+code=$?
+expect_code 1 "$code" "over-long task-id: exit code"
+assert_contains "$out" "task-id" "the refusal names the task-id, not a derived watch name"
+assert_not_contains "$out" "quota-reset-$LONG_ID" "the refusal does not blame a name the caller never typed"
+assert_absent "$H8/state/when/when-quota-reset-$LONG_ID.spec" "no watch was armed for an over-long task-id"
+assert_absent "$AXI_CALLS" "neither refusal paid a quota-axi query"
+pass "task-ids the watch name cannot carry are refused by their own name, before any quota-axi query"
+
 # --- self-heal: a fired-but-unhandled watch is healed and re-armed ----------
 H4="$TMP_ROOT/h-heal"; new_home "$H4"
 NAME="quota-reset-task-gamma"
@@ -199,6 +234,26 @@ assert_not_contains "$out" "already armed" "a fired watch is not reported as sti
 assert_contains "$out" "armed: $SPENT_SID" "the spent watch is armed fresh"
 assert_absent "$H7/state/when/$SPENT_SID.fired" "the stale fired marker is cleared by the re-arm"
 pass "a watch that already fired is re-armed instead of silently reported as still armed"
+
+# --- a self-heal that cannot clear the leftover names its own cause ----------
+# fm-procevent-when.sh's retire refuses, leaving the spec/trust/fired triple in
+# place, whenever the source's ownership claim cannot be read. Without the heal
+# output the operator only sees "retire it first" - the very step that just
+# failed - so the refusal has to carry the reason retiring was impossible.
+H9="$TMP_ROOT/h-heal-fails"; new_home "$H9"
+STUCK_NAME="quota-reset-task-epsilon"
+STUCK_SID="when-$STUCK_NAME"
+when "$H9" arm "$STUCK_NAME" --interval 1 --stable 1 --condition true --action true >/dev/null
+pe "$H9" start "$STUCK_SID" >/dev/null 2>&1
+assert_present "$H9/state/when/$STUCK_SID.fired" "the fire left its durable marker behind"
+printf 'not-a-valid-claim\n' > "$FM_PROCEVENT_CLAIM_ROOT/$STUCK_SID.claim"
+
+out=$(arm "$H9" task-epsilon 2>&1)
+code=$?
+expect_code 1 "$code" "unhealable leftover: exit code"
+assert_contains "$out" "cannot arm quota-reset watch for task-epsilon" "the refusal still names the task"
+assert_contains "$out" "cannot safely read source ownership" "the refusal carries the reason the self-heal failed"
+pass "a self-heal that cannot clear the leftover reports its own cause, not just 'retire it first'"
 
 # --- the healed re-arm is itself idempotent ----------------------------------
 out=$(arm "$H4" task-gamma --buffer-secs 30)

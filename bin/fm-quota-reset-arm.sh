@@ -92,12 +92,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$TASK_ID" in
-  *[!A-Za-z0-9._-]*) die "task-id must be path-safe (letters, digits, dot, dash, underscore): $TASK_ID" ;;
-esac
+fm_task_id_path_safe "$TASK_ID" ||
+  die "task-id must be path-safe (letters, digits, dot, dash, underscore, and not leading with a dot): $TASK_ID"
 
 NAME="quota-reset-$TASK_ID"
 SID="when-$NAME"
+
+# The derived source id carries a fixed prefix, so refuse an over-long task-id
+# by its own length here rather than letting fm-procevent-when.sh reject a
+# name the caller never typed - after a quota-axi query has already been paid.
+fm_procevent_source_id_valid "$SID" ||
+  die "task-id must be at most $((64 - (${#SID} - ${#TASK_ID}))) characters, because the watch source id prefixes it with ${SID%"$TASK_ID"}: $TASK_ID"
 
 # --- idempotency: leave a genuinely still-active watch untouched -----------
 # A registration alone does not mean the watch is still live. A fire leaves a
@@ -127,11 +132,12 @@ DEADLINE_SECS=$((TARGET - NOW + DEADLINE_MARGIN_SECS))
 [ "$DEADLINE_SECS" -ge "$DEADLINE_MARGIN_SECS" ] || DEADLINE_SECS=$DEADLINE_MARGIN_SECS
 
 # --- self-heal helpers -------------------------------------------------------
-# Retiring is safe even when there is nothing to retire: fm-procevent-when.sh
-# retire only fails when the watch was never armed at all, which the retry
-# below reports through the normal die() path if arming still fails after.
+# Both helpers print whatever their child printed. Retiring has several ways to
+# refuse - unreadable ownership, an unconfirmable runner identity - and each
+# leaves the leftover state in place, so the caller keeps that output and reads
+# it back out when the retried arm still fails.
 heal_leftover_registration() {
-  "$SCRIPT_DIR/fm-procevent-when.sh" retire "$NAME" >/dev/null 2>&1
+  "$SCRIPT_DIR/fm-procevent-when.sh" retire "$NAME" 2>&1
 }
 
 # Marks every unhandled captured result for this watch's source id handled.
@@ -147,7 +153,7 @@ heal_unhandled_results() {
     base=${path##*/}
     seq=${base%.result}
     seq=${seq##*.}
-    "$SCRIPT_DIR/fm-procevent.sh" handled "$SID" "$seq" >/dev/null 2>&1
+    "$SCRIPT_DIR/fm-procevent.sh" handled "$SID" "$seq" 2>&1
   done < <(fm_procevent_pending "$STATE")
 }
 
@@ -159,19 +165,23 @@ try_arm() {
     --action "$SCRIPT_DIR/fm-quota-reset-notify.sh" "$TASK_ID"
 }
 
+HEAL_OUT=''
 OUT=$(try_arm 2>&1)
 STATUS=$?
 if [ "$STATUS" -ne 0 ]; then
   case "$OUT" in
     *"already exists or left state behind"*|*"an unhandled captured result exists for"*)
-      heal_leftover_registration
-      heal_unhandled_results
+      HEAL_OUT=$(heal_leftover_registration; heal_unhandled_results)
       OUT=$(try_arm 2>&1)
       STATUS=$?
       ;;
   esac
 fi
 
-[ "$STATUS" -eq 0 ] || die "cannot arm quota-reset watch for $TASK_ID: $OUT"
+if [ "$STATUS" -ne 0 ]; then
+  [ -z "$HEAL_OUT" ] ||
+    die "cannot arm quota-reset watch for $TASK_ID: $OUT; the self-heal could not clear it either: $HEAL_OUT"
+  die "cannot arm quota-reset watch for $TASK_ID: $OUT"
+fi
 
 printf '%s\n' "$OUT"
