@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Pin the Pi/OpenCode recovery-loop fix: one announcement per generation, and a
-# handling successor that keeps supervising instead of going blind.
+# Pin the Pi/OpenCode recovery-loop fix: one announcement per generation, a
+# handling successor that keeps supervising instead of going blind, and the
+# acked:* re-arm cooldown that keeps a merely non-empty wake queue from
+# forcing a fresh downtime announcement on every single poll.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -9,6 +11,20 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-recovery-loop)
 export NODE_NO_WARNINGS=1
+
+# arm_check_action <state> <marker> <cooldown-secs>: run the production
+# fm_recovery_marker_arm_check against <marker> with the acked:* cooldown
+# pinned to <cooldown-secs> (so the test does not wait out the real 3600s
+# default), and print the resulting FM_RECOVERY_MARKER_ACTION.
+arm_check_action() {
+  local state=$1 marker=$2 secs=$3 lib="$ROOT/bin/fm-wake-lib.sh"
+  FM_STATE_OVERRIDE="$state" FM_RECOVERY_MARKER_ACKED_RESURFACE_SECS="$secs" bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    fm_recovery_marker_arm_check "$2" || exit 1
+    printf "%s\n" "$FM_RECOVERY_MARKER_ACTION"
+  ' _ "$lib" "$marker"
+}
 
 install_pi_watch_extension_fixture() {
   local repo=$1
@@ -219,5 +235,50 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# T3: an acked marker with a non-empty wake queue must re-arm at most once per
+# cooldown window, not on every poll. A single well-behaved, correctly-
+# throttled queue entry (a routine stale: recheck) must not force a fresh
+# downtime announcement every cycle just because the queue is non-empty.
+test_acked_rearm_is_throttled_by_cooldown() {
+  local dir state marker action
+  dir=$(make_case acked-rearm-cooldown)
+  state="$dir/state"
+  marker="$state/.watcher-down"
+  printf 'acked:downtime:seed.1.aaa\n' > "$marker"
+  chmod 600 "$marker"
+  printf '%s\t1\tstale\tseed\tstale: seed (idle 999s)\n' "$(date +%s)" > "$state/.wake-queue"
+
+  action=$(arm_check_action "$state" "$marker" 2) \
+    || fail "first acked check with a non-empty queue failed: $action"
+  [ "$action" = recover ] \
+    || fail "first acked check with a non-empty queue must re-arm, got: $action"
+  grep -Eq '^announced:downtime:' "$marker" \
+    || fail "first re-arm did not move the marker to announced: $(cat "$marker")"
+
+  # Drive the marker back to acked, the way _fm_recovery_marker_ack would,
+  # without advancing the wall clock - isolates the cooldown from generation
+  # bookkeeping, which T1 already pins separately.
+  printf 'acked:downtime:seed.1.aaa\n' > "$marker"
+
+  action=$(arm_check_action "$state" "$marker" 2) \
+    || fail "second acked check inside the cooldown window failed: $action"
+  [ "$action" = none ] \
+    || fail "second acked check inside the cooldown window must not re-arm, got: $action"
+  grep -qx 'acked:downtime:seed.1.aaa' "$marker" \
+    || fail "a throttled check must leave the marker acked: $(cat "$marker")"
+
+  sleep 3
+
+  action=$(arm_check_action "$state" "$marker" 2) \
+    || fail "third acked check after the cooldown expired failed: $action"
+  [ "$action" = recover ] \
+    || fail "third acked check after the cooldown expired must re-arm, got: $action"
+  grep -Eq '^announced:downtime:' "$marker" \
+    || fail "post-cooldown re-arm did not move the marker to announced: $(cat "$marker")"
+
+  pass "acked:* re-arm is throttled by a bounded cooldown instead of firing on every poll"
+}
+
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
+test_acked_rearm_is_throttled_by_cooldown
