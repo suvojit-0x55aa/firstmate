@@ -655,6 +655,7 @@ _fm_recovery_marker_arm_check() {
         return 1
       fi
       FM_RECOVERY_MARKER_ACTION='recover'
+      _fm_recovery_marker_record_announcer_locked "$marker"
     fi
     fm_lock_release "$lock"
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -675,6 +676,7 @@ _fm_recovery_marker_arm_check() {
       return 1
     fi
     FM_RECOVERY_MARKER_ACTION='recover'
+    _fm_recovery_marker_record_announcer_locked "$marker"
     fm_lock_release "$lock"
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 0
@@ -711,14 +713,70 @@ _fm_recovery_marker_arm_check() {
       fi
       ;;
   esac
+  if [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+    _fm_recovery_marker_record_announcer_locked "$marker"
+  fi
   fm_lock_release "$lock"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+# The session that saw an announcement: the firstmate session-lock owner
+# (state/.lock, written by bin/fm-lock.sh) with its process identity, recorded
+# beside the marker as "<generation>\n<pid>\n<identity>" whenever arm-check
+# announces a generation. The reopen step below reads it to tell a same-session
+# turn boundary from a genuinely new down stretch.
+_fm_recovery_session_owner() {
+  local owner
+  [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
+  IFS= read -r owner < "$STATE/.lock" || return 1
+  case "$owner" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$owner"
+}
+
+# Best effort by design: a missing or unwritable record only falls back to the
+# earlier behavior, where the next non-successor start re-announces once more.
+_fm_recovery_marker_record_announcer_locked() {
+  local marker=$1 record owner identity tmp
+  record="${marker}.announced-session"
+  if ! owner=$(_fm_recovery_session_owner) \
+    || ! identity=$(fm_pid_identity "$owner" 2>/dev/null) \
+    || ! fm_recovery_marker_read "$marker"; then
+    rm -f -- "$record"
+    return 0
+  fi
+  tmp=$(mktemp "${record}.tmp.XXXXXX") || return 0
+  if ! printf '%s\n%s\n%s\n' "${FM_RECOVERY_MARKER_TOKEN##*:}" "$owner" "$identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$record"; then
+    rm -f -- "$tmp"
+  fi
+  return 0
+}
+
+# Succeeds only when the marker's current generation was announced to the
+# session that still holds the session lock, verified by process identity so a
+# reused pid cannot pass. Any missing or mismatched fact reads as a new session.
+_fm_recovery_marker_announced_to_current_session_locked() {
+  local marker=$1 record generation owner identity current
+  record="${marker}.announced-session"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  { IFS= read -r generation && IFS= read -r owner && IFS= read -r identity; } < "$record" || return 1
+  [ -n "$generation" ] && [ "$generation" = "${FM_RECOVERY_MARKER_TOKEN##*:}" ] || return 1
+  current=$(_fm_recovery_session_owner) || return 1
+  [ "$owner" = "$current" ] || return 1
+  fm_pid_alive "$owner" || return 1
+  [ -n "$identity" ] && [ "$(fm_pid_identity "$owner" 2>/dev/null)" = "$identity" ]
 }
 
 # A non-successor watcher start after an announced-but-unacked episode is a new
 # down stretch: mint a fresh pending generation so a still-open decision or
 # buried note can be presented once more. Handling successors must not call
-# this, because Option B re-arm is not a new down stretch.
+# this, because Option B re-arm is not a new down stretch. Neither is an
+# ordinary next-turn start by the same live session that already saw this
+# generation announced, such as the Claude Stop auto-arm, which never runs as a
+# handling successor: re-opening there re-announced on every turn while the
+# queue stayed non-empty. A crashed watcher still re-announces through the
+# stale-lock recovery path in bin/fm-watch.sh, independent of this step.
 _fm_recovery_marker_reopen_announced() {
   local marker=$1 lock
   lock="${marker}.lock"
@@ -729,6 +787,10 @@ _fm_recovery_marker_reopen_announced() {
   fi
   case "$FM_RECOVERY_MARKER_TOKEN" in
     announced:*)
+      if _fm_recovery_marker_announced_to_current_session_locked "$marker"; then
+        fm_lock_release "$lock"
+        return 0
+      fi
       if ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
         fm_lock_release "$lock"
         return 1
