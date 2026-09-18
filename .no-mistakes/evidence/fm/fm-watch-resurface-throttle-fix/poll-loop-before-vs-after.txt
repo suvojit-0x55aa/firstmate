@@ -1,0 +1,25 @@
+== BEFORE (9da9c10): wake queue holds 1 throttled stale: entry; marker starts acked
+poll  1: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761866.0k1BJt) -> captain acks
+poll  2: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761866.tnY5ie) -> captain acks
+poll  3: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761866.mQa0Vj) -> captain acks
+poll  4: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761866.leyIZ3) -> captain acks
+poll  5: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761867.HKHV6I) -> captain acks
+poll  6: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761867.N4BzMH) -> captain acks
+poll  7: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761867.kxCeuB) -> captain acks
+poll  8: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761867.GxwclD) -> captain acks
+poll  9: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761867.tjOOkF) -> captain acks
+poll 10: WAKE "check: rearm-resurface"  (marker=announced:downtime:47530.1789761867.751uby) -> captain acks
+== BEFORE (9da9c10): 10 rearm-resurface wake(s) in 10 polls
+
+== AFTER (4258f87, default 3600s cooldown): wake queue holds 1 throttled stale: entry; marker starts acked
+poll  1: WAKE "check: rearm-resurface"  (marker=announced:downtime:47528.1789761868.Ces1jU) -> captain acks
+poll  2: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll  3: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll  4: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll  5: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll  6: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll  7: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll  8: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll  9: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+poll 10: quiet                            (marker=acked:downtime:47528.1789761868.Ces1jU)
+== AFTER (4258f87, default 3600s cooldown): 1 rearm-resurface wake(s) in 10 polls

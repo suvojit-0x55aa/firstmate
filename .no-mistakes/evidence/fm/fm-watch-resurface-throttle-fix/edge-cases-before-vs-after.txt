@@ -1,0 +1,19 @@
+== BEFORE (9da9c10)
+acked, queue full, no cooldown marker        rc=0 action=recover marker=announced:downtime
+acked, queue full, cooldown fresh            rc=0 action=recover marker=announced:downtime
+acked, queue full, cooldown expired (2020)   rc=0 action=recover marker=announced:downtime
+acked, queue full, cooldown path is a dir    rc=0 action=recover marker=announced:downtime
+acked, queue empty, no cooldown marker       rc=0 action=none marker=acked:downtime
+pending:downtime, queue full, cd fresh       rc=0 action=recover marker=announced:downtime
+pending:handling, queue full, cd fresh       rc=0 action=wait marker=pending:handling
+announced, queue full, cd fresh              rc=0 action=wait marker=announced:downtime
+
+== AFTER (4258f87)
+acked, queue full, no cooldown marker        rc=0 action=recover marker=announced:downtime
+acked, queue full, cooldown fresh            rc=0 action=none marker=acked:downtime
+acked, queue full, cooldown expired (2020)   rc=0 action=recover marker=announced:downtime
+acked, queue full, cooldown path is a dir    rc=0 action=none marker=acked:downtime
+acked, queue empty, no cooldown marker       rc=0 action=none marker=acked:downtime
+pending:downtime, queue full, cd fresh       rc=0 action=recover marker=announced:downtime
+pending:handling, queue full, cd fresh       rc=0 action=wait marker=pending:handling
+announced, queue full, cd fresh              rc=0 action=wait marker=announced:downtime

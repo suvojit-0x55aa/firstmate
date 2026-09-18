@@ -1,0 +1,1 @@
+not ok - second acked check inside the cooldown window must not re-arm, got: recover
