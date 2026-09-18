@@ -625,8 +625,21 @@ _fm_recovery_marker_ack() {
   fm_lock_release "$lock"
 }
 
+# Cooldown for the acked:* re-arm below, in the "acked:*)" case of the case
+# statement further down. It mirrors the bounded resurface cadence
+# bin/fm-watch.sh's resurface_absorbed() and bin/fm-supervise-daemon.sh already
+# use for every other "absorbed and quietly rechecked" case
+# (FM_PAUSE_RESURFACE_SECS, default 3600s): without a cooldown here, an acked
+# marker re-announces on the very next poll for as long as the wake queue holds
+# anything at all, including a single correctly-throttled stale: entry whose
+# own cadence is meant to be rare. Reuses that same 3600s default rather than
+# inventing a new number, kept as its own override so tests and operators can
+# tune this specific transition without touching the unrelated per-window
+# absorb cadence.
+FM_RECOVERY_MARKER_ACKED_RESURFACE_SECS_DEFAULT=3600
+
 _fm_recovery_marker_arm_check() {
-  local marker=$1 lock line quarantine
+  local marker=$1 lock line quarantine throttle throttle_secs
   FM_RECOVERY_MARKER_ACTION='none'
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
@@ -684,12 +697,15 @@ _fm_recovery_marker_arm_check() {
       FM_RECOVERY_MARKER_ACTION='recover'
       ;;
     acked:*)
-      if [ -s "$FM_WAKE_QUEUE" ]; then
+      throttle="${marker}.acked-resurfaced"
+      throttle_secs="${FM_RECOVERY_MARKER_ACKED_RESURFACE_SECS:-$FM_RECOVERY_MARKER_ACKED_RESURFACE_SECS_DEFAULT}"
+      if [ -s "$FM_WAKE_QUEUE" ] && [ "$(fm_path_age "$throttle")" -ge "$throttle_secs" ]; then
         if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
           fm_lock_release "$lock"
           fm_lock_release "$FM_WAKE_QUEUE_LOCK"
           return 1
         fi
+        date +%s > "$throttle" 2>/dev/null || true
         # shellcheck disable=SC2034 # Output read by callers after this function returns.
         FM_RECOVERY_MARKER_ACTION='recover'
       fi
