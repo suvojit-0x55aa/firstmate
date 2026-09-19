@@ -85,7 +85,9 @@
 # fm_composer_strip_ghost is the ONE ANSI-aware extractor of "real typed
 # content": it drops every de-emphasized run - dim/faint (SGR 2) AND a
 # dark/muted TRUECOLOR foreground - and keeps only normal-intensity,
-# normally-coloured text.
+# normally-coloured text. Decorative idle SHIMMER (codex's scattered Braille
+# dots) is a separate, structural rule owned by fm_composer_strip_shimmer, which
+# the screen classifier applies to every styled capture before any scan.
 #
 # UNICODE WHITESPACE (issue #1988; open PRs #1995/#2047 target the same
 # defect and #1995's naming is adopted here so the implementations converge):
@@ -272,6 +274,142 @@ fm_composer_strip_ghost() {
       print out
     }
   '
+}
+
+# fm_composer_strip_shimmer: the ONE fleet-wide remover of decorative idle
+# "shimmer" cells from a captured, STYLED screen. Reads styled lines on stdin
+# and prints them with every shimmer cell replaced by one plain space (the
+# SGR sequences stay, so row count, column geometry, and every other cell are
+# byte-identical); the screen classifier and the selected-content extractor
+# run it once on entry whenever caps carry styled=1, so the structural scan,
+# the bare wrap region, and content extraction never see shimmer at all.
+#
+# The shape (verified live on codex, model gpt-6-astra, via herdr --format
+# ansi): the idle composer is layered with a scatter of isolated Braille-dot
+# glyphs (U+2800 block, e.g. ⠁ ⠄ ⠠), each drawn as its OWN styled run with its
+# own randomized 24-bit truecolor foreground, on the composer's own background
+# (48;2;57;57;71), between long blank runs of that same background. The dots'
+# luminance spans ~68-144, so the brightest survive the luminance ghost rule
+# above; worse, a dotted padding row below the `›` row is non-blank, so the
+# bare wrap region walked through it into the model/path status line and read
+# that as typed text. Raising FM_COMPOSER_GHOST_LUMA_MAX is not a fix (muse's
+# real `⟩` sits at ~150), so this rule is purely structural. A cell is shimmer
+# only when ALL of these hold:
+#   - it is a Braille-pattern glyph (U+2800..U+28FF);
+#   - it is the only non-space cell in its styled run (between two escape
+#     sequences), so it is never part of a contiguous run of typed text;
+#   - that run carries an explicit truecolor foreground (38;2 / 38:2);
+#   - that run carries an explicit background, and the same row holds a run of
+#     at least three blank cells on that identical background.
+# Typed or placeholder text is a contiguous run, so it never qualifies; the
+# residual false-empty risk is a lone Braille character a human typed into a
+# composer that draws each typed cell in its own truecolor run, accepted as
+# negligible. Plain captures (styled=0) cannot see any of this and are left
+# alone: there the dots stay visible text, which degrades to `unknown`, never a
+# false `empty`.
+# LC_ALL=C makes awk walk bytes; a Braille glyph is the UTF-8 triple
+# E2 A0..A3 xx.
+fm_composer_strip_shimmer() {
+  LC_ALL=C awk '
+    function sgr_code(v, b) {
+      b = v
+      sub(/:.*/, "", b)
+      if (b == "") b = "0"
+      return b
+    }
+    # color_payload_end: index of the last param of the 38/48/58 colour
+    # starting at p (the same payload grammar fm_composer_strip_ghost skips).
+    function color_payload_end(a, p, k,   code) {
+      if (index(a[p], ":") > 0) return p
+      if (p >= k) return p
+      code = sgr_code(a[p + 1])
+      if (index(a[p + 1], ":") > 0) return p + 1
+      if (code == "5") return p + 2
+      if (code == "2") return p + 4
+      return p + 1
+    }
+    function is_truecolor(a, p, k,   f) {
+      if (index(a[p], ":") > 0) { split(a[p], f, ":"); return f[2] == "2" }
+      return (p < k && a[p + 1] == "2")
+    }
+    function apply_sgr(params,   a, k, p, q, x, code, spec) {
+      if (params == "") params = "0"
+      k = split(params, a, ";")
+      for (p = 1; p <= k; p++) {
+        code = sgr_code(a[p])
+        if (code == "38" || code == "48" || code == "58") {
+          q = color_payload_end(a, p, k)
+          if (code == "38") tc = is_truecolor(a, p, k)
+          if (code == "48") {
+            spec = a[p]
+            for (x = p + 1; x <= q; x++) spec = spec ";" a[x]
+            bg = spec
+          }
+          p = q
+        } else if (code == "0") { tc = 0; bg = "" }
+        else if (code == "39") tc = 0
+        else if (code + 0 >= 30 && code + 0 <= 37) tc = 0
+        else if (code + 0 >= 90 && code + 0 <= 97) tc = 0
+        else if (code == "49") bg = ""
+        else if (code + 0 >= 40 && code + 0 <= 47) bg = code
+        else if (code + 0 >= 100 && code + 0 <= 107) bg = code
+      }
+    }
+    {
+      line = $0; n = length(line); i = 1; m = 0; run = 0; tc = 0; bg = ""
+      streak = 0; streakbg = ""
+      split("", tok); split("", isesc); split("", isbr); split("", cellrun)
+      split("", celltc); split("", cellbg); split("", runglyphs); split("", blankbg)
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "\033") {
+          j = i + 1
+          if (substr(line, j, 1) == "[") {
+            j++; params = ""
+            while (j <= n) {
+              cc = substr(line, j, 1)
+              if (cc ~ /[@-~]/) break
+              params = params cc; j++
+            }
+            if (j <= n) {
+              if (substr(line, j, 1) == "m") apply_sgr(params)
+              m++; tok[m] = substr(line, i, j - i + 1); isesc[m] = 1; run++
+              i = j + 1; continue
+            }
+          }
+          m++; tok[m] = c; isesc[m] = 1; run++; i++; continue
+        }
+        len = 1
+        if (c == "\342" && i + 2 <= n && index("\240\241\242\243", substr(line, i + 1, 1)) > 0) len = 3
+        m++; tok[m] = substr(line, i, len); isesc[m] = 0; isbr[m] = (len == 3)
+        cellrun[m] = run; celltc[m] = tc; cellbg[m] = bg
+        if (c == " ") {
+          if (streak > 0 && streakbg == bg) streak++; else { streak = 1; streakbg = bg }
+          if (streak >= 3 && bg != "") blankbg[bg] = 1
+        } else {
+          streak = 0
+          runglyphs[run]++
+        }
+        i += len
+      }
+      out = ""
+      for (t = 1; t <= m; t++) {
+        if (!isesc[t] && isbr[t] && runglyphs[cellrun[t]] == 1 && celltc[t] \
+            && cellbg[t] != "" && (cellbg[t] in blankbg)) out = out " "
+        else out = out tok[t]
+      }
+      print out
+    }
+  '
+}
+
+# _fm_composer_strip_shimmer_var: apply fm_composer_strip_shimmer to a whole
+# screen in place through the named variable, preserving its exact row count
+# (a bare command substitution would drop trailing blank rows).
+_fm_composer_strip_shimmer_var() {  # <varname>
+  local __fmss_name=$1 __fmss_out
+  __fmss_out=$(printf '%s\n' "${!1}" | fm_composer_strip_shimmer; printf x)
+  printf -v "$__fmss_name" '%s' "${__fmss_out%$'\n'x}"
 }
 
 
@@ -1116,6 +1254,7 @@ fm_composer_extract_selected_content() {  # <caps> <screen>
   done <<EOF
 $caps
 EOF
+  [ "$styled" != 1 ] || _fm_composer_strip_shimmer_var screen
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
   _fm_composer_select_cursorless "$plain" || return 1
@@ -1199,6 +1338,7 @@ EOF
   if [ -n "$cy" ]; then
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
+  [ "$styled" != 1 ] || _fm_composer_strip_shimmer_var screen
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy"
   if [ -n "$cy" ]; then

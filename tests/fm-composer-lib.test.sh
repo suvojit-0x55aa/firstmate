@@ -288,6 +288,111 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   pass "matrix: herdr half-block rules bound a bare composer's wrap region"
 }
 
+# Codex idle shimmer (verified live on codex, model gpt-6-astra, through herdr
+# `pane read --format ansi`): isolated Braille dots, each its own styled run with
+# a randomized truecolor foreground, on the composer background 57;57;71. The
+# helpers below rebuild the captured bytes cell for cell: every dot is
+# `ESC[0m ESC[38;2;<fg>m ESC[48;2;57;57;71m <dot> ESC[0m`, and every blank gap is
+# `ESC[48;2;57;57;71m <spaces> ESC[0m`, exactly as the harness emits them.
+CODEX_BG='48;2;57;57;71'
+shimmer_dot() {  # <r;g;b> <glyph>
+  printf '%s[0m%s[38;2;%sm%s[%sm%s%s[0m' "$ESC" "$ESC" "$1" "$ESC" "$CODEX_BG" "$2" "$ESC"
+}
+shimmer_gap() {  # <width>
+  printf '%s[%sm%*s%s[0m' "$ESC" "$CODEX_BG" "$1" '' "$ESC"
+}
+codex_shimmer_screen() {  # <composer-row> -> the captured idle-pane tail
+  local above below status
+  above="$(shimmer_dot '71;72;88' '⠁')$(shimmer_gap 3)$(shimmer_dot '138;143;166' '⠈')$(shimmer_gap 9)"
+  above="${above}$(shimmer_dot '74;75;91' '⠄')$(shimmer_gap 10)$(shimmer_dot '134;139;161' '⠁')$(shimmer_gap 22)"
+  above="${above}$(shimmer_dot '93;95;113' '⠁')$(shimmer_dot '71;71;87' '⠀')$(shimmer_gap 6)"
+  below="$(shimmer_gap 7)$(shimmer_dot '94;96;114' '⠀')$(shimmer_dot '64;64;79' '⠐')$(shimmer_gap 27)"
+  below="${below}$(shimmer_dot '138;143;166' '⠠')$(shimmer_gap 8)$(shimmer_dot '65;65;80' '⠀')$(shimmer_gap 1)"
+  below="${below}$(shimmer_dot '99;101;120' '⠠')$(shimmer_gap 4)$(shimmer_dot '134;139;161' '⠄')$(shimmer_gap 19)"
+  status="  ${ESC}[0m${ESC}[38;2;246;226;183mgpt-6-astra high${ESC}[0m${ESC}[2m · ${ESC}[0m"
+  status="${status}${ESC}[38;2;171;223;167m~/wt/project${ESC}[0m${ESC}[2m · ${ESC}[0m"
+  status="${status}${ESC}[38;2;156;222;211mIterate reference video recreation${ESC}[0m"
+  printf '%s\n \n%s\n%s\n%s\n%s' "• Ran git status" "$above" "$1" "$below" "$status"
+}
+# The `›` row: bold glyph, then a shimmer dot glued to it, the dim placeholder,
+# and more dots. The glued dot is bright (luminance ~144) on purpose: it is the
+# placement a word-based rule would miss.
+codex_glyph_row() {  # <body-after-glyph>
+  printf '%s[0m%s[1m%s[%sm›%s[0m%s%s' "$ESC" "$ESC" "$ESC" "$CODEX_BG" "$ESC" \
+    "$(shimmer_dot '138;143;166' '⠈')" "$1"
+}
+
+test_matrix_codex_idle_shimmer_is_empty() {
+  local body row screen stripped out
+  body="${ESC}[2m${ESC}[${CODEX_BG}mAsk Codex to do anything${ESC}[0m$(shimmer_gap 3)"
+  body="${body}$(shimmer_dot '66;66;81' '⠈')$(shimmer_gap 5)$(shimmer_dot '134;139;161' '⠁')$(shimmer_gap 41)"
+  row=$(codex_glyph_row "$body")
+  screen=$(codex_shimmer_screen "$row")
+
+  # NON-VACUOUSNESS: the luminance ghost rule alone really does keep the bright
+  # dots, and the status line really is bright text a runaway wrap region would
+  # swallow. If either stopped holding, this case would pass without exercising
+  # the structural shimmer rule.
+  stripped=$(printf '%s\n' "$row" | fm_composer_strip_ghost)
+  case "$stripped" in
+    *'⠈'*'⠁'*) : ;;
+    *) fail "the bright shimmer dots must survive the luminance ghost rule, got '$stripped'" ;;
+  esac
+  case "$(printf '%s\n' "$screen" | fm_composer_strip_ghost)" in
+    *'gpt-6-astra high'*) : ;;
+    *) fail "fixture lost its bright status line" ;;
+  esac
+  # Every Braille-block glyph (UTF-8 E2 A0..A3 xx) in this fixture is shimmer.
+  out=$(printf '%s\n' "$screen" | fm_composer_strip_shimmer | fm_composer_strip_ansi)
+  if printf '%s' "$out" | LC_ALL=C grep -q $'\342[\240-\243]'; then
+    fail "fm_composer_strip_shimmer left a shimmer dot behind: '$out'"
+  fi
+
+  assert_screen "codex shimmer idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "codex shimmer idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "codex shimmer idle on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  # A plain capture cannot see the styling that identifies shimmer: it must
+  # defer, never claim empty.
+  out=$(fm_composer_classify_screen "$CAPS_PLAIN" "$(printf '%s\n' "$screen" | fm_composer_strip_ansi)")
+  [ "$out" = unknown ] || fail "codex shimmer on a plain capture must defer as unknown, got '$out'"
+  pass "matrix: codex's idle Braille shimmer reads empty when styled, even with dots above the luma cutoff"
+}
+
+test_matrix_codex_shimmer_keeps_typed_text_pending() {
+  local screen typed out
+  # Default-foreground typed text, as codex draws real input.
+  typed="${ESC}[${CODEX_BG}mfix the login bug${ESC}[0m$(shimmer_gap 20)$(shimmer_dot '134;139;161' '⠁')$(shimmer_gap 10)"
+  screen=$(codex_shimmer_screen "$(codex_glyph_row "$typed")")
+  assert_screen "codex shimmer with typed text on herdr" pending "$CAPS_STYLED" "$screen"
+  assert_screen "codex shimmer with typed text on tmux" pending "$CAPS_TMUX" "$screen" 3 probe-absent
+  # Bright truecolor typed text (~200+ luminance) in one contiguous run, with a
+  # Braille character inside the run: a contiguous run is never shimmer.
+  typed="${ESC}[38;2;230;230;230m${ESC}[${CODEX_BG}mread ⠁ aloud${ESC}[0m$(shimmer_gap 30)"
+  screen=$(codex_shimmer_screen "$(codex_glyph_row "$typed")")
+  assert_screen "codex shimmer with bright contiguous typed text" pending "$CAPS_STYLED" "$screen"
+  out=$(printf '%s\n' "$typed" | fm_composer_strip_shimmer)
+  [ "$out" = "$typed" ] || fail "a contiguous typed run must pass through the shimmer strip byte-identical"
+  pass "matrix: real typed text beside codex shimmer stays pending"
+}
+
+test_matrix_muse_glyph_untouched_by_shimmer_rule() {
+  # muse's real `⟩` (38;2;90;160;255, luminance ~149.9) is the fleet's closest
+  # glyph to the ghost cutoff. Give it every OTHER shimmer property - its own
+  # single-cell truecolor run on an explicit background with long blank runs of
+  # that background - so only the Braille-block test can keep it; it must pass
+  # through byte-identical and still read empty, and typed text must stay pending.
+  local row screen out
+  row="${ESC}[0m${ESC}[38;2;90;160;255m${ESC}[${CODEX_BG}m⟩${ESC}[0m$(shimmer_gap 40)"
+  out=$(printf '%s\n' "$row" | fm_composer_strip_shimmer)
+  [ "$out" = "$row" ] || fail "muse's ⟩ row must pass through the shimmer strip byte-identical"
+  screen=$'── Voice input (⌥ + v to start) ─────\n'"$row"
+  assert_screen "muse glyph beside shimmer-shaped background" empty "$CAPS_STYLED" "$screen"
+  assert_screen "muse glyph beside shimmer-shaped background on tmux" empty "$CAPS_TMUX" "$screen" 1
+  screen=$'── Voice input (⌥ + v to start) ─────\n'"${ESC}[0m${ESC}[38;2;90;160;255m⟩${ESC}[0m second turn"
+  assert_screen "muse typed text" pending "$CAPS_STYLED" "$screen"
+  pass "matrix: muse's ⟩ is untouched by the shimmer rule and typed muse text stays pending"
+}
+
 test_matrix_pi_separated_needs_identity() {
   # Real idle pi: a blank row between two solid rules. The blank row alone is
   # exactly what the strict rule refuses; only structure PLUS a live
@@ -617,6 +722,9 @@ test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
+test_matrix_codex_idle_shimmer_is_empty
+test_matrix_codex_shimmer_keeps_typed_text_pending
+test_matrix_muse_glyph_untouched_by_shimmer_rule
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
