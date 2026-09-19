@@ -354,6 +354,61 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 
+# Regression coverage for the enforce-pr-target incident (PR #43): a run
+# widened a 4-file task to 11 files by pushing unrelated fixes on its own, and
+# that widening reached the captain unsurfaced. The no-mistakes DOD must draw
+# an explicit line between a correction the accepted work requires and an
+# unrelated improvement the pipeline noticed along the way, and it must keep
+# the pre-existing ask-user and --yes rules intact alongside the new one.
+test_no_mistakes_dod_scope_guard_rule() {
+  local home id brief
+  home="$TMP_ROOT/scope-guard-home"
+  mkdir -p "$home/data"
+  id="brief-scope-guard-c7"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  assert_grep "Widening beyond scope is never yours to accept" "$brief" \
+    "no-mistakes DOD must state the pipeline-widening scope guard"
+  assert_grep "the smallest downstream changes needed to keep already-accepted behavior correct" "$brief" \
+    "no-mistakes DOD scope guard must keep already-accepted-behavior corrections in scope"
+  assert_grep "security-advisory dependency bump the findings themselves call for" "$brief" \
+    "no-mistakes DOD scope guard must give the ask-user-authority in-scope example"
+  assert_grep "an unrelated improvement the pipeline noticed along the way rather than a correction the accepted work requires" "$brief" \
+    "no-mistakes DOD scope guard must draw the in-scope-vs-widening line"
+  assert_grep "append \`needs-decision: {summary}\` (rule 6) and let firstmate decide before it applies" "$brief" \
+    "no-mistakes DOD scope guard must route out-of-scope widening to a decision, not auto-apply it"
+  # The two pre-existing firstmate-specific rules must survive alongside the
+  # new one, not be replaced by it.
+  assert_grep "ask-user findings are never yours to answer" "$brief" \
+    "no-mistakes DOD must keep the ask-user rule beside the new scope guard"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backtick must stay literal
+  assert_grep 'Avoid `--yes`' "$brief" \
+    "no-mistakes DOD must keep the --yes rule beside the new scope guard"
+  pass "fm-brief.sh: no-mistakes DOD gains the pipeline-widening scope guard beside the existing rules"
+}
+
+# The scope guard is a no-mistakes ship-contract addition only; --scout and
+# --secondmate scaffolds must render exactly as before.
+test_scope_guard_rule_absent_from_scout_and_secondmate() {
+  local home brief
+  home="$TMP_ROOT/scope-guard-absent-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scope-guard-scout-c7 some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-scope-guard-scout-c7/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "Widening beyond scope is never yours to accept" "$brief" \
+    "scout brief must not gain the no-mistakes scope guard"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scope-guard-sm-c7 --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/brief-scope-guard-sm-c7/brief.md"
+  assert_present "$brief" "secondmate charter was not scaffolded"
+  assert_no_grep "Widening beyond scope is never yours to accept" "$brief" \
+    "secondmate charter must not gain the no-mistakes scope guard"
+  pass "fm-brief.sh: --scout and --secondmate scaffolds are unaffected by the no-mistakes scope guard"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -760,6 +815,8 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_scope_guard_rule
+test_scope_guard_rule_absent_from_scout_and_secondmate
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
