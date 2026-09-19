@@ -242,10 +242,11 @@ The session id is printed on quit.
 
 **Idle composer shimmer (verified 2026-09-19, codex-cli 0.155.1, model gpt-6-astra, captured through herdr `pane read --format ansi`).**
 The idle composer is layered with scattered single Braille-dot glyphs (U+2800 block), each drawn as its own styled run with a randomized 24-bit truecolor foreground on the composer's own background, and the dots also fill the padding rows around the `›` row.
+Adjacent dots that draw the same colour arrive merged into one styled run, so the rule treats a run as shimmer when all of its non-space cells are Braille glyphs and it holds at most three of them; a longer Braille run or one mixed with other glyphs stays untouched.
 Their luminance spans about 68-144, so the brightest survive the 128 luminance ghost rule, and a dotted padding row let the bare wrap region run on into the model/path status line, so an idle pane read as holding typed text and `fm-send` skipped its inbox doorbell.
 Raising the luminance threshold is not a fix because muse's real `⟩` sits at about 150.
 `fm_composer_strip_shimmer` in `bin/fm-composer-lib.sh` owns the structural rule that blanks these cells on every styled capture before classification; plain captures cannot see the styling and defer as `unknown`.
-Regression coverage is `tests/fm-composer-lib.test.sh` (`test_matrix_codex_idle_shimmer_is_empty`, `test_matrix_codex_shimmer_keeps_typed_text_pending`, `test_matrix_muse_glyph_untouched_by_shimmer_rule`).
+Regression coverage is `tests/fm-composer-lib.test.sh` (`test_matrix_codex_idle_shimmer_is_empty`, `test_matrix_codex_shimmer_keeps_typed_text_pending`, `test_matrix_codex_shimmer_merged_dots_bounded`, `test_matrix_muse_glyph_untouched_by_shimmer_rule`).
 
 **Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh`.

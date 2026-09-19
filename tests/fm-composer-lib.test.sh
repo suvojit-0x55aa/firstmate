@@ -375,6 +375,33 @@ test_matrix_codex_shimmer_keeps_typed_text_pending() {
   pass "matrix: real typed text beside codex shimmer stays pending"
 }
 
+test_matrix_codex_shimmer_merged_dots_bounded() {
+  # Two adjacent dots that drew the same bright colour arrive merged into ONE
+  # styled run; the captured palette repeats exact colours, so this happens.
+  local body screen merged run out
+  merged=$(shimmer_dot '138;143;166' '⠁⠄')
+  body="${ESC}[2m${ESC}[${CODEX_BG}mAsk Codex to do anything${ESC}[0m$(shimmer_gap 3)"
+  body="${body}${merged}$(shimmer_gap 5)$(shimmer_dot '134;139;161' '⠈⠐⠠')$(shimmer_gap 40)"
+  screen=$(codex_shimmer_screen "$(codex_glyph_row "$body")")
+  case "$(printf '%s\n' "$merged" | fm_composer_strip_ghost)" in
+    *'⠁⠄'*) : ;;
+    *) fail "the merged bright dots must survive the luminance ghost rule" ;;
+  esac
+  assert_screen "codex merged shimmer dots on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "codex merged shimmer dots on tmux" empty "$CAPS_TMUX" "$screen" 3 probe-absent
+  # Four or more Braille glyphs in one run, or Braille mixed with any other
+  # glyph in one run, is never shimmer: it passes through byte-identical and the
+  # pane stays pending.
+  for run in "$(shimmer_dot '138;143;166' '⠁⠄⠠⠐')" "$(shimmer_dot '138;143;166' '⠁x')"; do
+    body="${ESC}[2m${ESC}[${CODEX_BG}mAsk Codex to do anything${ESC}[0m$(shimmer_gap 3)${run}$(shimmer_gap 40)"
+    out=$(printf '%s\n' "$body" | fm_composer_strip_shimmer)
+    [ "$out" = "$body" ] || fail "a run that is not bounded all-Braille must pass through the shimmer strip byte-identical"
+    screen=$(codex_shimmer_screen "$(codex_glyph_row "$body")")
+    assert_screen "codex non-shimmer Braille run on herdr" pending "$CAPS_STYLED" "$screen"
+  done
+  pass "matrix: merged codex shimmer dots read empty; long or mixed Braille runs stay pending"
+}
+
 test_matrix_muse_glyph_untouched_by_shimmer_rule() {
   # muse's real `⟩` (38;2;90;160;255, luminance ~149.9) is the fleet's closest
   # glyph to the ghost cutoff. Give it every OTHER shimmer property - its own
@@ -724,6 +751,7 @@ test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_codex_idle_shimmer_is_empty
 test_matrix_codex_shimmer_keeps_typed_text_pending
+test_matrix_codex_shimmer_merged_dots_bounded
 test_matrix_muse_glyph_untouched_by_shimmer_rule
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals

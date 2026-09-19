@@ -296,15 +296,20 @@ fm_composer_strip_ghost() {
 # real `⟩` sits at ~150), so this rule is purely structural. A cell is shimmer
 # only when ALL of these hold:
 #   - it is a Braille-pattern glyph (U+2800..U+28FF);
-#   - it is the only non-space cell in its styled run (between two escape
-#     sequences), so it is never part of a contiguous run of typed text;
+#   - every non-space cell in its styled run (between two escape sequences) is
+#     a Braille-pattern glyph, and the run holds at most three of them, so two
+#     or three adjacent dots that drew the same random colour (and so arrive
+#     merged into one run) still count, while a run mixing Braille with any
+#     other glyph, or holding four or more Braille glyphs, is left untouched;
 #   - that run carries an explicit truecolor foreground (38;2 / 38:2);
 #   - that run carries an explicit background, and the same row holds a run of
 #     at least three blank cells on that identical background.
-# Typed or placeholder text is a contiguous run, so it never qualifies; the
-# residual false-empty risk is a lone Braille character a human typed into a
-# composer that draws each typed cell in its own truecolor run, accepted as
-# negligible. Plain captures (styled=0) cannot see any of this and are left
+# Typed or placeholder text is a contiguous run of ordinary glyphs, so it never
+# qualifies; the residual false-empty risk is a short (one to three glyph)
+# pure-Braille word a human typed that lands in its own truecolor run on a row
+# that also holds a blank run on the same background, accepted as negligible
+# because Braille text in a composer is rare and the cost is one skipped
+# doorbell, never a lost message. Plain captures (styled=0) cannot see any of this and are left
 # alone: there the dots stay visible text, which degrades to `unknown`, never a
 # false `empty`.
 # LC_ALL=C makes awk walk bytes; a Braille glyph is the UTF-8 triple
@@ -359,7 +364,8 @@ fm_composer_strip_shimmer() {
       line = $0; n = length(line); i = 1; m = 0; run = 0; tc = 0; bg = ""
       streak = 0; streakbg = ""
       split("", tok); split("", isesc); split("", isbr); split("", cellrun)
-      split("", celltc); split("", cellbg); split("", runglyphs); split("", blankbg)
+      split("", celltc); split("", cellbg); split("", runglyphs); split("", runother)
+      split("", blankbg)
       while (i <= n) {
         c = substr(line, i, 1)
         if (c == "\033") {
@@ -389,12 +395,14 @@ fm_composer_strip_shimmer() {
         } else {
           streak = 0
           runglyphs[run]++
+          if (len != 3) runother[run]++
         }
         i += len
       }
       out = ""
       for (t = 1; t <= m; t++) {
-        if (!isesc[t] && isbr[t] && runglyphs[cellrun[t]] == 1 && celltc[t] \
+        if (!isesc[t] && isbr[t] && !(cellrun[t] in runother) && runglyphs[cellrun[t]] <= 3 \
+            && celltc[t] \
             && cellbg[t] != "" && (cellbg[t] in blankbg)) out = out " "
         else out = out tok[t]
       }
