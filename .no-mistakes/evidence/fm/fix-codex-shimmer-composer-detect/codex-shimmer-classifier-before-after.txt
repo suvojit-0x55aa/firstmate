@@ -1,0 +1,17 @@
+=== BASE 4038b06 (before fix) ===
+1. codex idle placeholder + shimmer (bright ~144-luma dots)    herdr=pending  tmux=pending  expected=empty
+1b. codex idle, two bright dots merged into one run (⠁⠄)   herdr=pending  tmux=pending  expected=empty
+2. real typed text 'fix the login bug' beside shimmer          herdr=pending  tmux=pending  expected=pending
+2b. 4 Braille glyphs in one run (over the 3-glyph bound)       herdr=pending  tmux=pending  expected=pending
+2c. Braille mixed with text in one run ('⠁x')                herdr=pending  tmux=pending  expected=pending
+3. muse pane, only its real ⟩ glyph (~150 luma)              herdr=empty    expected=empty
+3b. muse pane, ⟩ + typed text                                herdr=pending  expected=pending
+
+=== TARGET 9b1fbdf (after fix) ===
+1. codex idle placeholder + shimmer (bright ~144-luma dots)    herdr=empty    tmux=empty    expected=empty
+1b. codex idle, two bright dots merged into one run (⠁⠄)   herdr=empty    tmux=empty    expected=empty
+2. real typed text 'fix the login bug' beside shimmer          herdr=pending  tmux=pending  expected=pending
+2b. 4 Braille glyphs in one run (over the 3-glyph bound)       herdr=pending  tmux=pending  expected=pending
+2c. Braille mixed with text in one run ('⠁x')                herdr=pending  tmux=pending  expected=pending
+3. muse pane, only its real ⟩ glyph (~150 luma)              herdr=empty    expected=empty
+3b. muse pane, ⟩ + typed text                                herdr=pending  expected=pending

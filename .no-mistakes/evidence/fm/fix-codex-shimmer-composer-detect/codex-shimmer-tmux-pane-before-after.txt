@@ -1,0 +1,14 @@
+Real tmux tmux 3.6a pane painted with the captured codex idle-shimmer bytes; verdict read through the tmux adapter (capture-pane -e + cursor_y) that fm-send's doorbell pre-check uses.
+=== BASE 4038b06 (before fix) ===
+idle placeholder + shimmer               fm_tmux_composer_state=pending
+typed 'fix the login bug' + shimmer      fm_tmux_composer_state=pending
+=== TARGET 9b1fbdf (after fix) ===
+idle placeholder + shimmer               fm_tmux_composer_state=empty
+typed 'fix the login bug' + shimmer      fm_tmux_composer_state=pending
+
+--- styled capture of the idle pane as tmux re-serialises it (capture-pane -e; each ESC byte is written as backslash-e) ---
+• Ran git status
+\e[38;2;71;72;88m\e[48;2;57;57;71m⠁\e[39m   \e[38;2;138;143;166m⠈\e[39m         \e[38;2;74;75;91m⠄\e[39m          \e[38;2;134;139;161m⠁\e[39m                      \e[38;2;93;95;113m⠁\e[38;2;71;71;87m⠀\e[39m      \e[49m
+\e[1m\e[48;2;57;57;71m›\e[0m\e[38;2;138;143;166m\e[48;2;57;57;71m⠈\e[2m\e[39mAsk Codex to do anything\e[0m\e[48;2;57;57;71m   \e[38;2;66;66;81m⠈\e[39m     \e[38;2;134;139;161m⠁\e[39m                                         \e[49m
+\e[48;2;57;57;71m       \e[38;2;94;96;114m⠀\e[38;2;64;64;79m⠐\e[39m                           \e[38;2;138;143;166m⠠\e[39m        \e[38;2;65;65;80m⠀\e[39m \e[38;2;99;101;120m⠠\e[39m    \e[38;2;134;139;161m⠄\e[39m                   \e[49m
+  \e[38;2;246;226;183mgpt-6-astra high\e[2m\e[39m · \e[0m\e[38;2;171;223;167m~/wt/project\e[39m
