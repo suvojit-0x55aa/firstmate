@@ -1,6 +1,7 @@
-# Config and state file layout
+# Data, config, and state record semantics
 
-Exact per-file semantics for every `config/` and `state/` record referenced from `AGENTS.md` section 2's top-level tree.
+This doc owns the per-file semantics of every `data/`, `config/`, and `state/` record referenced from `AGENTS.md` section 2's top-level tree.
+The top-level operational-home layout is owned by [`configuration.md`](configuration.md#operational-home-layout-and-state), not restated here.
 `AGENTS.md` keeps only the top-level tree and pointers here; each producing script's own header and `--help` remain the authoritative source for exact fields and mutation mechanics whenever this doc and a script disagree.
 
 ## data/
