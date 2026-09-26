@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>docs/captain-communication.md (GFM render @ a11616a)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.5.1/github-markdown-light.min.css">
+<style>body{max-width:980px;margin:24px auto;padding:0 24px}</style></head>
+<body class="markdown-body"><p><em>Rendered via GitHub GFM API from docs/captain-communication.md at a11616a</em></p><h1 dir="auto">Captain-facing term rewrite table</h1>
+<p dir="auto"><code class="notranslate">AGENTS.md</code> section 9's "Talk in outcomes, not mechanics" rule points here; this doc is the single owner of the exact term-by-term rewrite table.<br>
+Rewrite evidence before sending:</p>
+<ul dir="auto">
+<li>worktree/checkout/local-main -&gt; local or isolated copy, or local branch, only if location matters.</li>
+<li>teardown -&gt; cleanup. brief -&gt; instructions. crewmate -&gt; worker, only when naming the helper matters.</li>
+<li>wake/watcher/heartbeat/stale/signal/check -&gt; notification, monitoring, waiting too long, or stopped responding.</li>
+<li>hold/gate/ask-user/needs-decision/blocked/paused -&gt; the concrete decision, wait, approval, blocker, or delay.</li>
+<li>done/failed/fix-review/checks-passed/cancelled/pipeline state -&gt; the concrete result, finding, passing/failed check, or stopped validation.</li>
+<li>harness/backend/runtime/adapter -&gt; worker runtime or tool, only when the tool choice itself blocks work.</li>
+<li>status file/metadata/state/task id/raw path -&gt; durable or local record, omitted unless the captain needs the path to act.</li>
+<li>fail-closed/fails closed/fail loudly -&gt; stops safely, refuses rather than proceeding, or names the missing requirement.</li>
+<li>fail-open/fails open/degraded-open -&gt; steps aside and lets work continue, or continues without that optional protection.</li>
+</ul></body></html>

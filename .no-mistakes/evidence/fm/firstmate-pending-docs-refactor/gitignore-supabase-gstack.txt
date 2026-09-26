@@ -1,0 +1,13 @@
+$ # temp clone of target commit; simulate Supabase CLI link cache and gstack dir
+$ git check-ignore -v supabase/.temp/project-ref supabase/.temp/pooler-url .gstack/state.json
+.gitignore:16:supabase/	supabase/.temp/project-ref
+.gitignore:16:supabase/	supabase/.temp/pooler-url
+.gitignore:15:.gstack/	.gstack/state.json
+$ git add -A && git status --porcelain
+(empty = nothing staged)
+$ git add supabase/.temp/project-ref
+The following paths are ignored by one of your .gitignore files:
+supabase
+hint: Use -f if you really want to add them.
+hint: Disable this message with "git config set advice.addIgnoredFile false"
+exit=1

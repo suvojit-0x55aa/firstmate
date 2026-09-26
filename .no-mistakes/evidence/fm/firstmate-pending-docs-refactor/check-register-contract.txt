@@ -1,0 +1,12 @@
+# exercising the new header contract of bin/fm-check-register.sh against a temp FM_HOME
+$ (mode 0700, single link) fm-check-register.sh t1
+registered: state/t1.check.sh
+exit=0
+  trust: fm-custom-check-v1
+  trust: b34d2493ad59135a4faee4914ff5841bb9f67bae77d36dbb766a0a0452c62c9a
+$ (mode 0755) fm-check-register.sh t2
+error: custom check is unavailable
+exit=1
+$ (mode 0700, two hard links) fm-check-register.sh t3
+error: custom check is unavailable
+exit=1

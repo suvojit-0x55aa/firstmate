@@ -1,0 +1,16 @@
+# captain decisions and round-1 fixes, verified in the committed docs at a11616a
+PASS D1 hard rule 1 keeps unlanded-work boundary (AGENTS.md:26)
+PASS F2 direct-edit exception scoped 'for a specific project' (AGENTS.md:26)
+PASS F2 'with its own file tools' (AGENTS.md:26)
+PASS F1 away stub keeps inline marker encoding (AGENTS.md:278)
+PASS D2 skill owns malformed-config refusal/tie-breaking (.agents/skills/quota-array-dispatch/SKILL.md:15)
+PASS D2 AGENTS.md sec 4 owns only trigger+boundary (.agents/skills/quota-array-dispatch/SKILL.md:16)
+PASS D3 configuration.md points to state-layout.md (docs/configuration.md:11)
+PASS D3 state-layout.md points to configuration.md (docs/state-layout.md:4)
+PASS F3 abort carve-out cross-refs recovery doc (docs/no-mistakes-validation.md:4)
+PASS F5 accepted-intent corrections clause (docs/no-mistakes-validation.md:9)
+PASS F4 fmx-respond load trigger 'before promising' (AGENTS.md:366)
+PASS F7 config/ pointer narrowed (AGENTS.md:63)
+# quota-array-dispatch in AGENTS.md section 4:
+10:Load `quota-array-dispatch` before choosing among a matched profile array; it is the single owner of the quota-informed, TOON-first spendPriority selection procedure, candidate-accounting requirements, and tie-breaking rules - never resolve a matched array 
+# secondmate-routing parenthetical in section 7:

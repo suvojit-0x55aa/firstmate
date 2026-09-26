@@ -1,0 +1,10 @@
+$ negative control: temp copy with docs/state-layout.md removed
+checked 258 references across 8 files
+FAIL AGENTS.md: backticked path missing: docs/state-layout.md
+FAIL AGENTS.md: backticked path missing: docs/state-layout.md
+FAIL AGENTS.md: backticked path missing: docs/state-layout.md
+FAIL AGENTS.md: backticked path missing: docs/state-layout.md
+FAIL file missing: docs/state-layout.md
+FAIL docs/configuration.md: link target missing: state-layout.md
+RESULT: 6 problem(s)
+exit=1

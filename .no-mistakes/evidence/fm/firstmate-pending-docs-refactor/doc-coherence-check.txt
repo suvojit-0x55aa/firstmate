@@ -1,0 +1,4 @@
+$ python3 doc-coherence-check.py <worktree>
+checked 298 references across 8 files
+RESULT: ok
+exit=0
