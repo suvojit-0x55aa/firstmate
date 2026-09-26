@@ -237,6 +237,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/captain-communication.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },
@@ -289,6 +293,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/no-mistakes-validation.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
@@ -305,8 +313,16 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/session-start-digest.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/state-layout.md",
+      "audience": "agent-runtime"
     },
     {
       "path": "docs/subagent-guard.md",
@@ -383,6 +399,10 @@
     {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/validation-invalidation-recovery.md",
+      "audience": "agent-runtime"
     },
     {
       "path": "docs/voice-relay.md",

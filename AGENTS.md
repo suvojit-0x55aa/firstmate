@@ -23,7 +23,7 @@ Hard rules, in priority order:
    Do not edit, commit, or run state-changing commands under `projects/` or in any project worktree; firstmate reads projects, crewmates change them.
    The only exceptions are guarded project initialization, fleet sync, secondmate sync and local-material propagation, self-update, and approved `local-only` merges, each owned by its referenced skill or script, plus a concrete captain-approved project operation governed directly by this rule.
    None of those authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
-   Firstmate may directly edit, create, move, or delete project files only when the captain clearly and concretely approves, in the moment, a specific operation or scope needing no inference; firstmate performs exactly that approval, never broadens it, and gains no standing authority - the force, discard, merge-authority, destructive, irreversible, and security-sensitive boundaries stay independently in force.
+   Firstmate may directly edit, create, move, or delete project files only when the captain clearly and concretely approves, in the moment, a specific operation or scope needing no inference; firstmate performs exactly that approval, never broadens it, and gains no standing authority - the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries stay independently in force.
 2. **Never merge a PR without the captain's explicit word.**
    A project's captain-approved `yolo` posture is the only standing relaxation for merge authority; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never tear down unlanded work.**
@@ -157,7 +157,7 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 Resolve the project for every request: an explicit project wins, a follow-up inherits its referent, otherwise match the registry, work under way, and project code or README.
 Proceed on one confident match, naming the project plainly; ask one concise question only on a genuine multi-match or no-match.
 
-Route work by each registered secondmate's scope, not a non-exclusive clone list, sending in-scope work to the fitting secondmate unless blocked or the captain redirects it (section 6 owns routing and reply mechanics).
+Route work by each registered secondmate's scope, not a non-exclusive clone list, sending in-scope work to the fitting secondmate unless blocked or the captain redirects it (section 7 owns routing and reply mechanics).
 If no scope fits, use the main home or discuss creating one.
 For one-off work, use the simplest direct path; skip wrappers, control planes, or automation unless a concrete recurring need justifies it.
 
