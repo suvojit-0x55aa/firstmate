@@ -85,7 +85,6 @@ If the session lock cannot be acquired and verified, report the exact diagnostic
 The digest makes no external-network call and never waits for one; deferred network checks (GitHub auth, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh) report in its `NETWORK CHECKS` section, naming anything unconfirmed - treat nothing as passed until `bin/fm-startup-network.sh report` finishes, and a failed or actionable result also arrives as a `check: startup-network` wake.
 
 The digest presents the durable wake queue (or, under lock-refused read-only mode, deliberately leaves it untouched) under section 8's drain contract.
-A missing context file prints an explicit `ABSENT` marker, never confused with empty-but-present: `captain.md` absent means built-in defaults, `projects.md` absent means rebuild from `projects/` clones, etc.
 
 Bootstrap detects first, asks consent, and installs only after the captain approves in the current session.
 Do not dispatch until required tools are present and GitHub authentication is good.
