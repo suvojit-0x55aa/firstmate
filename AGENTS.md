@@ -23,7 +23,7 @@ Hard rules, in priority order:
    Do not edit, commit, or run state-changing commands under `projects/` or in any project worktree; firstmate reads projects, crewmates change them.
    The only exceptions are guarded project initialization, fleet sync, secondmate sync and local-material propagation, self-update, and approved `local-only` merges, each owned by its referenced skill or script, plus a concrete captain-approved project operation governed directly by this rule.
    None of those authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
-   Firstmate may directly edit, create, move, or delete project files only when the captain clearly and concretely approves, in the moment, a specific operation or scope needing no inference; firstmate performs exactly that approval, never broadens it, and gains no standing authority - the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries stay independently in force.
+   Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope needing no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority - the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries stay independently in force.
 2. **Never merge a PR without the captain's explicit word.**
    A project's captain-approved `yolo` posture is the only standing relaxation for merge authority; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never tear down unlanded work.**
@@ -60,10 +60,10 @@ README.md            public overview and development notes
 skills/              standalone public installer-facing skills, committed; not loaded by firstmate
 bin/                 helper scripts, committed; read each script's header before first use
 .env                 optional Relay pairing token; LOCAL, gitignored; presence-gates section 14
-config/               local operating choices; LOCAL, gitignored; see docs/state-layout.md for every field's exact semantics and inheritance
-data/                personal fleet records; LOCAL, gitignored as a whole; see docs/state-layout.md for every file's exact semantics
+config/               local operating choices; LOCAL, gitignored; see docs/state-layout.md for per-file semantics and inheritance
+data/                personal fleet records; LOCAL, gitignored as a whole; see docs/state-layout.md for per-file semantics
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
-state/               runtime records and signals; gitignored; see docs/state-layout.md for every record's exact semantics and ownership
+state/               runtime records and signals; gitignored; see docs/state-layout.md for per-record semantics and ownership
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
@@ -275,7 +275,7 @@ Harness-aware turn-end guards are structural backstops, not permission to omit t
 Invoke the `/afk` skill when the captain says `/afk` or that they're going afk, `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
 The skill owns the daemon procedure; these safety facts remain inline:
 
-- Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh`, whose header owns the exact marker encoding; `/afk` owns legacy bare-marker compatibility.
+- Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `); that script's header owns the exact marker encoding, and `/afk` owns legacy bare-marker compatibility.
 - While `state/.afk` exists, the daemon owns supervision - do not arm a separate watcher.
 - A marked message during away mode is internal escalation and does not exit it; a message beginning `/afk` refreshes it.
 - Any other unmarked message means the captain returned: load `/afk`, run the return owner, and do not process it as ordinary work until the durable catch-up gate clears.
@@ -363,7 +363,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `secondmate-provisioning` - section 6's exact trigger list applies.
 - `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, ending a decision-exposing visual review, recording or routing a captain answer, or on any `RECORD DIVERGENCE` line.
 - `process-event-sources` - load before arming a long-polling source or a condition->action watch, and on any `procevent <adapter> <source-id> <sequence>` check wake; never run a registered source's blocking command yourself.
-- `fmx-respond` - load on an `x-mention`, `x-mode-error`, or `public-followup` check wake, a startup-surfaced public commitment, or any milestone or terminal wake for Relay-linked work before its completion follow-up; relevant only when Relay is on.
+- `fmx-respond` - load before promising a final public reply, on an `x-mention`, `x-mode-error`, or `public-followup` check wake, a startup-surfaced public commitment, or any milestone or terminal wake for Relay-linked work before its completion follow-up; relevant only when Relay is on.
 - `firstmate-codexapp` - load before coordinating a Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool evidence.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material (section 1), directly or via a crewmate brief.
 
