@@ -1,0 +1,25 @@
+COMMAND=FM_TEST_EVIDENCE=1 bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh
+BASH_PATH=/bin/bash
+GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
+FM_TEST_BEGIN 2026-10-08T21:22:17Z tests/fm-watch-recovery-loop.test.sh family=watcher-wake-lock expected_gate_skip=none
+T2_WATCH_OUTPUT=signal: /var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-watch-recovery-loop.n0CmoF/recovery-gap-successor/state/crew.status 
+T2_QUEUE_ROW=1791494539	2	signal	crew.status	signal: /var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-watch-recovery-loop.n0CmoF/recovery-gap-successor/state/crew.status
+ok - a resurfacing handling successor stays alive and supervises instead of going blind
+T1_MESSAGES=1
+T1_LOCK_PID=18206
+T1_MARKER=announced:downtime:seed.1.aaa
+ok - unacknowledged recovery is announced at most once per generation and the successor stays alive
+ok - acked:* re-arm is throttled by a bounded cooldown instead of firing on every poll
+T4_TURN1=check: rearm-resurface 
+T4_SAME_SESSION_TURN2=
+T4_SAME_SESSION_TURN3=
+T4_UNVERIFIABLE_OWNER=check: rearm-resurface 
+T4_CRASHED_WATCHER=check: rearm-resurface 
+T4_NEW_SESSION=check: rearm-resurface 
+T4_DEAD_SESSION=check: rearm-resurface 
+T4_GENERATIONS=same:seed.1.aaa/seed.1.aaa unverified:28702.1791494614.aAbe35 crash:28702.1791494614.aAbe35 new:29727.1791494616.F1eOuY dead:30102.1791494616.ETi4Dk
+ok - an ordinary same-session turn keeps the announced episode, while a new or dead session and a crashed watcher still re-announce
+FM_TEST_END 2026-10-08T21:23:37Z tests/fm-watch-recovery-loop.test.sh exit=0 duration_ms=79834 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=79944
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=79834 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-watch-recovery-loop.test.sh duration_ms=79834
