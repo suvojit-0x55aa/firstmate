@@ -3,7 +3,8 @@
 # handling successor that keeps supervising instead of going blind, and the
 # acked:* re-arm cooldown that keeps a merely non-empty wake queue from
 # forcing a fresh downtime announcement on every single poll, and the
-# same-session turn boundary that must not re-open an announced episode.
+# same-session Codex checkpoint boundary that must not re-open an announced
+# episode.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -281,10 +282,10 @@ test_acked_rearm_is_throttled_by_cooldown() {
 }
 
 # start_nonsuccessor_watcher <dir> <out>: start the real watcher the way the
-# Claude Stop auto-arm does between turns - a plain start with no
-# FM_WATCH_HANDLING_SUCCESSOR - and set WATCHER_CHILD to its pid. It sets a
-# variable instead of printing so the watcher stays this shell's own child and
-# `wait` really waits for it to exit.
+# Codex foreground checkpoint and Claude Stop auto-arm do between turns - a
+# plain start with no FM_WATCH_HANDLING_SUCCESSOR - and set WATCHER_CHILD to its
+# pid. It sets a variable instead of printing so the watcher stays this shell's
+# own child and `wait` really waits for it to exit.
 start_nonsuccessor_watcher() {
   local dir=$1 out=$2
   PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" \
@@ -335,14 +336,14 @@ marker_generation() {
 }
 
 # T4: an announced-but-unacked episode must not be re-opened by the next
-# ordinary turn of the SAME firstmate session. The Claude Stop auto-arm starts
-# every next-turn watcher as a non-successor; before the fix each of those
-# starts minted a fresh generation and re-fired check: rearm-resurface on every
-# wake-handling cycle while the queue stayed non-empty. A different session
-# owner (a genuinely new down stretch) must still re-open and re-announce, and
-# a crashed watcher's stale lock must still re-announce within the same session.
+# ordinary turn of the SAME firstmate session. Each Codex foreground checkpoint
+# starts its watcher as a non-successor; before the fix, the checkpoint after a
+# quiet close minted a fresh generation and re-fired check: rearm-resurface
+# while the queue stayed non-empty. A different or unverifiable session owner
+# (a genuinely new down stretch) must still re-open and re-announce, and a
+# crashed watcher's stale lock must still re-announce within the same session.
 test_same_session_turn_does_not_reopen_announced_episode() {
-  local dir state marker session other gen1 gen2 gen3 gen4 out child
+  local dir state marker record session other gen1 gen2 gen_unverified gen_crash gen_new gen_dead out child
   dir=$(make_case same-session-reopen)
   state="$dir/state"
   marker="$state/.watcher-down"
@@ -401,6 +402,18 @@ test_same_session_turn_does_not_reopen_announced_episode() {
   [ "$(marker_generation "$marker")" = "$gen1" ] \
     || fail "T4 turn 3 minted a fresh generation for the same session"
 
+  # Negative control: an unverifiable saved process identity cannot prove that
+  # this is the same owning process, even when the numeric session pid matches.
+  record="${marker}.announced-session"
+  printf '%s\n%s\nunverifiable-process-identity\n' "$gen1" "$session" > "$record"
+  out="$dir/turn-unverifiable-owner.out"
+  run_turn "$dir" "$out"
+  grep -qF 'check: rearm-resurface' "$out" \
+    || fail "T4 an unverifiable owner must re-announce the unacked episode: $(cat "$out")"
+  gen_unverified=$(marker_generation "$marker")
+  [ "$gen_unverified" != "$gen1" ] \
+    || fail "T4 an unverifiable owner must mint a fresh generation (still $gen1)"
+
   # Negative control: a watcher crash inside the same session leaves a stale
   # lock, and the next start must still re-announce.
   out="$dir/turn-crashed.out"
@@ -415,7 +428,7 @@ test_same_session_turn_does_not_reopen_announced_episode() {
   run_turn "$dir" "$out"
   grep -qF 'check: rearm-resurface' "$out" \
     || fail "T4 a crashed watcher's stale lock must still re-announce: $(cat "$out")"
-  gen3=$(marker_generation "$marker")
+  gen_crash=$(marker_generation "$marker")
 
   # Negative control: a different live session owner is a new down stretch.
   printf '%s\n' "$other" > "$state/.lock"
@@ -423,9 +436,9 @@ test_same_session_turn_does_not_reopen_announced_episode() {
   run_turn "$dir" "$out"
   grep -qF 'check: rearm-resurface' "$out" \
     || fail "T4 a new session must re-announce the unacked episode: $(cat "$out")"
-  gen4=$(marker_generation "$marker")
-  [ "$gen4" != "$gen3" ] \
-    || fail "T4 a new session must mint a fresh generation (still $gen3)"
+  gen_new=$(marker_generation "$marker")
+  [ "$gen_new" != "$gen_crash" ] \
+    || fail "T4 a new session must mint a fresh generation (still $gen_crash)"
   grep -Eq '^announced:downtime:' "$marker" \
     || fail "T4 new-session re-announce did not mark the fresh episode announced: $(cat "$marker")"
 
@@ -436,8 +449,21 @@ test_same_session_turn_does_not_reopen_announced_episode() {
   run_turn "$dir" "$out"
   grep -qF 'check: rearm-resurface' "$out" \
     || fail "T4 a dead session owner must re-announce the unacked episode: $(cat "$out")"
-  [ "$(marker_generation "$marker")" != "$gen4" ] \
+  gen_dead=$(marker_generation "$marker")
+  [ "$gen_dead" != "$gen_new" ] \
     || fail "T4 a dead session owner must mint a fresh generation"
+
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf 'T4_TURN1=%s\n' "$(tr '\n' ' ' < "$dir/turn1.out")"
+    printf 'T4_SAME_SESSION_TURN2=%s\n' "$(tr '\n' ' ' < "$dir/turn2.out")"
+    printf 'T4_SAME_SESSION_TURN3=%s\n' "$(tr '\n' ' ' < "$dir/turn3.out")"
+    printf 'T4_UNVERIFIABLE_OWNER=%s\n' "$(tr '\n' ' ' < "$dir/turn-unverifiable-owner.out")"
+    printf 'T4_CRASHED_WATCHER=%s\n' "$(tr '\n' ' ' < "$dir/turn-crash.out")"
+    printf 'T4_NEW_SESSION=%s\n' "$(tr '\n' ' ' < "$dir/turn-new-session.out")"
+    printf 'T4_DEAD_SESSION=%s\n' "$(tr '\n' ' ' < "$dir/turn-dead-session.out")"
+    printf 'T4_GENERATIONS=same:%s/%s unverified:%s crash:%s new:%s dead:%s\n' \
+      "$gen1" "$gen2" "$gen_unverified" "$gen_crash" "$gen_new" "$gen_dead"
+  fi
 
   kill "$session" 2>/dev/null || true
   wait "$session" 2>/dev/null || true

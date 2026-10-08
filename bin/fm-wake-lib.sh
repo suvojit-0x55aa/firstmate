@@ -773,10 +773,11 @@ _fm_recovery_marker_announced_to_current_session_locked() {
 # buried note can be presented once more. Handling successors must not call
 # this, because Option B re-arm is not a new down stretch. Neither is an
 # ordinary next-turn start by the same live session that already saw this
-# generation announced, such as the Claude Stop auto-arm, which never runs as a
-# handling successor: re-opening there re-announced on every turn while the
-# queue stayed non-empty. A crashed watcher still re-announces through the
-# stale-lock recovery path in bin/fm-watch.sh, independent of this step.
+# generation announced, such as the next Codex foreground checkpoint or the
+# Claude Stop auto-arm, neither of which runs as a handling successor:
+# re-opening there re-announced on every turn while the queue stayed non-empty.
+# A crashed watcher still re-announces through the stale-lock recovery path in
+# bin/fm-watch.sh, independent of this step.
 _fm_recovery_marker_reopen_announced() {
   local marker=$1 lock
   lock="${marker}.lock"
