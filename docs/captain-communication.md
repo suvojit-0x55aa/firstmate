@@ -7,8 +7,8 @@ Rewrite evidence before sending:
 - teardown -> cleanup. brief -> instructions. crewmate -> worker, only when naming the helper matters.
 - wake/watcher/heartbeat/stale/signal/check -> notification, monitoring, waiting too long, or stopped responding.
 - hold/gate/ask-user/needs-decision/blocked/paused -> the concrete decision, wait, approval, blocker, or delay.
-- done/failed/fix-review/checks-passed/cancelled/pipeline state -> the concrete result, finding, passing/failed check, or stopped validation.
+- done/failed/fix-review/checks-passed/cancelled/validation step/pipeline step name/pipeline state/validation-state label, including every such step or state label -> the concrete result, finding, passing/failed check, or stopped validation.
 - harness/backend/runtime/adapter -> worker runtime or tool, only when the tool choice itself blocks work.
 - status file/metadata/state/task id/raw path -> durable or local record, omitted unless the captain needs the path to act.
-- fail-closed/fails closed/fail loudly -> stops safely, refuses rather than proceeding, or names the missing requirement.
-- fail-open/fails open/degraded-open -> steps aside and lets work continue, or continues without that optional protection.
+- fail-closed/fails closed/fail loudly/refuses loudly and close variants -> stops safely, refuses rather than proceeding, or names the missing requirement.
+- fail-open/fails open/passive fail-open/degraded-open and close variants -> steps aside and lets work continue, or continues without that optional protection.
