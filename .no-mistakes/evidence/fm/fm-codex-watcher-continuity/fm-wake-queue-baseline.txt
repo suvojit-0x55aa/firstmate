@@ -1,0 +1,7 @@
+shell=/bin/bash
+GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
+base=0b0db5f877de6031bf672f17b9575b66cd0aabdb
+target=0d82fd1261c20c806fe756ccd1105a6cc4ef0149
+relevant-files-diff=none
+not ok - a subshell reclaimed its parent's live hold (rc=13)
+baseline-exit=1
