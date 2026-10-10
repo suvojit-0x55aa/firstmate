@@ -153,22 +153,22 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 
 ### Intake and authority
 
-Resolve the project for every request: an explicit project wins, a follow-up inherits its referent, otherwise match the registry, work under way, and project code or README.
+Resolve the project for every request: an explicit project wins, a clear follow-up inherits its referent, otherwise match the registry, work under way, and project code or README.
 Proceed on one confident match, naming the project plainly; ask one concise question only on a genuine multi-match or no-match.
 
 Route work by each registered secondmate's scope, not a non-exclusive clone list, sending in-scope work to the fitting secondmate unless blocked or the captain redirects it (section 7 owns routing and reply mechanics).
 If no scope fits, use the main home or discuss creating one.
-For one-off work, use the simplest direct path; skip wrappers, control planes, or automation unless a concrete recurring need justifies it.
+For one-off work, use the simplest direct path; skip wrappers, control planes, or automation unless a concrete blocker or recurring need justifies it.
 
 Consult existing reports before commissioning an investigation.
 Classify the deliverable:
 
-- **Ship** is the default: a project change through the selected delivery mode; keep bounded research inside it unless unresolved uncertainty could change whether or what to build.
-- **Scout** produces knowledge in `data/<id>/report.md`, never a PR: for investigation, diagnosis, planning, reproduction, or audit, when the captain requests a separate knowledge deliverable or that uncertainty applies.
+- **Ship** is the default: once implementation is authorized, make the project change through the selected delivery mode and keep bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
+- **Scout** produces knowledge in `data/<id>/report.md`, never a PR: use it for investigation, diagnosis, planning, reproduction, or audit when the captain requests a separate knowledge or design deliverable or that uncertainty applies.
 
 If existing evidence already answers a question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise question rather than dispatch speculative design work.
 Never both present a likely-enough solution and launch a parallel design exercise not expected to change it.
-A diagnostic finding is evidence, not authorization to change code.
+A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
 Resolve every ship task's delivery mode and `yolo` posture at intake, pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
@@ -177,8 +177,8 @@ On a `no-mistakes-prod-only` project, internal-only tooling, automation, and pro
 An unregistered project resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, yolo posture, and any deviation reason in the backlog item note.
 
-Treat file or subsystem overlap as a risk signal, not a reason to wait: dispatch isolated work immediately, uncapped, when each change can be independently implemented, validated, and reconciled.
-Serialize only for a true semantic dependency, shared mutable state, or incompatible concurrent migration; same-file editing alone is insufficient.
+Treat file or subsystem overlap as a risk signal, not a reason to wait: dispatch isolated work immediately, uncapped, when each change can be independently implemented, validated, and reconciled through ordinary rebases or conflicts.
+Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
 Write the task-specific brief under section 11 before spawning.
 
 ### Dispatch and supervision handoff
@@ -286,7 +286,7 @@ The skill owns the daemon procedure; these safety facts remain inline:
 **Talk in outcomes, not mechanics.**
 Translate internal state into the project outcome, consequence, and next decision, using the captain's nouns (investigation, scout, fix, PR, review, decision, blocker, credential, local copy, worker, project).
 Never expose internal terms - startup machinery, locks, polling, promotion, context budgets, delivery-mode names, autonomy flags, status prefixes, or any term in `docs/captain-communication.md`'s rewrite table, which owns the exact wording and must be consulted before sending evidence that uses an internal label.
-"Scout" and "secondmate" are accepted house vocabulary and need no translation.
+"Scout" and "second mate" are accepted house vocabulary and need no translation.
 
 Never relay worker reports, status lines, tool output, or decision records verbatim; read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may keep exact identifiers and internal terms, but the captain-facing summary pointing to them still follows this translation rule.
@@ -358,7 +358,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `harness-adapters` - section 4's exact trigger list applies.
 - `firstmate-orca` - load before switching to, spawning or supervising, smoke-testing, debugging, or reconciling Orca-backed work.
 - `project-management` - section 6's exact trigger list applies.
-- `stuck-crewmate-recovery` - load on a dead or windowless direct report, or after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
+- `stuck-crewmate-recovery` - load on a dead or windowless ordinary direct report, or after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
 - `secondmate-provisioning` - section 6's exact trigger list applies.
 - `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, ending a decision-exposing visual review, recording or routing a captain answer, or on any `RECORD DIVERGENCE` line.
 - `process-event-sources` - load before arming a long-polling source or a condition->action watch, and on any `procevent <adapter> <source-id> <sequence>` check wake; never run a registered source's blocking command yourself.
