@@ -15,7 +15,7 @@ When this session owns supervision and away mode is not active:
 8. Failure or missing cycle only: drain queued wakes, inspect the failure, then start a fresh foreground checkpoint.
 
 The tracked Codex Stop hook calls `bin/fm-turnend-guard.sh --codex`.
-`stop_hook_active=true` does not bypass watcher health in that mode: Codex may end the turn only after a live identity-matched checkpoint owns the home, and the watcher singleton refuses a duplicate checkpoint.
+`stop_hook_active=true` does not bypass watcher health in that mode: while supervision is needed, Codex may end the turn only after a live identity-matched checkpoint owns the home, and the watcher singleton refuses a duplicate checkpoint.
 
 Codex cannot reason while a foreground tool call is running.
 The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.

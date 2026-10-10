@@ -13,7 +13,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.
 The turn-end guard closes the remaining gap at the primary's own turn boundary.
-When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end until recovery ownership exists or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
+When work, a process-event source, or Relay polling needs supervision at that boundary and no identity-matched watcher has a fresh beacon, the harness integration must either block the turn end under its harness-specific recovery contract or force one bounded follow-up that uses the recovery instruction from the emitted session-start protocol.
 The mid-turn pull warning uses the model-aware supervision verdict described below, while the turn-end guard keeps the PID-strict watcher predicate.
 The guard remains a backstop; [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
@@ -69,7 +69,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
 
-Codex runs the guard with `--codex` and may finish only while `fm_watcher_healthy` proves that a live identity-matched checkpoint owns the home.
+While supervision is needed, Codex runs the guard with `--codex` and may finish only when `fm_watcher_healthy` proves that a live identity-matched checkpoint owns the home.
 An actionable watcher close releases the singleton lock after durably queuing its wake, so handling and acknowledgement do not count as successor ownership.
 The next Stop stays blocked even when `stop_hook_active=true` until Codex starts the next foreground checkpoint and its live watcher acquires that lock.
 Codex 0.155.1 was live-verified to honor consecutive exit-2 Stop continuations for one `turn_id`, with payloads progressing from `stop_hook_active=false` to `true` and remaining `true` on later continuations.
