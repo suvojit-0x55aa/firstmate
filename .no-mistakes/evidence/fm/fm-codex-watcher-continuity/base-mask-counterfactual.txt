@@ -1,0 +1,10 @@
+Base commit: 0b0db5f877de6031bf672f17b9575b66cd0aabdb
+Setup: in-flight task metadata exists; no watcher lock or beacon exists.
+Counterfactual A: stop_hook_active=false -> exit 2
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  TURN WOULD END BLIND - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher holds this home lock (last beat: never).
+●  repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds 180.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Counterfactual B: stop_hook_active=true -> exit 0; output_bytes=0
+Only stop_hook_active changed. The base guard allowed the second stop despite unchanged unhealthy supervision.

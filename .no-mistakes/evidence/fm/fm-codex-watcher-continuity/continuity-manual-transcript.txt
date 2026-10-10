@@ -1,0 +1,41 @@
+Target commit: de4e26729f0114d130d48bdaa110a64f3a962908
+Fixture home: /Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M4KFC94Q3H0HZHS6EAB2NKSX/.manual-codex-e2e.0Us6W6
+Setup: one in-flight task; no initial watcher owner.
+Round 1 successor owner PID: 93703
+Round 1 actionable checkpoint exit: 0
+Round 1 checkpoint output: signal: /Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M4KFC94Q3H0HZHS6EAB2NKSX/.manual-codex-e2e.0Us6W6/state/demo.status
+Round 1 watcher lock after actionable exit: absent
+Round 1 drain: actionable wake displayed and WAKE_ACK_REQUIRED command issued.
+Round 1 acknowledgement exit: 0; wake queue empty: yes
+Round 1 Codex Stop with stop_hook_active=true and no successor: exit 2
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  TURN WOULD END BLIND - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher holds this home lock (last beat: 25s ago).
+●  repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds 180.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Round 1 live successor owner PID: 96643
+Round 1 Codex Stop after successor ownership: exit 0; output_bytes=0
+Round 1 duplicate checkpoint: exit 1; output: watcher: already running pid 96643
+checkpoint: watcher is already running outside this foreground checkpoint
+Round 1 owner after duplicate refusal: 96643 (unchanged=yes)
+Round 2 actionable checkpoint exit: 0
+Round 2 checkpoint output: signal: /Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M4KFC94Q3H0HZHS6EAB2NKSX/.manual-codex-e2e.0Us6W6/state/demo.status
+Round 2 watcher lock after actionable exit: absent
+Round 2 drain output:
+1791655812	4	signal	demo.status	signal: /Users/shin/.no-mistakes/worktrees/0a8c2d835f4a/01M4KFC94Q3H0HZHS6EAB2NKSX/.manual-codex-e2e.0Us6W6/state/demo.status
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 4 --recovery-generation 96643.1791655812.LKhZd1
+wake annotation: latest wake-EVENT observed at drain, not current state: demo.status: done: actionable wake two
+WARNING: watcher still down (same stale episode; last beat: 11s ago, grace 300s) - full banner already printed this episode.
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+Round 2 acknowledgement exit: 0; wake queue empty: yes
+Round 2 Codex Stop with stop_hook_active=true and no successor: exit 2
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  TURN WOULD END BLIND - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher holds this home lock (last beat: 11s ago).
+●  repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds 180.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Round 2 live successor owner PID: 99454
+Round 2 Codex Stop after successor ownership: exit 0; output_bytes=0
+Round 2 duplicate checkpoint: exit 1; output: watcher: already running pid 99454
+checkpoint: watcher is already running outside this foreground checkpoint
+Round 2 owner after duplicate refusal: 99454 (unchanged=yes)

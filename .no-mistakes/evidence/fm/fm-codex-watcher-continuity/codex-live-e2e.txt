@@ -1,0 +1,1 @@
+ok - codex-cli 0.155.1 live E2E preserved the foreground checkpoint and honored Stop payloads false,true,true for one turn_id
