@@ -1,6 +1,6 @@
 # Data, config, and state record semantics
 
-This doc owns the per-file semantics of every `data/`, `config/`, and `state/` record referenced from `AGENTS.md` section 2's top-level tree.
+This doc owns the per-file semantics of the operational `data/`, `config/`, and `state/` records documented below.
 The top-level operational-home layout is owned by [`configuration.md`](configuration.md#operational-home-layout-and-state), not restated here.
 `AGENTS.md` keeps only the top-level tree and pointers here; each producing script's own header and `--help` remain the authoritative source for exact fields and mutation mechanics whenever this doc and a script disagree.
 
@@ -81,6 +81,10 @@ state/               runtime records and signals; gitignored
   x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (AGENTS.md section 14)
   public-followup/   generated private transport for promised public replies: retained open-loop registrations, typed terminal-result inbox, accepted/rejected ledgers, and retirement receipts (AGENTS.md section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated Relay and offer-claim diagnostic dedupe markers
+  terminal-outcomes/ durable pending, reported, and presented inactive terminal-outcome receipts retained until their upstream receipt is durable; bin/fm-inactive-reconcile.sh owns their lifecycle and exact schema
+  .fm-inherited-config-reread.* .fm-inherited-config-reread.*.pending  private generation-stamped secondmate config-reread instructions and their pending-delivery markers
+  .fm-inherited-config-reread-retry/  private source-home retry stages, reports, and sequence state for config-reread delivery
+  .fm-inherited-config-reread-quarantine/  bounded private preservation of config-reread generations whose cleanup failed; bin/fm-config-inherit-lib.sh owns these three config-reread record families
   .startup-network.*  status, report, per-step elapsed timings, inline-print claim, and lock for the deferred network stage session start runs off its blocking path; bin/fm-startup-network.sh
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .watcher-down .watcher-down.announced-session  private recovery marker and announcing-session identity sidecar; docs/watcher-continuity.md owns the contract; never touch

@@ -171,7 +171,7 @@ Never both present a likely-enough solution and launch a parallel design exercis
 A diagnostic finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
-Resolve every ship task's delivery mode and `yolo` posture at intake, and pass both explicitly to the brief, spawn, and any scout promotion; each command refuses to guess.
+Resolve every ship task's delivery mode and `yolo` posture at intake, pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project registry entry is the standing posture, and dropping below its rigor needs a stated reason.
 On a `no-mistakes-prod-only` project, internal-only tooling, automation, and process or release work ships `direct-PR`, while product-facing, mixed, or uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
 An unregistered project resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
@@ -196,7 +196,7 @@ Supervise all live work under section 8.
 
 The selected delivery path owns its own rigor: when no-mistakes is selected, it alone owns review, fixes, tests, docs, push, PR, and CI; otherwise follow the faster path with no independent reviewer.
 Never hold work outside no-mistakes for a manual verdict or stack serial reviews.
-A separate review is allowed only when the captain requests it or the authorized task is itself a knowledge-only review.
+A separate review is allowed only when the captain requests it or the authorized task is itself a knowledge-only review; one named question remains scoped to that question.
 Escalate whether to use no-mistakes instead of inventing a manual gate.
 
 - **no-mistakes** runs the full pipeline through a PR.
