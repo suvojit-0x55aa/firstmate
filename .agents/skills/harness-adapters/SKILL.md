@@ -256,6 +256,8 @@ Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
 Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
 The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
+The tracked Stop hook selects `fm-turnend-guard.sh --codex`, which keeps an unhealthy `stop_hook_active=true` continuation blocked until a live identity-matched successor checkpoint owns the home.
+Codex 0.155.1 was live-verified to honor repeated Stop continuations for one `turn_id`; the watcher singleton makes a competing checkpoint fail instead of creating concurrent supervision.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 
