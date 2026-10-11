@@ -88,6 +88,9 @@ ARM_PID=
 ARM_IDENTITY=
 STOP_RECORD_OWNED=0
 CONTINUATION_READY=0
+CLEANUP_ACTIVE=0
+CLEANUP_DONE=0
+CANCELLED=0
 # shellcheck disable=SC2329 # Called by the EXIT cleanup handler.
 arm_alive() {
   [ -n "$ARM_PID" ] && [ -n "$ARM_IDENTITY" ] \
@@ -97,7 +100,11 @@ OUT=
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 cleanup() {
   local attempt=0
-  trap - HUP INT TERM
+  CLEANUP_ACTIVE=1
+  if [ "$CLEANUP_DONE" = 1 ]; then
+    CLEANUP_ACTIVE=0
+    return 0
+  fi
   if arm_alive; then
     kill -TERM "$ARM_PID" 2>/dev/null || true
     # Cleanup is bounded even if an older watcher cannot interrupt a pane read.
@@ -118,10 +125,24 @@ cleanup() {
   fi
   [ -z "$OUT" ] || rm -f "$OUT"
   fm_lock_release "$LOCK"
+  CLEANUP_DONE=1
+  CLEANUP_ACTIVE=0
 }
 trap cleanup EXIT
 cancel() {
+  CANCELLED=1
   CONTINUATION_READY=0
+  if [ "$CLEANUP_DONE" = 1 ]; then
+    [ "$STOP_RECORD_OWNED" != 1 ] \
+      || fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true
+    trap - EXIT HUP INT TERM
+    exit 0
+  fi
+  if [ "$CLEANUP_ACTIVE" = 1 ]; then
+    [ "$STOP_RECORD_OWNED" != 1 ] \
+      || fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true
+    return 0
+  fi
   exit 0
 }
 trap cancel HUP INT TERM
@@ -165,4 +186,6 @@ else
 fi
 printf 'Run bin/fm-wake-drain.sh, handle its work, and acknowledge only after handling. Keep quiet intervals silent. The next Stop owns the successor; do not launch a background watcher or finish assuming a yielded tool will wake you.\n' >&2
 CONTINUATION_READY=1
+cleanup
+[ "$CANCELLED" != 1 ] || exit 0
 exit 2

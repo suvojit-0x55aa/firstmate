@@ -96,6 +96,38 @@ await_file() {
   done
   fail "timed out waiting for $path"
 }
+AWAIT_ARM_PID=
+await_arm_child() {
+  local owner=$1 n=0
+  AWAIT_ARM_PID=
+  while [ "$n" -lt 400 ]; do
+    AWAIT_ARM_PID=$(ps -axo pid=,ppid=,command= | awk -v owner="$owner" \
+      '$2 == owner && index($0, "fm-watch-arm.sh") > 0 { print $1; exit }')
+    [ -z "$AWAIT_ARM_PID" ] || return 0
+    sleep 0.01
+    n=$((n + 1))
+  done
+  fail "timed out waiting for Stop owner $owner arm child"
+}
+await_output() {
+  local path=$1 expected=$2 n=0
+  while [ "$n" -lt 400 ]; do
+    grep -Fq "$expected" "$path" 2>/dev/null && return 0
+    sleep 0.01
+    n=$((n + 1))
+  done
+  fail "timed out waiting for Stop output: $expected"
+}
+await_cleanup_wait() {
+  local owner=$1 n=0
+  while [ "$n" -lt 400 ]; do
+    ps -axo ppid=,command= | awk -v owner="$owner" \
+      '$1 == owner && $2 == "sleep" { found=1 } END { exit !found }' && return 0
+    sleep 0.01
+    n=$((n + 1))
+  done
+  fail "timed out waiting for Stop owner $owner cleanup wait"
+}
 await_lock() {
   local dir=$1 n=0
   while [ "$n" -lt 100 ]; do
@@ -192,6 +224,102 @@ test_final_cancellation_revokes_handling() {
   wait "$STOP_PID_TWO" 2>/dev/null || true
   STOP_PID_TWO=
   pass 'final Stop cancellation revokes only its own false handling successor'
+}
+
+test_cleanup_cancellation_revokes_handling() {
+  local signal dir marker release stop_owner arm_pid rc guard replacement_pid replacement_identity
+  for signal in HUP INT TERM; do
+    dir=$(make_home "cleanup-cancel-$signal")
+    install_final_barrier "$dir"
+    marker="$dir/final.marker"
+    release="$dir/final.release"
+    TEST_BUDGET=1 FM_TEST_CODEX_FINAL_MARKER="$marker" \
+      FM_TEST_CODEX_FINAL_RELEASE="$release" FM_TEST_REAL_GREP="$(cat "$dir/real-grep")" \
+      run_stop_trappable "$dir" > "$dir/out" 2>&1 &
+    STOP_PID=$!
+    await_file "$marker"
+    stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+    await_arm_child "$stop_owner"
+    arm_pid=$AWAIT_ARM_PID
+    kill -STOP "$arm_pid"
+    : > "$release"
+    await_output "$dir/out" 'Run bin/fm-wake-drain.sh'
+    await_cleanup_wait "$stop_owner"
+    assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+      "$signal cleanup cancellation fixture lost its handling claim before cancellation"
+    kill -"$signal" "$stop_owner"
+    kill -CONT "$arm_pid" 2>/dev/null || true
+    rc=0
+    wait "$STOP_PID" || rc=$?
+    STOP_PID=
+    expect_code 0 "$rc" "$signal cleanup cancellation returned a native continuation"
+    assert_absent "$dir/state/.codex-stop-health" \
+      "$signal cleanup cancellation preserved a false handling successor"
+    assert_absent "$dir/state/.watch.lock/pid" \
+      "$signal cleanup cancellation left its owned watcher alive"
+    if kill -0 "$arm_pid" 2>/dev/null; then
+      fail "$signal cleanup cancellation left its owned arm process alive"
+    fi
+    guard=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ \
+      FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_GUARD_GRACE=999 \
+      FM_SUPERVISION_MODEL=stop-managed "$ROOT/bin/fm-guard.sh" 2>&1)
+    assert_contains "$guard" 'WATCHER DOWN - SUPERVISION IS OFF' \
+      "public guard accepted the false handling state after $signal cleanup cancellation"
+  done
+
+  dir=$(make_home cleanup-continuation)
+  rc=0
+  TEST_BUDGET=1 run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'successful cleanup did not preserve native continuation exit'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'successful cleanup removed its required Stop successor'
+  assert_grep 'successor_count=0' "$dir/state/.codex-stop-health" \
+    'successful cleanup changed exactly-one successor state'
+
+  dir=$(make_home cleanup-replacement-owner)
+  install_final_barrier "$dir"
+  marker="$dir/final.marker"
+  release="$dir/final.release"
+  TEST_BUDGET=1 FM_TEST_CODEX_FINAL_MARKER="$marker" \
+    FM_TEST_CODEX_FINAL_RELEASE="$release" FM_TEST_REAL_GREP="$(cat "$dir/real-grep")" \
+    run_stop_trappable "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  await_file "$marker"
+  stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+  await_arm_child "$stop_owner"
+  arm_pid=$AWAIT_ARM_PID
+  kill -STOP "$arm_pid"
+  : > "$release"
+  await_output "$dir/out" 'Run bin/fm-wake-drain.sh'
+  await_cleanup_wait "$stop_owner"
+  sleep 30 &
+  STOP_PID_TWO=$!
+  replacement_pid=$STOP_PID_TWO
+  replacement_identity=$(FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$replacement_pid")
+  printf '%s\n' "$replacement_pid" > "$dir/state/.lock"
+  FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$(( $(date +%s) + 300 ))" cleanup-replacement' \
+    _ "$ROOT" "$dir" "$replacement_pid" "$replacement_identity"
+  kill -TERM "$stop_owner"
+  kill -CONT "$arm_pid" 2>/dev/null || true
+  rc=0
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 0 "$rc" 'cleanup cancellation against replacement ownership returned continuation'
+  assert_grep "generation_pid=$replacement_pid" "$dir/state/.codex-stop-health" \
+    'cleanup cancellation cleared the replacement generation handling claim'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'cleanup cancellation changed the replacement generation phase'
+  guard=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$replacement_pid \
+    FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=stop-managed "$ROOT/bin/fm-guard.sh" 2>&1)
+  assert_not_contains "$guard" 'WATCHER DOWN - SUPERVISION IS OFF' \
+    'public guard rejected the preserved replacement generation handling claim'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'cleanup cancellation revokes only its owner handling successor'
 }
 
 test_expired_successor_requires_replacement_generation() {
@@ -294,6 +422,10 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   final-cancellation)
     test_final_cancellation_revokes_handling
+    exit 0
+    ;;
+  cleanup-cancellation)
+    test_cleanup_cancellation_revokes_handling
     exit 0
     ;;
   afk-handoff)
@@ -414,3 +546,4 @@ assert_absent "$dir/state/.watch.lock/pid" 'duplicate successor refusal started 
 pass 'public Stop rejects duplicate successor evidence before arming'
 test_expired_successor_requires_replacement_generation
 test_afk_handoff_clears_owned_successor
+test_cleanup_cancellation_revokes_handling
