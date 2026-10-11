@@ -1538,6 +1538,9 @@ conclude_task_no_mistakes_run() {  # <worktree>
   command -v no-mistakes >/dev/null 2>&1 || return 0
   task_run_is_own_parked_run "$wt" || return 0
   run_id=$TASK_RUN_ID
+  if [ "$BACKEND" = orca ]; then
+    revalidate_orca_teardown_identity || return 1
+  fi
   echo "teardown: no-mistakes run for $ID is parked at a gate; aborting before the worker is removed" >&2
   # Accepted best-effort residual: abort supports run-id targeting but no atomic
   # live-state condition; fully closing the resume race needs upstream compare-and-cancel.
@@ -1623,6 +1626,9 @@ task_pids_under_roots() {  # <dir>...
   local dir dir_pids pids=""
   for dir in "$@"; do
     [ -n "$dir" ] || continue
+    if [ "$BACKEND" = orca ]; then
+      revalidate_orca_teardown_identity || return 1
+    fi
     if ! dir_pids=$(pids_with_cwd_under "$dir"); then
       TASK_PIDS_FAILED_DIR=$dir
       return 1
@@ -1733,6 +1739,9 @@ EOF
       identity=${tracked_identities[$i]}
       if task_pid_list_contains "$current_pids" "$pid" \
          && task_process_identity_matches "$pid" "$identity"; then
+        if [ "$BACKEND" = orca ]; then
+          revalidate_orca_teardown_identity || return 1
+        fi
         kill -TERM "$pid" 2>/dev/null || true
       fi
     done
@@ -1765,6 +1774,9 @@ EOF
         identity=${remaining_identities[$i]}
         if task_pid_list_contains "$current_pids" "$pid" \
            && task_process_identity_matches "$pid" "$identity"; then
+          if [ "$BACKEND" = orca ]; then
+            revalidate_orca_teardown_identity || return 1
+          fi
           kill -KILL "$pid" 2>/dev/null || true
         fi
       done
@@ -1826,6 +1838,14 @@ revalidate_orca_teardown_identity() {
     require_orca_worktree_absent "$ORCA_WORKTREE_ID"
   else
     require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT"
+  fi
+}
+
+revalidate_orca_child_teardown_identity() {  # <worktree-id> <path>
+  if [ -n "$2" ] && { [ -e "$2" ] || [ -L "$2" ]; }; then
+    require_orca_worktree_path_match "$1" "$2"
+  else
+    require_orca_worktree_absent "$1"
   fi
 }
 
@@ -2318,6 +2338,8 @@ validate_firstmate_home_children_removal() {
         child_proj=$(meta_value "$child_meta" project)
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
+      else
+        require_orca_worktree_absent "$child_orca_worktree_id" || return 1
       fi
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
@@ -2501,6 +2523,9 @@ cleanup_firstmate_home_children() {
         # cleanup must verify child tabs as that child home, not the parent.
         ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
       else
+        if [ "$child_backend" = orca ]; then
+          revalidate_orca_child_teardown_identity "$child_orca_worktree_id" "$child_wt" || return 1
+        fi
         fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
       fi
     fi
@@ -2514,10 +2539,14 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        revalidate_orca_child_teardown_identity "$child_orca_worktree_id" "$child_wt" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
-      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+      revalidate_orca_child_teardown_identity "$child_orca_worktree_id" "$child_wt" || return 1
+      if [ -n "$child_wt" ] && { [ -e "$child_wt" ] || [ -L "$child_wt" ]; }; then
+        fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+      fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -2725,7 +2754,13 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
+  if [ "$BACKEND" = orca ]; then
+    revalidate_orca_teardown_identity || exit 1
+  fi
   conclude_task_no_mistakes_run "$WT"
+  if [ "$BACKEND" = orca ]; then
+    revalidate_orca_teardown_identity || exit 1
+  fi
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2759,10 +2794,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
+      revalidate_orca_teardown_identity || exit 1
       if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        revalidate_orca_teardown_identity || exit 1
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
+    revalidate_orca_teardown_identity || exit 1
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"

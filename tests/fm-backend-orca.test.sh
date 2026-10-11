@@ -23,8 +23,29 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+if [ -f "$RESP/change-after-terminal" ] && [ "${1:-}" = terminal ] && [ "${2:-}" = close ]; then
+  : > "$RESP/.terminal-closed"
+fi
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+  exit 0
+fi
+if [ -f "$RESP/use-show-sequence" ] && [ "${1:-}" = worktree ] && [ "${2:-}" = show ]; then
+  SHOW_COUNT_FILE="$RESP/.show-count"
+  show_next=$(( $(cat "$SHOW_COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+  echo "$show_next" > "$SHOW_COUNT_FILE"
+  if [ -f "$RESP/.terminal-closed" ] && [ -f "$RESP/after-terminal.exit" ]; then
+    exit "$(cat "$RESP/after-terminal.exit")"
+  fi
+  if [ -f "$RESP/.terminal-closed" ] && [ -f "$RESP/after-terminal.out" ]; then
+    cat "$RESP/after-terminal.out"
+  elif [ -f "$RESP/show-$show_next.exit" ]; then
+    exit "$(cat "$RESP/show-$show_next.exit")"
+  elif [ -f "$RESP/show-$show_next.out" ]; then
+    cat "$RESP/show-$show_next.out"
+  elif [ -f "$RESP/worktree.out" ]; then
+    cat "$RESP/worktree.out"
+  fi
   exit 0
 fi
 n=$next
@@ -85,6 +106,9 @@ SH
   cat > "$fb/lsof" <<'SH'
 #!/usr/bin/env bash
 printf 'side-effect:lsof:%s\n' "$*" >> "${FM_ORCA_LOG:?}"
+if [ -n "${FM_ORCA_TEST_LSOF_PID:-}" ]; then
+  printf 'p%s\nfcwd\nn%s\n' "$FM_ORCA_TEST_LSOF_PID" "${FM_ORCA_TEST_LSOF_PATH:?}"
+fi
 exit 0
 SH
   chmod +x "$fb/no-mistakes" "$fb/lsof"
@@ -1257,7 +1281,7 @@ test_ship_teardown_refuses_orca_id_path_mismatch() {
 }
 
 run_orca_preflight_order_case() {
-  local kind=$1 force_mode=$2 identity=$3 suffix id proj wt other_wt data state config neutral out rc=0
+  local kind=$1 force_mode=$2 identity=$3 suffix id proj wt other_wt data state config neutral out rc=0 victim='' response
   suffix="${kind}${force_mode}${identity}"
   id="orcapreflight${suffix}z2"
   proj="$TMP_ROOT/preflight-$suffix-project"
@@ -1268,6 +1292,7 @@ run_orca_preflight_order_case() {
   config="$TMP_ROOT/preflight-$suffix-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$data/backlog.md"
   touch "$state/.last-watcher-beat"
   if [ "$kind" = scout ]; then
     printf 'report\n' > "$data/$id/report.md"
@@ -1279,54 +1304,72 @@ run_orca_preflight_order_case() {
     "decisions_reviewed=1" "decision_keys="
   orca_case "preflight-$suffix"
   add_teardown_side_effect_fakes "$FB"
+  : > "$RESP/use-show-sequence"
   if [ "$identity" != exact ]; then
     git -C "$proj" worktree add --quiet -b "fm/$id-other" "$other_wt"
   fi
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+    "$suffix" "$wt" > "$RESP/worktree.out"
   if [ "$identity" = mismatch ]; then
     printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
-      "$suffix" "$other_wt" > "$RESP/1.out"
-  else
-    printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
-      "$suffix" "$wt" > "$RESP/1.out"
+      "$suffix" "$other_wt" > "$RESP/show-1.out"
   fi
   case "$identity" in
-    exact)
-      for response in 2 3 5; do
-        printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
-          "$suffix" "$wt" > "$RESP/$response.out"
-      done
-      ;;
+    exact|mismatch) ;;
     changed)
       printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
-        "$suffix" "$other_wt" > "$RESP/2.out"
+        "$suffix" "$other_wt" > "$RESP/show-2.out"
       ;;
     unavailable)
       printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"runtime unavailable"}}\n' \
-        > "$RESP/2.out"
+        > "$RESP/show-2.out"
+      ;;
+    changedscan)
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+        "$suffix" "$other_wt" > "$RESP/show-4.out"
+      ;;
+    changedsignal)
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+        "$suffix" "$other_wt" > "$RESP/show-8.out"
+      sleep 60 &
+      victim=$!
+      ;;
+    changedcheckout|changedbranch|changedhooks)
+      case "$identity" in
+        changedcheckout) response=7 ;;
+        changedbranch) response=8 ;;
+        changedhooks) response=9 ;;
+      esac
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+        "$suffix" "$other_wt" > "$RESP/show-$response.out"
       ;;
     changedremove)
-      for response in 2 3; do
-        printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
-          "$suffix" "$wt" > "$RESP/$response.out"
-      done
-      printf '{"ok":true,"result":{}}\n' > "$RESP/4.out"
+      : > "$RESP/change-after-terminal"
       printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
-        "$suffix" "$other_wt" > "$RESP/5.out"
+        "$suffix" "$other_wt" > "$RESP/after-terminal.out"
       ;;
   esac
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   if [ "$force_mode" = forced ]; then
     out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_ORCA_TEST_LSOF_PID="$victim" FM_ORCA_TEST_LSOF_PATH="$wt" \
       FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
       "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
   else
     out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_ORCA_TEST_LSOF_PID="$victim" FM_ORCA_TEST_LSOF_PATH="$wt" \
       FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
       "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   fi
   rc=$?
   set -e
+  if [ -n "$victim" ]; then
+    kill -0 "$victim" 2>/dev/null \
+      || fail "Orca $suffix teardown signaled a process after identity changed"
+    kill "$victim" 2>/dev/null || true
+    wait "$victim" 2>/dev/null || true
+  fi
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show' \
     "Orca $suffix teardown did not resolve the recorded worktree id"
   if [ "$identity" = mismatch ]; then
@@ -1387,6 +1430,11 @@ test_orca_identity_is_revalidated_at_destructive_boundaries() {
   run_orca_preflight_order_case scout ordinary changed
   run_orca_preflight_order_case ship forced changed
   run_orca_preflight_order_case ship forced unavailable
+  run_orca_preflight_order_case scout ordinary changedscan
+  run_orca_preflight_order_case ship forced changedsignal
+  run_orca_preflight_order_case scout ordinary changedcheckout
+  run_orca_preflight_order_case ship forced changedbranch
+  run_orca_preflight_order_case scout ordinary changedhooks
   run_orca_preflight_order_case scout ordinary changedremove
   run_orca_preflight_order_case ship forced changedremove
   pass "fm-teardown.sh backend=orca: identity is revalidated at each destructive boundary"
@@ -1477,10 +1525,8 @@ test_secondmate_force_teardown_removes_orca_child_via_orca() {
     "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=wt-child-cleanup"
   orca_case secondmate-child-cleanup
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","path":"%s"}}}\n' "$childwt" > "$RESP/1.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","path":"%s"}}}\n' "$childwt" > "$RESP/2.out"
-  printf '{"ok":true,"result":{}}\n' > "$RESP/3.out"
-  printf '{"ok":true,"result":{}}\n' > "$RESP/4.out"
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-cleanup","path":"%s"}}}\n' "$childwt" > "$RESP/worktree.out"
   add_tmux_fake "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
@@ -1540,6 +1586,76 @@ test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch() {
     "refused mismatched Orca child cleanup should not remove worktrees"
   assert_present "$home/state/domain.meta" "refused forced secondmate teardown should preserve parent metadata"
   pass "fm-teardown.sh --force: refuses Orca child id/path mismatches"
+}
+
+run_secondmate_child_identity_change_case() {
+  local change_show=$1 home subhome childproj childwt other_wt child_id neutral out rc
+  home="$TMP_ROOT/orca-child-change-$change_show-parent"
+  subhome="$TMP_ROOT/orca-child-change-$change_show-secondmate"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/orca-child-change-$change_show-worktree"
+  other_wt="$TMP_ROOT/orca-child-change-$change_show-other"
+  child_id="orcachildchange${change_show}z"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
+  git -C "$childproj" worktree add --quiet -b "fm/$child_id-other" "$other_wt"
+  touch "$childwt/.fm-grok-turnend"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - Orca child identity change (home: $subhome; scope: orca cleanup; projects: alpha; added 2026-07-03)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/$child_id.meta" \
+    "window=fm-$child_id" "endpoint_task_id=$child_id" \
+    "terminal=term-child-change-$change_show" "worktree=$childwt" "project=$childproj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-child-change-$change_show"
+  orca_case "secondmate-child-change-$change_show"
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-change-%s","path":"%s"}}}\n' \
+    "$change_show" "$childwt" > "$RESP/worktree.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-child-change-%s","path":"%s"}}}\n' \
+    "$change_show" "$other_wt" > "$RESP/show-$change_show.out"
+  add_tmux_fake "$FB"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown accepted a changed child identity at boundary $change_show"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "changed child identity at boundary $change_show removed a worktree"
+  if [ "$change_show" -eq 3 ]; then
+    assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+      "changed child identity closed the endpoint before fresh verification"
+    assert_present "$childwt/.fm-grok-turnend" \
+      "changed child identity removed hooks before endpoint verification"
+  else
+    assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+      "child identity fixture did not reach endpoint cleanup before boundary $change_show"
+  fi
+  if [ "$change_show" -eq 4 ]; then
+    assert_present "$childwt/.fm-grok-turnend" \
+      "changed child identity removed hooks before fresh verification"
+  fi
+  if [ "$change_show" -eq 5 ]; then
+    assert_absent "$childwt/.fm-grok-turnend" \
+      "child identity fixture did not reach hook cleanup before worktree verification"
+  fi
+  assert_present "$home/state/domain.meta" \
+    "changed child identity removed parent metadata"
+  assert_present "$childwt" "changed child identity removed the recorded child worktree"
+  assert_present "$other_wt" "changed child identity removed the redirected child worktree"
+}
+
+test_secondmate_child_identity_is_revalidated_at_each_boundary() {
+  run_secondmate_child_identity_change_case 3
+  run_secondmate_child_identity_change_case 4
+  run_secondmate_child_identity_change_case 5
+  pass "fm-teardown.sh --force: revalidates Orca child identity at every cleanup boundary"
 }
 
 test_secondmate_force_teardown_refuses_partial_orca_child() {
@@ -1607,6 +1723,7 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     ;;
   teardown-identity-lifetime)
     test_orca_identity_is_revalidated_at_destructive_boundaries
+    test_secondmate_child_identity_is_revalidated_at_each_boundary
     exit
     ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;
@@ -1669,4 +1786,5 @@ test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
+test_secondmate_child_identity_is_revalidated_at_each_boundary
 test_secondmate_force_teardown_refuses_partial_orca_child

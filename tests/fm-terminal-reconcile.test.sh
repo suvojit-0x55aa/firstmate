@@ -1274,6 +1274,113 @@ run_archived_captain_answer_case() {
   ARCHIVED_CALL=$call
 }
 
+archive_done_task() {
+  local id=$1 prefix=$2 filler
+  for filler in $(seq 1 11); do
+    tx add "$prefix-filler-$filler" "$prefix filler $filler" --json >/dev/null
+    tx done "$prefix-filler-$filler" --json >/dev/null
+  done
+  if tx show "$id" --full >/dev/null 2>&1; then
+    fail "$id did not cross the configured Done archive boundary"
+  fi
+}
+
+run_archived_released_transfer_case() {
+  local backend=$1 id="archived-release-$1" call old_key new_key origin_key
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown archived released-transfer backend: $backend" ;;
+  esac
+  make_task "$id"
+  call="$id-work"
+  make_task "$call"
+  hold_captain_task "$call"
+  printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
+  "$owner" custody "$call" https://github.com/o/r/pull/1 >/dev/null
+  old_key=$(jq -r --arg id "$call" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  release_captain_task "$call"
+  printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$call" > "$FM_HOME/state/$call.meta"
+  "$owner" merged "$call" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$call" normal >/dev/null
+  rm "$FM_HOME/state/$call.meta"
+  new_key=$(jq -r --arg id "$call" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  [ "$new_key" != "$old_key" ] || fail "$backend released transfer did not create a successor receipt"
+  if [ "$backend" = manual ]; then
+    tx done "$call" --no-prune --json >/dev/null
+    "$owner" manual-complete "$new_key" >/dev/null
+  else
+    "$owner" reconcile >/dev/null
+    "$owner" reconcile >/dev/null
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$new_key.json")" = true ] \
+    || fail "$backend released transfer successor did not complete"
+  archive_done_task "$call" "$id-transfer-archive"
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  rm "$FM_HOME/state/$id.meta"
+  origin_key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$backend" = manual ]; then
+    tx done "$id" --no-prune --json >/dev/null
+    "$owner" manual-complete "$origin_key" >/dev/null
+    "$owner" manual-complete "$origin_key" >/dev/null
+  else
+    "$owner" reconcile >/dev/null
+    "$owner" reconcile >/dev/null
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" = true ] \
+    || fail "$backend archived released transfer blocked origin reconciliation"
+}
+
+test_archived_released_origin_requires_successor() {
+  local id=archived-release-origin old_key new_key saved_backlog
+  printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
+  make_task "$id"
+  hold_captain_task "$id"
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  old_key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  release_captain_task "$id"
+  rm "$FM_HOME/state/$id.meta"
+  tx done "$id" --no-prune --json >/dev/null
+  archive_done_task "$id" "$id-archive"
+  if "$owner" manual-complete "$old_key" >/dev/null 2>&1; then
+    fail 'archived released origin accepted its stale release incarnation'
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$old_key.json")" = false ] \
+    || fail 'stale archived origin advanced backlog state'
+  printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" > "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  rm "$FM_HOME/state/$id.meta"
+  new_key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  "$owner" manual-complete "$new_key" >/dev/null
+  "$owner" manual-complete "$new_key" >/dev/null
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$new_key.json")" = true ] \
+    || fail 'archived released origin did not accept its verified successor'
+
+  saved_backlog="$FM_HOME/data/backlog.md.saved"
+  mv "$FM_HOME/data/backlog.md" "$saved_backlog"
+  mkdir "$FM_HOME/data/backlog.md"
+  if captain terminal-ready "$id" --receipt "$new_key" >/dev/null 2>&1; then
+    fail 'captain readiness treated an unreadable active backlog as authentic absence'
+  fi
+  rmdir "$FM_HOME/data/backlog.md"
+  mv "$saved_backlog" "$FM_HOME/data/backlog.md"
+}
+
 test_archived_captain_answers_remain_exact_terminal_evidence() {
   local auto_call manual_call
   run_archived_captain_answer_case auto
@@ -1299,7 +1406,10 @@ EOF
   if captain terminal-ready archive-missing missing-captain-call >/dev/null 2>&1; then
     fail "missing captain-answer evidence was accepted"
   fi
-  pass 'archived captain answers retain exact cycle-aware terminal evidence'
+  run_archived_released_transfer_case auto
+  run_archived_released_transfer_case manual
+  test_archived_released_origin_requires_successor
+  pass 'archived captain answers and releases retain exact cycle-aware terminal evidence'
 }
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;

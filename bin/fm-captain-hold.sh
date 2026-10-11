@@ -231,14 +231,10 @@ require_tasks_axi() {
 }
 
 task_show() {  # <id>
-  if fm_backlog_backend_manual "$CONFIG" && ! fm_tasks_axi_compatible; then
-    manual_task_show "$1"
-    return
-  fi
-  tasks_axi show "$1" --full 2>/dev/null
+  manual_task_show "$1"
 }
 
-archived_captain_task_show() {  # <id>
+archived_task_show() {  # <id>
   local archive="$DATA/done-archive.md"
   [ -f "$archive" ] && [ ! -L "$archive" ] || return 3
   perl -MJSON::PP -e '
@@ -278,24 +274,38 @@ archived_captain_task_show() {  # <id>
     exit 1 unless @matches == 1;
     my ($matched_tail, $matched_body) = @{$matches[0]};
     my @hold_kinds = ($matched_tail =~ /(?:^|\s)\(hold-kind:\s*([^)]+)\)/g);
-    exit 1 unless @hold_kinds == 1 && $hold_kinds[0] eq "captain";
+    exit 1 if @hold_kinds > 1;
+    exit 1 if @hold_kinds == 1 && $hold_kinds[0] ne "captain";
     print "  id: $wanted\n";
+    print "  title: -\n";
     print "  state: done\n";
-    print "  hold_kind: captain\n";
+    print "  hold_kind: ", (@hold_kinds ? "captain" : "-"), "\n";
     print "  body: ", JSON::PP->new->encode($matched_body), "\n";
   ' "$1" "$archive"
 }
 
-captain_evidence_show() {  # <id>
+task_evidence_show() {  # <id>
   local id=$1 show rc
   if show=$(task_show "$id"); then
     printf '%s\n' "$show"
     return 0
+  else
+    rc=$?
   fi
-  show=$(archived_captain_task_show "$id")
-  rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
-  task_show "$id" >/dev/null 2>&1 && return 1
+  [ "$rc" -eq 3 ] || return 1
+  if show=$(archived_task_show "$id"); then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    return 1
+  fi
+  if task_show "$id" >/dev/null 2>&1; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 3 ] || return 1
   printf '%s\n' "$show"
 }
 
@@ -306,22 +316,25 @@ manual_task_show() {  # <id>
     || return 1
   printf '%s\n' "$snapshot" | jq -er --arg id "$1" '
     [.records[] | select(.structured == true and .id == $id)]
-    | if length != 1 then empty else .[0] end
-    | "  id: \(.id)\n  state: \(.state)\n  hold_kind: \(.hold_kind // "-")\n  body: \((.body_lines | join("\n")) | @json)"
+    | if length == 0 then halt_error(3)
+      elif length != 1 then halt_error(1)
+      else .[0]
+      | "  id: \(.id)\n  title: \(.title // "-")\n  state: \(.state)\n  hold_kind: \(.hold_kind // "-")\n  body: \((.body_lines | join("\n")) | @json)"
+      end
   '
 }
 
 require_task_reader() {
   if fm_tasks_axi_compatible; then
     require_tasks_axi
-    return
+  else
+    fm_backlog_backend_manual "$CONFIG" \
+      || fail "compatible tasks-axi is required"
   fi
-  fm_backlog_backend_manual "$CONFIG" \
-    || fail "compatible tasks-axi is required"
   command -v jq >/dev/null 2>&1 \
-    || fail "jq is required to verify the manual backlog"
+    || fail "jq is required to verify the backlog"
   [ -f "$DATA/backlog.md" ] && [ ! -L "$DATA/backlog.md" ] \
-    || fail "manual backlog is absent or unsafe: $DATA/backlog.md"
+    || fail "backlog is absent or unsafe: $DATA/backlog.md"
 }
 
 show_field() {  # <show-output> <field>
@@ -581,7 +594,7 @@ resolution_block() {  # <mode> <terminal-receipt> <hold-cycle> <terminal-incarna
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(captain_evidence_show "$id") \
+  show=$(task_evidence_show "$id") \
     || fail "captain-held task $id has no unique active or archived captain-answer record"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
@@ -599,7 +612,7 @@ verify_hold_durable() {  # <task-id>
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   local origin=$1 entry=$2 legacy rc
-  if captain_evidence_show "$entry" >/dev/null 2>&1; then
+  if task_evidence_show "$entry" >/dev/null 2>&1; then
     printf '%s' "$entry"
     return 0
   else
@@ -608,7 +621,7 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if captain_evidence_show "$legacy" >/dev/null 2>&1; then
+    if task_evidence_show "$legacy" >/dev/null 2>&1; then
       printf '%s' "$legacy"
       return 0
     else
@@ -1238,7 +1251,7 @@ EOF
 }
 
 command_terminal_ready() {
-  local origin=${1:-} receipt='' entry id resolved seen show state hold_kind body
+  local origin=${1:-} receipt='' entry id resolved seen show state hold_kind body rc
   local -a resolved_ids=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
@@ -1251,7 +1264,7 @@ command_terminal_ready() {
   fi
   require_task_reader
   [ -z "$(status_open_decisions "$STATE/$origin.status")" ] || return 1
-  if show=$(task_show "$origin"); then
+  if show=$(task_evidence_show "$origin"); then
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
@@ -1260,6 +1273,9 @@ command_terminal_ready() {
       [ "$state" = "done" ] || return 1
       body_has_resolution_record "$body" || return 1
     fi
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || return 1
   fi
   resolved_ids+=("$origin")
   for entry in "$@"; do
@@ -1273,7 +1289,7 @@ command_terminal_ready() {
   done
   for id in "${resolved_ids[@]}"; do
     [ "$id" != "$origin" ] || continue
-    show=$(captain_evidence_show "$id") || return 1
+    show=$(task_evidence_show "$id") || return 1
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
