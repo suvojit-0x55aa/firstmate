@@ -2,9 +2,11 @@
 
 `bin/fm-session-start.sh`'s header is the single owner of composed commands, ordering, and digest contents; this doc explains the stage-by-stage breakdown of what it prints so `AGENTS.md` does not have to.
 
+Each stage emits its name and elapsed seconds before it starts, so a slow subprocess cannot leave the startup boundary silent.
+
 1. **Lock** - acquires the per-home session lock before anything mutates shared state, then starts the deferred network stage.
 2. **Bootstrap** - detect-only checks (tool/version, worktree-tangle, harness override, dispatch-profile validation, backlog-backend status) always run silently unless actionable; a lock-refused tangle check is read-only advisory with no repair command.
-   The MUTATING sweeps (stale Herdr cleanup, non-executing legacy PR-check migration, fleet sync, secondmate convergence and liveness, pending remote handoff retry, Relay artifact writes) run only when this session holds the lock, with the network-dependent ones deferred rather than run here.
+   The MUTATING sweeps (stale Herdr cleanup, non-executing legacy PR-check migration, fleet sync, secondmate convergence and liveness, pending remote handoff retry, Relay artifact writes) run only when this session holds the lock, with network-dependent sweeps and optional stale Herdr cleanup deferred rather than run here.
    Secondmate liveness relaunches only from recovery-grade `dead`/`missing` states, preserves ambiguous, unreadable, or unreachable remote targets, and reports skipped or failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `docs/remote-secondmates.md`).
 3. **Wake queue** - when locked, presents the durable wake queue's raw records as this turn's first work queue, optionally annotated by every status event still unread at the presentation cursor; the annotation never replaces the raw record or current-state reconciliation.
    Presented records stay durable until the handling turn runs the generation-bound acknowledgement the drain prints.

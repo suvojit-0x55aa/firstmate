@@ -14,6 +14,12 @@
 # detached worker, and their result is reported back inline when it finishes in
 # time, or as a durable wake when it does not.
 #
+# Optional stale Herdr presentation cleanup runs after the network sweeps under
+# the same verified owner lease and aggregate deadline. Its unchanged exact-pane
+# safety checks remain in fm-herdr-session-cleanup.sh; a slow cleanup can delay
+# this deferred report, but never the recovery digest. A timeout remains durable
+# and actionable, so cleanup debt is retried rather than silently dropped.
+#
 # WHAT IS PRESERVED. Nothing is dropped. bin/fm-bootstrap.sh remains the single
 # owner of every one of these sweeps and still runs all of them, unchanged, via
 # its FM_BOOTSTRAP_NETWORK=only phase. Deferral changes WHEN they run, not
@@ -189,7 +195,7 @@ worker_alive() {
 phase_label() {  # <phases>
   case "$1" in
     probe) printf 'GitHub authentication' ;;
-    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh with its drift reporting' ;;
+    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and stale Herdr presentation cleanup' ;;
     *) printf 'the deferred network checks' ;;
   esac
 }
@@ -471,9 +477,14 @@ EOF
     fi
   fi
   if [ "$sweep_locked" -eq 1 ]; then
+    # shellcheck disable=SC2016 # The bounded child expands its arguments.
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only \
       FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
-      "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
+      bash -c '
+        "$1/fm-bootstrap.sh" || exit $?
+        printf "BOOTSTRAP_INFO: deferred Herdr cleanup started at elapsed=%ss\n" "$SECONDS"
+        "$1/fm-herdr-session-cleanup.sh"
+      ' _ "$SCRIPT_DIR" >"$out" 2>&1 || rc=$?
   else
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Retire stale restored-shell Herdr presentation children at locked session start.
+# Retire stale restored-shell Herdr presentation children in the deferred startup worker.
 #
 # Usage: fm-herdr-session-cleanup.sh
 #
