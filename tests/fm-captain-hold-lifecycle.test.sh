@@ -371,6 +371,64 @@ test_release_frees_held_work() {
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+test_answer_identity_is_hold_cycle_scoped() {
+  local home show records
+  home=$(make_home answer-cycle)
+  tasks_in "$home" add sample-cycle-work "Ship cycle-aware sample work" \
+    --kind ship --repo sample --body 'Cycle-aware work body.' >/dev/null \
+    || fail "could not create the cycle-aware held work"
+  printf 'spawn_gen=sample-cycle-one\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-cycle-work.meta"
+  run_captain "$home" hold sample-cycle-work --reason "captain cycle answer pending" >/dev/null \
+    || fail "could not establish the first captain hold cycle"
+  printf 'Captain repeats this exact release answer.\n' > "$home/cycle-answer.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = unhold ] && [ -f "$FM_HOME/fail-unhold.once" ]; then
+  rm -f -- "$FM_HOME/fail-unhold.once"
+  exit 42
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/fail-unhold.once"
+  if run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release \
+    > "$home/interrupted.out" 2> "$home/interrupted.err"; then
+    fail "the interrupted release fixture did not interrupt after recording"
+  fi
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  assert_contains "$show" 'held: yes' "the interrupted release lost the active hold"
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "the interrupted release did not write exactly one resolution"
+  run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release >/dev/null \
+    || fail "same-cycle release retry did not finish the interrupted close"
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "same-cycle retry duplicated the resolution record"
+
+  printf 'spawn_gen=sample-cycle-two\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-cycle-work.meta"
+  run_captain "$home" hold sample-cycle-work --reason "captain later cycle answer pending" >/dev/null \
+    || fail "could not establish the later captain hold cycle"
+  run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release >/dev/null \
+    || fail "the repeated answer was not recorded for the later hold cycle"
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the later hold cycle reused the historical resolution"
+  run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release >/dev/null \
+    || fail "the later same-cycle replay was not idempotent"
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the later same-cycle replay duplicated its resolution"
+  assert_contains "$show" 'state: queued' "the later release completed resumed work"
+  assert_contains "$show" 'held: no' "the later release retained its hold"
+  pass "captain answer identity is scoped to one durable hold cycle"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -913,11 +971,24 @@ test_legacy_identities_keep_working() {
     "$legacy_digest" "$legacy_text" > "$home/legacy-body.txt"
   tasks_in "$home" update "$id-decision-fourth-choice" --body-file "$home/legacy-body.txt" --archive-body >/dev/null
   tasks_in "$home" "done" "$id-decision-fourth-choice" >/dev/null
+  if run_captain "$home" terminal-ready "$id" fourth-choice \
+    > "$home/legacy-ready.out" 2> "$home/legacy-ready.err"; then
+    fail "a cycle-less legacy resolution authorized a terminal transition"
+  fi
   out=$(printf 'fourth-choice\toption c\t\n' \
     | run_captain "$home" answers "$id" --source "legacy replay") \
-    || fail "an identical pre-collapse keyed answer was not idempotent"
+    || fail "a real captain answer did not recover the pre-collapse record"
   assert_contains "$out" "closed: $id-decision-fourth-choice" \
-    "the pre-collapse keyed answer digest was treated as drift"
+    "the pre-collapse keyed answer was not recorded under a current cycle"
+  show=$(tasks_in "$home" show "$id-decision-fourth-choice" --full)
+  assert_contains "$show" 'Resolution recorded by fm-captain-hold.' \
+    "legacy recovery did not add the current owner's resolution"
+  assert_contains "$show" 'Resolution mode: repaired' \
+    "legacy recovery did not identify its out-of-band close"
+  assert_contains "$show" 'Resolution recorded by fm-decision-hold.' \
+    "legacy recovery discarded the historical resolution"
+  run_captain "$home" terminal-ready "$id" fourth-choice >/dev/null \
+    || fail "the cycle-aware legacy recovery did not authorize terminal readiness"
   out=$(printf '%s-decision-fourth-choice\toption c\t\n' "$id" \
     | run_captain "$home" answers --source "legacy replay") \
     || fail "a full legacy task-id replay without an origin was not idempotent"
@@ -1172,6 +1243,7 @@ test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_answer_identity_is_hold_cycle_scoped
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner

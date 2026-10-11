@@ -41,13 +41,15 @@
 # a "revisit later" answer is stored as a date instead of a live card.
 #
 # `answer` records the captain's exact words and closes the call in the same
-# act. It requires a non-empty captain decision file of at most 8192 bytes,
-# writes a resolution block at the top of the task body (the previous body is
-# preserved below the block and archived through tasks-axi --archive-body),
-# then closes the task with `tasks-axi done` - or, with `--release`, lifts the
-# hold with `tasks-axi unhold` so a captain-gated WORK item resumes instead of
-# closing. An exact retry is idempotent only when its requested close mode
-# matches the newest record; a changed decision or a mode mismatch is rejected.
+# act. Each hold carries a durable cycle identity, and every resolution records
+# that identity. It requires a non-empty captain decision file of at most 8192
+# bytes, writes a resolution block at the top of the task body (the previous
+# body is preserved below the block and archived through tasks-axi
+# --archive-body), then closes the task with `tasks-axi done` - or, with
+# `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated WORK
+# item resumes instead of closing. An exact retry is idempotent only within the
+# same hold cycle and compatible terminal receipt; a later cycle records a new
+# answer even when the captain repeats the same words.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
@@ -120,10 +122,10 @@
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, or repaired.
-# Records written by the retired fm-decision-hold.sh (routed, declined,
-# answered, repaired) are recognized everywhere a record is read, so nothing
-# already closed needs rewriting.
+# decision digest, hold cycle, and a `Resolution mode:` of answered, released,
+# or repaired. A legacy record without a provable hold cycle never authorizes a
+# terminal transition; replaying the captain's actual answer records a current
+# repair without fabricating a closure.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -307,8 +309,45 @@ body_has_resolution_record() {  # <task-body>
   newest_resolution_header "$1" >/dev/null
 }
 
+current_hold_cycle() {  # <task-body>
+  local decoded
+  decoded=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$decoded" | awk '
+    /^Captain hold opened by fm-captain-hold\.$/ {
+      if ((getline cycle) <= 0 || index(cycle, "Hold cycle: ") != 1) next
+      token = substr(cycle, 13)
+      if (length(token) != 64 || token ~ /[^0-9a-f]/) next
+      if ((getline end) <= 0 || end != "Captain hold marker end.") next
+      print token
+      exit
+    }
+  '
+}
+
+recorded_resolution_cycle() {  # <task-body>
+  newest_resolution_field "$1" 'Hold cycle'
+}
+
+body_has_current_resolution() {  # <task-body>
+  local current recorded
+  current=$(current_hold_cycle "$1" || true)
+  recorded=$(recorded_resolution_cycle "$1" || true)
+  [ -n "$current" ] && [ "$recorded" = "$current" ]
+}
+
+release_resolution_matches_current() {  # <task-id> <task-body>
+  local current receipt
+  body_has_current_resolution "$2" || return 1
+  current=$(terminal_receipt_key "$1" || true)
+  [ -z "$current" ] && return 0
+  receipt=$(recorded_release_receipt "$2" || true)
+  [ -n "$receipt" ] && [ "$receipt" = "$current" ]
+}
+
 terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1> <task-id>
   local mode release_receipt
+  body_has_resolution_record "$1" || return 0
+  body_has_current_resolution "$1" || return 1
   mode=$(recorded_resolution_mode "$1" || true)
   [ "$mode" = released ] || return 0
   [ "$2" != captain ] || return 1
@@ -367,9 +406,9 @@ terminal_receipt_key() {  # <task-id>
   printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}'
 }
 
-resolution_block() {  # <mode> <terminal-receipt>
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n' \
-    "$DECISION_DIGEST" "$1"
+resolution_block() {  # <mode> <terminal-receipt> <hold-cycle>
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\nHold cycle: %s\n' \
+    "$DECISION_DIGEST" "$1" "$3"
   [ -z "$2" ] || printf 'Terminal receipt: %s\n' "$2"
   printf '\nCaptain decision:\n%s\n' "$DECISION_TEXT"
 }
@@ -382,7 +421,7 @@ verify_hold_durable() {  # <task-id>
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
-  if body_has_resolution_record "$body"; then
+  if body_has_current_resolution "$body"; then
     return 0
   fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
@@ -411,7 +450,7 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind cycle was_captain=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -440,6 +479,8 @@ command_hold() {
   require_tasks_axi
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    [ "$hold_kind" != captain ] || was_captain=1
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
     if [ -n "$title" ]; then
@@ -475,31 +516,60 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  body=$(show_field "$show" body)
+  cycle=$(current_hold_cycle "$body" || true)
+  if [ "$was_captain" != 1 ] || [ -z "$cycle" ]; then
+    cycle=$(write_hold_cycle_record "$id" "$body")
+    show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
+  fi
+  [ "$(current_hold_cycle "$(show_field "$show" body)" || true)" = "$cycle" ] \
+    || fail "task $id did not retain its hold cycle"
   printf '%s\n' "$id"
 }
 
-# Record a resolution block at the top of the task body, preserving the
-# previous body below it and archiving the pristine original.
-write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp receipt=''
-  [ "$mode" != released ] || receipt=$(terminal_receipt_key "$id" || true)
-  new_body=$(resolution_block "$mode" "$receipt")
+prepend_body_record() {  # <task-id> <shown-body> <record>
+  local id=$1 body=$2 new_body=$3 tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
-    || fail "cannot stage the resolution record"
+    || fail "cannot stage the captain-hold record"
   if ! printf '%s\n' "$new_body" > "$tmp"; then
     rm -f -- "$tmp"
-    fail "cannot stage the resolution record for $id"
+    fail "cannot stage the captain-hold record for $id"
   fi
   if ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
     rm -f -- "$tmp"
-    fail "could not record the captain decision on $id"
+    fail "could not record the captain-hold record on $id"
   fi
   rm -f -- "$tmp"
+}
+
+mint_hold_cycle() {  # <task-id>
+  local tmp cycle
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-cycle.XXXXXX") \
+    || fail "cannot mint a hold cycle"
+  cycle=$(sha256_text "$1|$tmp|$$|$(date +%s)")
+  rm -f -- "$tmp"
+  printf '%s' "$cycle"
+}
+
+write_hold_cycle_record() {  # <task-id> <shown-body>
+  local cycle record
+  cycle=$(mint_hold_cycle "$1")
+  record=$(printf 'Captain hold opened by fm-captain-hold.\nHold cycle: %s\nCaptain hold marker end.\n' "$cycle")
+  prepend_body_record "$1" "$2" "$record"
+  printf '%s' "$cycle"
+}
+
+write_resolution_record() {  # <task-id> <mode> <shown-body> <hold-cycle>
+  local id=$1 mode=$2 body=$3 cycle=$4 receipt='' record
+  [ -n "$cycle" ] || fail "cannot record a captain answer without a hold cycle"
+  [ "$mode" != released ] || receipt=$(terminal_receipt_key "$id" || true)
+  record=$(resolution_block "$mode" "$receipt" "$cycle")
+  prepend_body_record "$id" "$body" "$record"
 }
 
 close_answered() {  # <task-id> <release-0-or-1>
@@ -511,7 +581,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode cycle retry=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -532,7 +602,7 @@ command_answer() {
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
 
   if [ "$state" = "done" ]; then
-    if body_has_resolution_record "$body"; then
+    if body_has_current_resolution "$body"; then
       # An exact compatible retry is an idempotent no-op; drift is rejected.
       [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
         || fail "captain-held task $id records a different captain decision"
@@ -550,10 +620,16 @@ command_answer() {
     # this really was the captain's item rather than ordinary finished work.
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
-    write_resolution_record "$id" repaired "$body"
+    cycle=$(current_hold_cycle "$body" || true)
+    if [ -z "$cycle" ]; then
+      cycle=$(write_hold_cycle_record "$id" "$body")
+      show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
+      body=$(show_field "$show" body)
+    fi
+    write_resolution_record "$id" repaired "$body" "$cycle"
     show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
-    body_has_resolution_record "$(show_field "$show" body)" \
+    body_has_current_resolution "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
     printf 'repaired: %s\n' "$id"
     return 0
@@ -561,37 +637,52 @@ command_answer() {
 
   if [ "$hold_kind" = captain ]; then
     # Actively the captain's item (a date-expired hold keeps its annotations
-    # and stays answerable). A matching record means an interrupted close to
-    # finish; a different digest is a NEW answer on a re-held task and gets
-    # its own record on top. Either way the close mode is the caller's flag,
-    # checked against an interrupted close's recorded mode so a retry cannot
-    # silently flip a release into a close.
-    if body_has_resolution_record "$body" \
+    # and stays answerable). A retry belongs to the current hold cycle and, for
+    # release, the current terminal receipt, so a later cycle with the same
+    # answer records its own resolution.
+    cycle=$(current_hold_cycle "$body" || true)
+    if [ -z "$cycle" ]; then
+      cycle=$(write_hold_cycle_record "$id" "$body")
+      show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
+      body=$(show_field "$show" body)
+    fi
+    if body_has_current_resolution "$body" \
       && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
-        released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
-        answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
+        released)
+          if release_resolution_matches_current "$id" "$body"; then
+            [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release"
+            retry=1
+          fi
+          ;;
+        answered)
+          [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release"
+          retry=1
+          ;;
       esac
+    fi
+    if [ "$retry" = 1 ]; then
       close_answered "$id" "$release"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
-    write_resolution_record "$id" "$outcome" "$body"
+    write_resolution_record "$id" "$outcome" "$body" "$cycle"
     close_answered "$id" "$release"
     show=$(task_show "$id") || fail "task $id disappeared after closing"
-    body_has_resolution_record "$(show_field "$show" body)" \
+    body_has_current_resolution "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
 
   # Not held and not closed: only an already-recorded release replays cleanly.
-  if body_has_resolution_record "$body"; then
+  if body_has_current_resolution "$body"; then
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
+      && release_resolution_matches_current "$id" "$body" \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     printf 'released: %s\n' "$id"
     return 0
@@ -764,25 +855,25 @@ command_answers() {
     body=$(show_field "$show" body)
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
-    if body_has_resolution_record "$body" \
+    if body_has_current_resolution "$body" \
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$recorded_mode" != released ]; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
-          && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
+          && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ] \
+          && release_resolution_matches_current "$id" "$body"; }; then
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
         continue
       fi
     fi
-    if [ "$state" = "done" ]; then
-      printf 'skipped: %s (already closed)\n' "$id"
-      skipped=$((skipped + 1))
-      continue
-    fi
     if [ "$hold_kind" != captain ]; then
-      printf 'skipped: %s (not held for the captain)\n' "$id"
+      if [ "$state" = "done" ]; then
+        printf 'skipped: %s (already closed)\n' "$id"
+      else
+        printf 'skipped: %s (not held for the captain)\n' "$id"
+      fi
       skipped=$((skipped + 1))
       continue
     fi

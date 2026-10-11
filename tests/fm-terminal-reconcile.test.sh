@@ -36,6 +36,12 @@ release_captain_task_again() {
     FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer "$id" --decision-file "$answer_file" --release >/dev/null
 }
+hold_captain_task() {
+  local id=$1
+  FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+    FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+    hold "$id" --reason 'captain release cycle pending' >/dev/null
+}
 run_terminal_captain_case() {
   local backend=$1 shape=$2 resolution=$3 expected=$4
   local id="gate-$backend-$shape-$resolution" call key rc=0 backlog
@@ -326,6 +332,96 @@ run_terminal_identity_case() {
     *) fail "unknown terminal identity expectation: $expected" ;;
   esac
 }
+run_cycle_answer_case() {
+  local backend=$1 shape=$2 id="cycle-$1-$2" target inventory='' target_keys=''
+  local cycle_two_key cycle_three_key origin_key
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown cycle-answer backend: $backend" ;;
+  esac
+  make_task "$id"
+  case "$shape" in
+    origin) target=$id ;;
+    self-inventory) target=$id; inventory=$id; target_keys=$id ;;
+    transferred) target="$id-work"; inventory=$target; make_task "$target" ;;
+    legacy) target="$id-decision-choice"; inventory=choice; make_task "$target" ;;
+    *) fail "unknown cycle-answer shape: $shape" ;;
+  esac
+  if [ -n "$inventory" ]; then
+    printf '%s\n' 'decisions_reviewed=1' "decision_keys=$inventory" >> "$FM_HOME/state/$id.meta"
+  fi
+  hold_captain_task "$target"
+  "$owner" custody "$target" https://github.com/o/r/pull/1
+  release_captain_task "$target"
+  printf 'spawn_gen=%s-cycle-two\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=%s\n' \
+    "$target" "$target_keys" > "$FM_HOME/state/$target.meta"
+  "$owner" custody "$target" https://github.com/o/r/pull/1
+  hold_captain_task "$target"
+  release_captain_task "$target"
+  "$owner" merged "$target" https://github.com/o/r/pull/1
+  "$owner" retired "$target" normal
+  rm "$FM_HOME/state/$target.meta"
+  cycle_two_key=$(jq -r --arg id "$target" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$cycle_two_key" \
+      && fail "$backend/$shape reused an earlier answer in the current release cycle"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$cycle_two_key.json")" = false ] \
+    || fail "$backend/$shape completed the just-released cycle"
+  assert_contains "$(tx show "$target")" 'state: in_flight' \
+    "$backend/$shape completed work from an earlier answer cycle"
+
+  printf 'spawn_gen=%s-cycle-three\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=%s\n' \
+    "$target" "$target_keys" > "$FM_HOME/state/$target.meta"
+  "$owner" merged "$target" https://github.com/o/r/pull/1
+  "$owner" retired "$target" normal
+  rm "$FM_HOME/state/$target.meta"
+  cycle_three_key=$(jq -r --arg id "$target" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$backend" = manual ]; then
+    tx 'done' "$target" --no-prune --json >/dev/null
+    "$owner" manual-complete "$cycle_three_key"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$cycle_three_key.json")" = true ] \
+    || fail "$backend/$shape did not accept the later completed release cycle"
+
+  if [ "$target" = "$id" ]; then
+    origin_key=$cycle_three_key
+  else
+    "$owner" merged "$id" https://github.com/o/r/pull/1
+    "$owner" retired "$id" normal
+    rm "$FM_HOME/state/$id.meta"
+    origin_key=$(jq -r --arg id "$id" \
+      'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+      "$FM_HOME/state/terminal-delivery/"*.json)
+    if [ "$backend" = manual ]; then
+      tx 'done' "$id" --no-prune --json >/dev/null
+      "$owner" manual-complete "$origin_key"
+    else
+      "$owner" reconcile
+      "$owner" reconcile
+    fi
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" = true ] \
+    || fail "$backend/$shape did not advance after the later terminal incarnation"
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$origin_key"
+  else
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" = true ] \
+    || fail "$backend/$shape replay lost cycle-aware terminal progress"
+}
 make_task article
 "$owner" observe article 'done' https://github.com/o/r/pull/1
 "$owner" reconcile
@@ -484,6 +580,20 @@ manual self-resumed progressed
 manual legacy-alias progressed
 EOF
 pass 'terminal inventory normalizes origin identity and legacy aliases'
+while read -r cycle_backend cycle_shape; do
+  [ -n "$cycle_backend" ] || continue
+  run_cycle_answer_case "$cycle_backend" "$cycle_shape"
+done <<'EOF'
+auto origin
+auto self-inventory
+auto transferred
+auto legacy
+manual origin
+manual self-inventory
+manual transferred
+manual legacy
+EOF
+pass 'terminal reconciliation binds repeated answers to the current hold cycle'
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"
