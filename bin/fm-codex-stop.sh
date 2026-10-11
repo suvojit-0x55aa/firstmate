@@ -41,12 +41,45 @@ fm_session_lock_owned_by_self "$STATE" || {
 OWNER=$(cat "$STATE/.lock")
 OWNER_IDENTITY=$(fm_pid_identity "$OWNER")
 [ -n "$OWNER_IDENTITY" ] || exit 2
+session_generation_current() {
+  [ "$(cat "$STATE/.lock" 2>/dev/null)" = "$OWNER" ] \
+    && [ "$(fm_pid_identity "$OWNER")" = "$OWNER_IDENTITY" ] \
+    && [ ! -e "$STATE/.afk" ]
+}
+lock_holder_in_session() {
+  local pid=$1 parent hops=0
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  while [ "$hops" -lt 32 ]; do
+    if [ "$pid" = "$OWNER" ]; then
+      [ "$(fm_pid_identity "$OWNER")" = "$OWNER_IDENTITY" ]
+      return
+    fi
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$parent" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$parent" != "$pid" ] || return 1
+    pid=$parent
+    hops=$((hops + 1))
+  done
+  return 1
+}
 BUDGET=${FM_CODEX_WATCH_CHECKPOINT:-180}
 case "$BUDGET" in ''|*[!0-9]*|0) BUDGET=180 ;; esac
 [ "$BUDGET" -le 180 ] || BUDGET=180
 GRACE=${FM_GUARD_GRACE:-300}
 LOCK="$STATE/.codex-stop.lock"
-fm_lock_try_acquire "$LOCK" || exit 0
+if ! fm_lock_try_acquire "$LOCK"; then
+  LOCK_DEADLINE=$((SECONDS + 8))
+  while :; do
+    lock_holder_in_session "${FM_LOCK_HELD_PID:-}" && exit 0
+    session_generation_current || exit 0
+    [ "$SECONDS" -lt "$LOCK_DEADLINE" ] || {
+      printf 'Codex supervision could not establish replacement Stop ownership; retry the native continuation.\n' >&2
+      exit 2
+    }
+    sleep 0.1
+    fm_lock_try_acquire "$LOCK" && break
+  done
+fi
 ARM_PID=
 ARM_IDENTITY=
 # shellcheck disable=SC2329 # Called by the EXIT cleanup handler.
@@ -75,9 +108,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
 still_ours() {
-  [ "$(cat "$STATE/.lock" 2>/dev/null)" = "$OWNER" ] \
-    && [ "$(fm_pid_identity "$OWNER")" = "$OWNER_IDENTITY" ] \
-    && [ ! -e "$STATE/.afk" ]
+  session_generation_current
 }
 # shellcheck source=/dev/null
 [ ! -f "$CONFIG/x-mode.env" ] || . "$CONFIG/x-mode.env"

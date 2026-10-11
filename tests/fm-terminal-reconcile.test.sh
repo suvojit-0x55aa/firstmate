@@ -22,6 +22,13 @@ answer_captain_task() {
     FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer "$id" --decision-file "$answer_file" >/dev/null
 }
+release_captain_task() {
+  local id=$1 answer_file="$FM_HOME/$1-release.txt"
+  printf 'Captain released %s.\n' "$id" > "$answer_file"
+  FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+    FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer "$id" --decision-file "$answer_file" --release >/dev/null
+}
 run_terminal_captain_case() {
   local backend=$1 shape=$2 resolution=$3 expected=$4
   local id="gate-$backend-$shape-$resolution" call key rc=0 backlog
@@ -46,6 +53,13 @@ run_terminal_captain_case() {
       tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
       printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
       ;;
+    reheld-origin)
+      call=$id
+      tx hold "$call" --reason 'first captain delivery choice pending' --kind captain --json >/dev/null
+      release_captain_task "$call"
+      tx hold "$call" --reason 'new captain delivery choice pending' --kind captain --json >/dev/null
+      printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
+      ;;
     legacy)
       call="$id-decision-choice"
       tx add "$call" "$call" --json >/dev/null
@@ -61,7 +75,7 @@ run_terminal_captain_case() {
   "$owner" retired "$id" normal
   rm "$FM_HOME/state/$id.meta"
   key=$(jq -r --arg id "$id" 'select(.id==$id)|.key' "$FM_HOME/state/terminal-delivery/"*.json)
-  if [ "$resolution" = answered ]; then
+  if [ "$resolution" = answered ] || [ "$resolution" = current ]; then
     answer_captain_task "$call"
   else
     tx 'done' "$call" --no-prune --json >/dev/null
@@ -201,12 +215,16 @@ auto origin unanswered blocked
 auto origin answered progressed
 auto legacy unanswered blocked
 auto legacy answered progressed
+auto reheld-origin historical blocked
+auto reheld-origin current progressed
 manual transferred unanswered blocked
 manual transferred answered progressed
 manual origin unanswered blocked
 manual origin answered progressed
 manual legacy unanswered blocked
 manual legacy answered progressed
+manual reheld-origin historical blocked
+manual reheld-origin current progressed
 EOF
 pass 'terminal captain matrix preserves unresolved calls and replays answered transitions'
 make_task manualopen

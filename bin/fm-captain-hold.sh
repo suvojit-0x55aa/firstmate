@@ -310,6 +310,10 @@ body_has_resolution_record() {  # <task-body>
   return 1
 }
 
+terminal_resolution_is_current() {  # <task-body> <hold-kind>
+  [ "$2" != captain ] || [ "$(recorded_resolution_mode "$1" || true)" != released ]
+}
+
 # The recorded decision digest of either record format, from the show-escaped
 # body (multi-line bodies print as one quoted line with \n escapes). Records
 # are prepended, so the first match is the newest record.
@@ -882,6 +886,7 @@ command_terminal_ready() {
     if [ "$hold_kind" = captain ]; then
       [ "$state" = "done" ] || return 1
       body_has_resolution_record "$body" || return 1
+      terminal_resolution_is_current "$body" "$hold_kind" || return 1
     fi
   fi
   for entry in "$@"; do
@@ -893,6 +898,7 @@ command_terminal_ready() {
     body=$(show_field "$show" body)
     [ "$state" = "done" ] || [ "$hold_kind" != captain ] || return 1
     body_has_resolution_record "$body" || return 1
+    terminal_resolution_is_current "$body" "$hold_kind" || return 1
   done
 }
 

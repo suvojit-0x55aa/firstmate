@@ -6,9 +6,12 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-codex-stop)
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 STOP_PID=
+STOP_PID_TWO=
 cleanup_test() {
   [ -z "$STOP_PID" ] || kill -TERM "$STOP_PID" 2>/dev/null || true
   [ -z "$STOP_PID" ] || wait "$STOP_PID" 2>/dev/null || true
+  [ -z "$STOP_PID_TWO" ] || kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  [ -z "$STOP_PID_TWO" ] || wait "$STOP_PID_TWO" 2>/dev/null || true
   fm_test_cleanup
 }
 trap cleanup_test EXIT
@@ -41,6 +44,14 @@ run_stop() {
   PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
     FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" "$ROOT/bin/fm-codex-stop.sh"
+}
+run_stop_generation() {
+  local dir=$1
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
+    FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" \
+    bash -c 'printf "%s\n" "$$" > "$1/state/.lock"; export FM_TEST_CODEX_OWNER=$$; exec "$2/bin/fm-codex-stop.sh"' \
+    _ "$dir" "$ROOT"
 }
 await_lock() {
   local dir=$1 n=0
@@ -79,6 +90,44 @@ expect_code 2 "$rc" 'actionable return must request native continuation'
 assert_contains "$(cat "$dir/out")" 'signal:' 'post-Stop event was not delivered'
 assert_grep 'article.status' "$dir/state/.wake-queue" 'Stop consumed the durable event before handling'
 pass 'an event after Stop reaches continuation once; duplicate Stop preserves singleton ownership'
+
+dir=$(make_home replacement-contention)
+TEST_BUDGET=12 run_stop_generation "$dir" > "$dir/first" 2>&1 &
+STOP_PID=$!
+await_lock "$dir"
+first_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+TEST_BUDGET=12 run_stop_generation "$dir" > "$dir/replacement" 2>&1 &
+STOP_PID_TWO=$!
+n=0
+replacement_observed=0
+while [ "$n" -lt 160 ]; do
+  replacement_owner=$(cat "$dir/state/.codex-stop.lock/pid" 2>/dev/null || true)
+  session_owner=$(cat "$dir/state/.lock" 2>/dev/null || true)
+  if [ -n "$replacement_owner" ] && [ "$replacement_owner" != "$first_owner" ] \
+    && [ "$replacement_owner" = "$session_owner" ] \
+    && FM_HOME="$dir" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_watcher_healthy "$2/state" "$1/bin/fm-watch.sh" 300 "$2"' _ "$ROOT" "$dir"; then
+    replacement_observed=1
+    break
+  fi
+  grep -Fq 'Run bin/fm-wake-drain.sh' "$dir/replacement" 2>/dev/null && break
+  kill -0 "$STOP_PID_TWO" 2>/dev/null || break
+  sleep 0.05
+  n=$((n+1))
+done
+[ "$n" -lt 160 ] || fail "replacement Stop did not acquire supervision after predecessor contention: first=$(cat "$dir/first") replacement=$(cat "$dir/replacement") stop-owner=$(cat "$dir/state/.codex-stop.lock/pid" 2>/dev/null || true) session-owner=$(cat "$dir/state/.lock" 2>/dev/null || true)"
+[ "$replacement_observed" -eq 0 ] || printf 'done: replacement article ready\n' > "$dir/state/replacement.status"
+first_rc=0
+wait "$STOP_PID" || first_rc=$?
+STOP_PID=
+replacement_rc=0
+wait "$STOP_PID_TWO" || replacement_rc=$?
+STOP_PID_TWO=
+expect_code 0 "$first_rc" 'replaced predecessor must stand down'
+expect_code 2 "$replacement_rc" 'replacement Stop must retain native continuation'
+assert_contains "$(cat "$dir/replacement")" 'Run bin/fm-wake-drain.sh' \
+  'replacement Stop ended blind after contention'
+assert_absent "$dir/state/.watch.lock/pid" 'replacement contention left watcher ownership behind'
+pass 'replacement Stop takes over after predecessor lock contention'
 
 dir=$(make_home cancelled)
 TEST_BUDGET=12 run_stop "$dir" > "$dir/out" 2>&1 &
