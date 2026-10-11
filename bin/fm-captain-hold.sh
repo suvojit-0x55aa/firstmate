@@ -245,7 +245,7 @@ manual_task_show() {  # <id>
   printf '%s\n' "$snapshot" | jq -er --arg id "$1" '
     [.records[] | select(.structured == true and .id == $id)]
     | if length != 1 then empty else .[0] end
-    | "  id: \(.id)\n  state: \(.state)\n  hold_kind: \(.hold_kind // \"-\")\n  body: \((.body_lines | join(\"\\n\")) | @json)"
+    | "  id: \(.id)\n  state: \(.state)\n  hold_kind: \(.hold_kind // "-")\n  body: \((.body_lines | join("\n")) | @json)"
   '
 }
 
