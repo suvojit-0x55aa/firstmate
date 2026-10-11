@@ -208,6 +208,33 @@ select_retired_record() {
   KEY=${found##*/}
   KEY=${KEY%.json}
 }
+select_merge_observation_record() {
+  local id=$1 pr=$2 meta="$STATE/$1.meta" current= candidate found= count=0
+  valid "$id" || return 2
+  [ -n "$pr" ] || return 2
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+    select_record_path "$id" || return 1
+    current=$RECORD
+    if [ -e "$current" ] || [ -L "$current" ]; then
+      receipt_path_authenticated "$current" || return 1
+    fi
+  fi
+  for candidate in "$DIR"/*.json; do
+    receipt_path_authenticated "$candidate" || continue
+    jq -e --arg id "$id" --arg pr "$pr" '.id == $id and .pr == $pr' \
+      "$candidate" >/dev/null || continue
+    if [ "$candidate" != "$current" ]; then
+      jq -e '.retired == true' "$candidate" >/dev/null || continue
+    fi
+    count=$((count + 1))
+    found=$candidate
+  done
+  [ "$count" -eq 1 ] || return 1
+  RECORD=$found
+  KEY=${found##*/}
+  KEY=${KEY%.json}
+}
 record_matches_current_incarnation() {
   local id meta incarnation
   id=$(jq -r .id "$RECORD") || return 1
@@ -370,9 +397,10 @@ case "$mode" in
     else
       [ "$#" -ge 3 ] || exit 2
     fi
-    if [ "$mode" = merged ] || [ "$mode" = merge-observed ]; then
+    if [ "$mode" = merge-observed ]; then
+      select_merge_observation_record "$2" "$3" || exit 0
+    elif [ "$mode" = merged ]; then
       if ! select_record "$2" && ! select_retired_record "$2" "$3"; then
-        [ "$mode" = merge-observed ] && exit 0
         exit 1
       fi
     else

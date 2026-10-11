@@ -1556,6 +1556,68 @@ EOF
   test_unknown_origin_obligation_recovers_through_captain_owner
   pass 'archived captain answers and releases retain exact cycle-aware terminal evidence'
 }
+test_merge_observation_stays_bound_to_exact_receipt() {
+  local id=merge-observed-reuse p1=https://github.com/o/r/pull/101 p2=https://github.com/o/r/pull/202
+  local p3=https://github.com/o/r/pull/303 key_a key_b record_a record_b before_b current_key
+  local ambiguous=merge-observed-ambiguous ambiguous_a ambiguous_b before_a before_ambiguous_b
+
+  make_task "$id"
+  "$owner" observe "$id" done "$p1"
+  key_a=$("$owner" receipt-key "$id")
+  record_a="$FM_HOME/state/terminal-delivery/$key_a.json"
+  "$owner" retired "$id" normal
+
+  printf 'spawn_gen=%s-b\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" "$p2" > "$FM_HOME/state/$id.meta"
+  "$owner" observe "$id" done "$p2"
+  key_b=$("$owner" receipt-key "$id")
+  record_b="$FM_HOME/state/terminal-delivery/$key_b.json"
+  [ "$key_a" != "$key_b" ] || fail 'reused merge-observation fixture did not create a new incarnation'
+  before_b=$(shasum -a 256 "$record_b" | awk '{print $1}')
+  "$owner" landing-proven "$id" && fail 'unmerged replacement started with delivery proof'
+
+  "$owner" merge-observed "$id" "$p1"
+  [ "$(shasum -a 256 "$record_b" | awk '{print $1}')" = "$before_b" ] \
+    || fail 'delayed P1 observation mutated replacement receipt B'
+  jq -e --arg pr "$p2" '.pr == $pr and .merged == false and .retired == false and .backlog == false' \
+    "$record_b" >/dev/null || fail 'delayed P1 observation changed B delivery or teardown state'
+  jq -e --arg pr "$p1" '.pr == $pr and .merged == true and .retired == true' \
+    "$record_a" >/dev/null || fail 'delayed P1 observation did not reconcile exact retired receipt A'
+  "$owner" landing-proven "$id" && fail 'retired A merge proof authorized replacement B'
+  assert_contains "$(tx show "$id")" 'state: in_flight' \
+    'delayed P1 observation completed replacement B'
+  current_key=$("$owner" receipt-key "$id")
+  [ "$current_key" = "$key_b" ] || fail 'delayed P1 observation rebound current receipt identity'
+
+  "$owner" merge-observed "$id" "$p1"
+  jq -e --arg pr "$p1" '.pr == $pr and .merged == true' "$record_a" >/dev/null \
+    || fail 'exact retired merge observation was not idempotent'
+  "$owner" merge-observed "$id" "$p3"
+  [ "$(shasum -a 256 "$record_b" | awk '{print $1}')" = "$before_b" ] \
+    || fail 'absent P3 evidence mutated current receipt B'
+
+  "$owner" merge-observed "$id" "$p2"
+  "$owner" merge-observed "$id" "$p2"
+  jq -e --arg pr "$p2" '.pr == $pr and .merged == true' "$record_b" >/dev/null \
+    || fail 'exact current P2 observation did not reconcile idempotently'
+  "$owner" landing-proven "$id" || fail 'exact current P2 observation did not establish delivery proof'
+
+  make_task "$ambiguous"
+  "$owner" observe "$ambiguous" done "$p1"
+  ambiguous_a=$("$owner" receipt-key "$ambiguous")
+  "$owner" retired "$ambiguous" normal
+  printf 'spawn_gen=%s-b\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$ambiguous" "$p1" > "$FM_HOME/state/$ambiguous.meta"
+  "$owner" observe "$ambiguous" done "$p1"
+  ambiguous_b=$("$owner" receipt-key "$ambiguous")
+  before_a=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')
+  before_ambiguous_b=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_b.json" | awk '{print $1}')
+  "$owner" merge-observed "$ambiguous" "$p1"
+  [ "$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')" = "$before_a" ] \
+    && [ "$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_b.json" | awk '{print $1}')" = "$before_ambiguous_b" ] \
+    || fail 'ambiguous exact PR evidence mutated one reused incarnation'
+  pass 'merge observations reconcile only one exact authenticated receipt'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -1626,6 +1688,10 @@ EOF
     ;;
   archived-captain-answer)
     test_archived_captain_answers_remain_exact_terminal_evidence
+    exit
+    ;;
+  merge-observed-identity)
+    test_merge_observation_stays_bound_to_exact_receipt
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
