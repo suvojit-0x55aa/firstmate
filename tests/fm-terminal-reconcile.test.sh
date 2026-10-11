@@ -85,3 +85,40 @@ assert_contains "$(tx show localproof)" 'state: in_flight' 'custody teardown fal
 "$owner" reconcile
 assert_contains "$(tx show localproof)" 'state: done' 'verified local landing did not advance backlog'
 pass 'local-only delivery requires explicit landing proof as well as teardown'
+make_task defaultproof
+"$owner" retired defaultproof normal
+"$owner" default-landed defaultproof 1123456789012345678901234567890123456789
+rm "$FM_HOME/state/defaultproof.meta"
+"$owner" reconcile
+assert_contains "$(tx show defaultproof)" 'state: done' 'verified default-branch landing did not advance backlog'
+pass 'authenticated default-branch delivery survives metadata deletion'
+printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
+make_task manualdone
+"$owner" merged manualdone https://github.com/o/r/pull/1
+"$owner" retired manualdone normal
+rm "$FM_HOME/state/manualdone.meta"
+manual_key=$(jq -r 'select(.id=="manualdone")|.key' "$FM_HOME/state/terminal-delivery/"*.json)
+assert_contains "$("$owner" report)" "manual-complete $manual_key" 'manual backend omitted its completion confirmation'
+tx 'done' manualdone --pr https://github.com/o/r/pull/1 --no-prune --json >/dev/null
+"$owner" manual-complete "$manual_key"
+"$owner" manual-complete "$manual_key"
+assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: manualdone')" 'backlog_done=true' 'manual completion was not recorded idempotently'
+"$owner" refill-reviewed "$manual_key"
+"$owner" refill-reviewed "$manual_key"
+assert_not_contains "$("$owner" report)" 'TERMINAL DELIVERY: manualdone ' 'manual refill confirmation was not idempotent'
+pass 'manual completion and refill confirmation replay safely'
+make_task manualheld
+"$owner" merged manualheld https://github.com/o/r/pull/1
+"$owner" retired manualheld normal
+printf '%s\n' 'needs-decision [key=captain-call]: choose delivery treatment' > "$FM_HOME/state/manualheld.status"
+manual_held_key=$(jq -r 'select(.id=="manualheld")|.key' "$FM_HOME/state/terminal-delivery/"*.json)
+"$owner" manual-complete "$manual_held_key" && fail 'manual completion bypassed a captain-held decision'
+assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: manualheld')" 'backlog_done=false' 'captain-held manual receipt was completed'
+pass 'manual completion preserves captain-held decisions'
+make_task manualopen
+"$owner" retired manualopen normal
+manual_open_key=$(jq -r 'select(.id=="manualopen")|.key' "$FM_HOME/state/terminal-delivery/"*.json)
+"$owner" manual-complete "$manual_open_key" && fail 'manual completion treated unmerged custody as delivery'
+printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+"$owner" manual-complete "$manual_open_key" && fail 'manual completion ignored the backend opt-out boundary'
+pass 'manual confirmation refuses unmerged custody and non-manual backends'

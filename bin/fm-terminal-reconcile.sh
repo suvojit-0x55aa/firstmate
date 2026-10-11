@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Durable terminal-delivery owner, independent of notification acknowledgement.
 # Usage: fm-terminal-reconcile.sh observe <id> <done|failed> [pr]
+#        fm-terminal-reconcile.sh custody <id> <pr>
 #        fm-terminal-reconcile.sh merged <id> <pr>
 #        fm-terminal-reconcile.sh local-landed <id> <commit>
+#        fm-terminal-reconcile.sh default-landed <id> <commit>
 #        fm-terminal-reconcile.sh retired <id> <normal|discard>
 #        fm-terminal-reconcile.sh reconcile | report
+#        fm-terminal-reconcile.sh manual-complete <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
 #
 # observe is called by inactive recovery; merged only by the verified merge
@@ -17,7 +20,8 @@
 # PR custody, merge proof, teardown, backlog and refill stages. Presentation is
 # owned by fm-inactive-reconcile.sh; acknowledging it never removes this ledger.
 # Local tasks-axi mutations are idempotent, --no-prune retains replay evidence,
-# and held/blocked tasks fail closed. Manual backlogs retain an actionable record.
+# and held/blocked tasks fail closed. manual-complete confirms an operator has
+# updated a manual backlog, but only after the same delivery and decision guards.
 # refill-reviewed is an explicit supervisor acknowledgement AFTER evaluating the
 # current ready list, date gates and dependencies and dispatching eligible work.
 # Queue wake acknowledgement alone cannot clear it. Reconcile is bounded, local,
@@ -63,17 +67,44 @@ select_record() {
     '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false}' > "$tmp" \
     && mv "$tmp" "$RECORD"
 }
+select_retired_record() {
+  local id=$1 pr=$2 candidate found=
+  valid "$id" || return 2
+  for candidate in "$DIR"/*.json; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    jq -e --arg id "$id" --arg pr "$pr" \
+      '.id == $id and .retired == true and .reviewed != true and (.pr == $pr or .pr == "")' \
+      "$candidate" >/dev/null || continue
+    [ -z "$found" ] || return 1
+    found=$candidate
+  done
+  [ -n "$found" ] || return 1
+  RECORD=$found
+  KEY=${found##*/}
+  KEY=${KEY%.json}
+}
+record_matches_current_incarnation() {
+  local id meta incarnation
+  id=$(jq -r .id "$RECORD") || return 1
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] || return 0
+  incarnation=$(field "$meta" spawn_gen)
+  [ -n "$incarnation" ] || incarnation="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
+  [ "$incarnation" = "$(jq -r .incarnation "$RECORD")" ]
+}
+delivery_proven() {
+  [ "$(jq -r .kind "$RECORD")" = scout ] && return 0
+  if [ "$(jq -r .merged "$RECORD")" = true ] && [ -n "$(jq -r .pr "$RECORD")" ]; then
+    return 0
+  fi
+  [ -n "$(jq -r '(.local_head // .default_head // empty)' "$RECORD")" ]
+}
 reconcile_record() {
-  local id pr state task snapshot retired discarded kind incarnation meta
+  local id pr state task snapshot retired discarded kind
   local -a args
   [ "$(jq -r .reviewed "$RECORD")" != true ] || return 0
   id=$(jq -r .id "$RECORD") || return 1
-  meta="$STATE/$id.meta"
-  if [ -f "$meta" ]; then
-    incarnation=$(field "$meta" spawn_gen)
-    [ -n "$incarnation" ] || incarnation="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
-    [ "$incarnation" = "$(jq -r .incarnation "$RECORD")" ] || return 0
-  fi
+  record_matches_current_incarnation || return 0
   [ -z "$(status_open_decisions "$STATE/$id.status")" ] || return 0
   pr=$(jq -r .pr "$RECORD")
   retired=$(jq -r .retired "$RECORD")
@@ -95,14 +126,13 @@ reconcile_record() {
     kind=$(jq -r .kind "$RECORD")
     args=(--note 'Guarded teardown completed')
     if [ "$kind" = scout ]; then args=(--report "data/$id/report.md")
-    elif [ -n "$pr" ]; then
+    elif [ "$(jq -r .merged "$RECORD")" = true ] && [ -n "$pr" ]; then
+      args=(--pr "$pr")
+    elif delivery_proven; then :
+    else
       # Remote reachability may permit safe custody teardown of an OPEN PR.
       # It does not prove delivery and must not close the backlog item.
-      [ "$(jq -r .merged "$RECORD")" = true ] || return 0
-      args=(--pr "$pr")
-    elif [ "$(jq -r .mode "$RECORD")" = local-only ]; then
-      [ -n "$(jq -r '.local_head // empty' "$RECORD")" ] || return 0
-    else return 0
+      return 0
     fi
     task=$(fm_run_timed 3 tasks-axi 'done' "$id" "${args[@]}" --no-prune --file "$DATA/backlog.md" --json) || return 1
     printf '%s' "$task" | jq -e '.ok == true and .task.state == "done"' >/dev/null || return 1
@@ -114,24 +144,33 @@ reconcile_record() {
   fi
 }
 mode=${1:-report}
-case "$mode" in -h|--help) sed -n '2,23{s/^# \{0,1\}//;p;}' "$0"; exit 0;; esac
+case "$mode" in -h|--help) sed -n '2,28{s/^# \{0,1\}//;p;}' "$0"; exit 0;; esac
 mkdir -p "$DIR" || exit 1
 [ ! -L "$DIR" ] || exit 1
 fm_lock_acquire_wait "$DIR/.lock" || exit 1
 trap 'fm_lock_release "$DIR/.lock"' EXIT
 case "$mode" in
-  observe|merged|local-landed|retired)
+  observe|custody|merged|local-landed|default-landed|retired)
     [ "$#" -ge 3 ] || exit 2
-    select_record "$2" || exit $?
+    if [ "$mode" = merged ]; then
+      select_record "$2" || select_retired_record "$2" "$3" || exit $?
+    else
+      select_record "$2" || exit $?
+    fi
     case "$mode" in
       observe)
         case "$3" in done|failed) ;; *) exit 2;; esac
         put --arg state "$3" --arg pr "${4:-}" '.state=$state | if $pr!="" and .pr!=$pr then .pr=$pr | .merged=false | .custody=false | .backlog=false | .refill=false | .reviewed=false else . end' || exit 1 ;;
+      custody) put --arg pr "$3" 'if .pr!=$pr then .pr=$pr | .merged=false | .custody=false | .backlog=false | .refill=false | .reviewed=false else . end' || exit 1 ;;
       merged) put --arg pr "$3" '.pr=$pr | .merged=true' || exit 1 ;;
-      local-landed)
+      local-landed|default-landed)
         case "$3" in ''|*[!a-fA-F0-9]*) exit 2;; esac
         [ "${#3}" -eq 40 ] || [ "${#3}" -eq 64 ] || exit 2
-        put --arg head "$3" '.local_head=$head' || exit 1 ;;
+        if [ "$mode" = local-landed ]; then
+          put --arg head "$3" '.local_head=$head' || exit 1
+        else
+          put --arg head "$3" '.default_head=$head' || exit 1
+        fi ;;
       retired)
         case "$3" in normal) put '.retired=true';; discard) put '.retired=true | .discarded=true';; *) exit 2;; esac || exit 1 ;;
     esac
@@ -155,10 +194,23 @@ case "$mode" in
       done
     done ;;
   report)
+    manual=false
+    fm_backlog_backend_manual "$CONFIG" && manual=true
     for RECORD in "$DIR"/*.json; do
       [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
-      jq -r 'select(.reviewed!=true) | "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded)" + (if .refill then "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending") else "\nPreserve captain holds; reconcile PR custody/merge proof and guarded teardown before closing backlog." end)' "$RECORD" || exit 1
+      jq -r --argjson manual "$manual" 'select(.reviewed!=true) | "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded)" + (if .refill then "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending") elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key)." else "\nPreserve captain holds; reconcile PR custody/merge proof and guarded teardown before closing backlog, then dispatch only work whose blockers are gone and date is due." end)' "$RECORD" || exit 1
     done ;;
+  manual-complete)
+    [ "$#" -eq 2 ] && valid "$2" || exit 2
+    fm_backlog_backend_manual "$CONFIG" || exit 1
+    RECORD="$DIR/$2.json"
+    [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || exit 1
+    record_matches_current_incarnation || exit 1
+    [ -z "$(status_open_decisions "$STATE/$(jq -r .id "$RECORD").status")" ] || exit 1
+    jq -e '.retired and (.discarded != true)' "$RECORD" >/dev/null || exit 1
+    delivery_proven || exit 1
+    put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
+      '.backlog=true | .refill=true | .ready=$ready' ;;
   refill-reviewed)
     [ "$#" -eq 2 ] && valid "$2" || exit 2
     RECORD="$DIR/$2.json"

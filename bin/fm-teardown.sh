@@ -694,6 +694,9 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+TEARDOWN_VERIFIED_MERGED_PR=
+TEARDOWN_DISCOVERED_PR=
+TEARDOWN_VERIFIED_DEFAULT_HEAD=
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1073,17 +1076,17 @@ EOF
 # current work is not contained in the PR head, no PR is found, or any gh error
 # occurs - the caller then falls back to the content check.
 pr_is_merged() {
-  local branch=$1 target view state head current
+  local branch=$1 target view state head url extra current
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid -q '.state + "\t" + .headRefOid' 2>/dev/null) || return 1
-  state=${view%%$'\t'*}
-  head=${view#*$'\t'}
-  [ "$state" != "$view" ] || return 1
+  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  IFS=$'\t' read -r state head url extra <<< "$view"
+  [ -n "$state" ] && [ -n "$head" ] && [ -n "$url" ] && [ -z "$extra" ] || return 1
+  TEARDOWN_DISCOVERED_PR=$url
   case "$state" in
     MERGED|merged) ;;
     *) return 1 ;;
@@ -1091,8 +1094,12 @@ pr_is_merged() {
   [ -n "$head" ] || return 1
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null && return 0
-  unpushed_patches_are_in_pr_head "$head"
+  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
+    || unpushed_patches_are_in_pr_head "$head"; then
+    TEARDOWN_VERIFIED_MERGED_PR=$url
+    return 0
+  fi
+  return 1
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -1117,7 +1124,8 @@ content_in_default() {
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ]
+  [ "$merged_tree" = "$default_tree" ] || return 1
+  TEARDOWN_VERIFIED_DEFAULT_HEAD=$(git -C "$WT" rev-parse --verify "$ref^{commit}" 2>/dev/null) || return 1
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -1129,6 +1137,35 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+persist_terminal_landing_proof() {
+  local branch name ref current
+  [ "$KIND" = ship ] && [ "$FORCE" != --force ] || return 0
+  if [ "$MODE" = local-only ]; then
+    if [ -z "$TEARDOWN_VERIFIED_DEFAULT_HEAD" ]; then
+      name=$(default_branch) || return 0
+      ref="refs/heads/$name"
+      git -C "$WT" rev-parse --verify "$ref^{commit}" >/dev/null 2>&1 || return 0
+      current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 0
+      git -C "$WT" merge-base --is-ancestor "$current" "$ref" 2>/dev/null || return 0
+      TEARDOWN_VERIFIED_DEFAULT_HEAD=$(git -C "$WT" rev-parse --verify "$ref^{commit}" 2>/dev/null) || return 0
+    fi
+    "$SCRIPT_DIR/fm-terminal-reconcile.sh" local-landed "$ID" "$TEARDOWN_VERIFIED_DEFAULT_HEAD"
+    return $?
+  fi
+  if [ -z "$TEARDOWN_VERIFIED_MERGED_PR" ]; then
+    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+    [ -n "$branch" ] || branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    pr_is_merged "$branch" || true
+  fi
+  if [ -n "$TEARDOWN_VERIFIED_MERGED_PR" ]; then
+    "$SCRIPT_DIR/fm-terminal-reconcile.sh" merged "$ID" "$TEARDOWN_VERIFIED_MERGED_PR"
+  elif [ -n "$TEARDOWN_VERIFIED_DEFAULT_HEAD" ]; then
+    "$SCRIPT_DIR/fm-terminal-reconcile.sh" default-landed "$ID" "$TEARDOWN_VERIFIED_DEFAULT_HEAD"
+  elif [ -n "$TEARDOWN_DISCOVERED_PR" ]; then
+    "$SCRIPT_DIR/fm-terminal-reconcile.sh" custody "$ID" "$TEARDOWN_DISCOVERED_PR"
+  fi
 }
 
 
@@ -2611,6 +2648,7 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+persist_terminal_landing_proof || exit 1
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
