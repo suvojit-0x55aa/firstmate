@@ -28,7 +28,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh terminal-ready <origin-id> [<captain-task-id>...]
+#   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [<captain-task-id>...]
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -310,8 +310,14 @@ body_has_resolution_record() {  # <task-body>
   return 1
 }
 
-terminal_resolution_is_current() {  # <task-body> <hold-kind>
-  [ "$2" != captain ] || [ "$(recorded_resolution_mode "$1" || true)" != released ]
+terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1>
+  local mode release_receipt
+  mode=$(recorded_resolution_mode "$1" || true)
+  [ "$mode" = released ] || return 0
+  [ "$2" != captain ] || return 1
+  [ "$4" = 1 ] || return 1
+  release_receipt=$(recorded_release_receipt "$1" || true)
+  [ -n "$release_receipt" ] && [ -n "$3" ] && [ "$release_receipt" != "$3" ]
 }
 
 # The recorded decision digest of either record format, from the show-escaped
@@ -340,9 +346,30 @@ recorded_resolution_mode() {  # <task-body>
   printf '%s' "$rest"
 }
 
-resolution_block() {  # <mode>
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\nCaptain decision:\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$DECISION_TEXT"
+recorded_release_receipt() {  # <task-body>
+  local rest=$1
+  case "$rest" in
+    *"Terminal receipt: "*) rest=${rest#*"Terminal receipt: "} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%%\\n*}
+  rest=${rest%%$'\n'*}
+  printf '%s' "$rest"
+}
+
+terminal_receipt_key() {  # <task-id>
+  local id=$1 meta="$STATE/$1.meta" incarnation
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  incarnation=$(meta_value "$meta" spawn_gen)
+  [ -n "$incarnation" ] || incarnation="$(meta_value "$meta" tasktmp)|$(meta_value "$meta" worktree)|$(meta_value "$meta" window)"
+  printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}'
+}
+
+resolution_block() {  # <mode> <terminal-receipt>
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n' \
+    "$DECISION_DIGEST" "$1"
+  [ -z "$2" ] || printf 'Terminal receipt: %s\n' "$2"
+  printf '\nCaptain decision:\n%s\n' "$DECISION_TEXT"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -452,8 +479,9 @@ command_hold() {
 # Record a resolution block at the top of the task body, preserving the
 # previous body below it and archiving the pristine original.
 write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp
-  new_body=$(resolution_block "$mode")
+  local id=$1 mode=$2 body=$3 new_body tmp receipt=''
+  [ "$mode" != released ] || receipt=$(terminal_receipt_key "$id" || true)
+  new_body=$(resolution_block "$mode" "$receipt")
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
@@ -873,20 +901,26 @@ EOF
 }
 
 command_terminal_ready() {
-  local origin=${1:-} entry id show state hold_kind body
+  local origin=${1:-} receipt='' entry id show state hold_kind body
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
+  if [ "${1:-}" = --receipt ]; then
+    [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+    receipt=${2:-}
+    validate_slug receipt-key "$receipt"
+    shift 2
+  fi
   require_tasks_axi
   [ -z "$(origin_open_decisions "$origin")" ] || return 1
   if show=$(task_show "$origin"); then
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
+    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 1 || return 1
     if [ "$hold_kind" = captain ]; then
       [ "$state" = "done" ] || return 1
       body_has_resolution_record "$body" || return 1
-      terminal_resolution_is_current "$body" "$hold_kind" || return 1
     fi
   fi
   for entry in "$@"; do
@@ -898,7 +932,7 @@ command_terminal_ready() {
     body=$(show_field "$show" body)
     [ "$state" = "done" ] || [ "$hold_kind" != captain ] || return 1
     body_has_resolution_record "$body" || return 1
-    terminal_resolution_is_current "$body" "$hold_kind" || return 1
+    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 0 || return 1
   done
 }
 

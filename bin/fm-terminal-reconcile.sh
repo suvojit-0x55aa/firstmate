@@ -7,6 +7,7 @@
 #        fm-terminal-reconcile.sh local-landed <id> <commit>
 #        fm-terminal-reconcile.sh default-landed <id> <commit>
 #        fm-terminal-reconcile.sh retired <id> <normal|discard>
+#        fm-terminal-reconcile.sh landing-proven <id>
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
@@ -52,22 +53,47 @@ put() {
   rm -f "$tmp"
   return 1
 }
-select_record() {
-  local id=$1 meta="$STATE/$1.meta" incarnation tmp
+select_record_path() {
+  local id=$1 meta="$STATE/$1.meta"
   valid "$id" || return 2
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  incarnation=$(field "$meta" spawn_gen)
-  [ -n "$incarnation" ] || incarnation="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
-  KEY=$(printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}')
+  INCARNATION=$(field "$meta" spawn_gen)
+  [ -n "$INCARNATION" ] || INCARNATION="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
+  KEY=$(printf '%s' "$id|$INCARNATION" | shasum -a 256 | awk '{print $1}')
   RECORD="$DIR/$KEY.json"
   [ ! -L "$RECORD" ] || return 1
-  [ ! -f "$RECORD" ] || return 0
+}
+supersede_prior_records() {
+  local id=$1 current=$RECORD candidate
+  for candidate in "$DIR"/*.json; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    [ "$candidate" != "$current" ] || continue
+    jq -e --arg id "$id" \
+      '.id == $id and .backlog != true and .reviewed != true and ((.superseded_by // "") == "")' \
+      "$candidate" >/dev/null || continue
+    RECORD=$candidate
+    put --arg key "$KEY" '.superseded_by=$key' || { RECORD=$current; return 1; }
+  done
+  RECORD=$current
+}
+select_existing_record() {
+  select_record_path "$1" || return $?
+  [ -f "$RECORD" ]
+}
+select_record() {
+  local id=$1 meta="$STATE/$1.meta" tmp
+  select_record_path "$id" || return $?
+  if [ -f "$RECORD" ]; then
+    supersede_prior_records "$id"
+    return $?
+  fi
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
-  jq -n --arg id "$id" --arg key "$KEY" --arg incarnation "$incarnation" \
+  jq -n --arg id "$id" --arg key "$KEY" --arg incarnation "$INCARNATION" \
     --arg kind "$(field "$meta" kind)" --arg mode "$(field "$meta" mode)" --arg pr "$(field "$meta" pr)" \
     --arg captain_keys "$(field "$meta" decision_keys)" \
-    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,captain_keys:$captain_keys}' > "$tmp" \
-    && mv "$tmp" "$RECORD"
+    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,superseded_by:"",captain_keys:$captain_keys}' > "$tmp" \
+    && mv "$tmp" "$RECORD" \
+    && supersede_prior_records "$id"
 }
 select_retired_record() {
   local id=$1 pr=$2 candidate found=
@@ -75,7 +101,7 @@ select_retired_record() {
   for candidate in "$DIR"/*.json; do
     [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
     jq -e --arg id "$id" --arg pr "$pr" \
-      '.id == $id and .retired == true and .reviewed != true and (.pr == $pr or .pr == "")' \
+      '.id == $id and .retired == true and .reviewed != true and ((.superseded_by // "") == "") and (.pr == $pr or .pr == "")' \
       "$candidate" >/dev/null || continue
     [ -z "$found" ] || return 1
     found=$candidate
@@ -102,8 +128,9 @@ delivery_proven() {
   [ -n "$(jq -r '(.local_head // .default_head // empty)' "$RECORD")" ]
 }
 captain_calls_resolved() {
-  local id captain_keys captain_key
+  local id receipt captain_keys captain_key
   id=$(jq -r .id "$RECORD") || return 1
+  receipt=$(jq -r .key "$RECORD") || return 1
   set -- "$id"
   captain_keys=$(jq -r '.captain_keys // ""' "$RECORD") || return 1
   while IFS= read -r captain_key; do
@@ -114,12 +141,13 @@ $(printf '%s\n' "$captain_keys" | tr ',' '\n')
 EOF
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    terminal-ready "$@" >/dev/null 2>&1
+    terminal-ready "$id" --receipt "$receipt" "${@:2}" >/dev/null 2>&1
 }
 reconcile_record() {
   local id pr state task snapshot retired discarded kind
   local -a args
   [ "$(jq -r .reviewed "$RECORD")" != true ] || return 0
+  [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || return 0
   id=$(jq -r .id "$RECORD") || return 1
   record_matches_current_incarnation || return 0
   pr=$(jq -r .pr "$RECORD")
@@ -167,6 +195,12 @@ mkdir -p "$DIR" || exit 1
 fm_lock_acquire_wait "$DIR/.lock" || exit 1
 trap 'fm_lock_release "$DIR/.lock"' EXIT
 case "$mode" in
+  landing-proven)
+    [ "$#" -eq 2 ] || exit 2
+    select_existing_record "$2" || exit 1
+    jq -e '.discarded != true and ((.superseded_by // "") == "")' "$RECORD" >/dev/null || exit 1
+    delivery_proven || exit 1
+    ;;
   observe|custody|merged|merge-observed|local-landed|default-landed|retired)
     [ "$#" -ge 3 ] || exit 2
     if [ "$mode" = merged ] || [ "$mode" = merge-observed ]; then
@@ -223,13 +257,14 @@ case "$mode" in
     fm_backlog_backend_manual "$CONFIG" && manual=true
     for RECORD in "$DIR"/*.json; do
       [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
-      jq -r --argjson manual "$manual" 'select(.reviewed!=true) | "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded)" + (if .refill then "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending") elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key)." else "\nPreserve captain holds; reconcile PR custody/merge proof and guarded teardown before closing backlog, then dispatch only work whose blockers are gone and date is due." end)' "$RECORD" || exit 1
+      jq -r --argjson manual "$manual" 'select(.reviewed!=true and ((.superseded_by // "") == "")) | "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded)" + (if .refill then "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending") elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key)." else "\nPreserve captain holds; reconcile PR custody/merge proof and guarded teardown before closing backlog, then dispatch only work whose blockers are gone and date is due." end)' "$RECORD" || exit 1
     done ;;
   manual-complete)
     [ "$#" -eq 2 ] && valid "$2" || exit 2
     fm_backlog_backend_manual "$CONFIG" || exit 1
     RECORD="$DIR/$2.json"
     [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || exit 1
+    [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || exit 1
     record_matches_current_incarnation || exit 1
     jq -e '.retired and (.discarded != true)' "$RECORD" >/dev/null || exit 1
     delivery_proven || exit 1
@@ -240,6 +275,7 @@ case "$mode" in
     [ "$#" -eq 2 ] && valid "$2" || exit 2
     RECORD="$DIR/$2.json"
     [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || exit 1
+    [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || exit 1
     jq -e '.backlog and .refill' "$RECORD" >/dev/null || exit 1
     put '.reviewed=true' ;;
   *) exit 2 ;;

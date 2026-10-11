@@ -60,6 +60,16 @@ run_terminal_captain_case() {
       tx hold "$call" --reason 'new captain delivery choice pending' --kind captain --json >/dev/null
       printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
       ;;
+    resumed-origin)
+      call=$id
+      tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+      release_captain_task "$call"
+      printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
+      "$owner" merged "$id" https://github.com/o/r/pull/1
+      "$owner" retired "$id" normal
+      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+        "$id" > "$FM_HOME/state/$id.meta"
+      ;;
     legacy)
       call="$id-decision-choice"
       tx add "$call" "$call" --json >/dev/null
@@ -74,12 +84,12 @@ run_terminal_captain_case() {
   "$owner" merged "$id" https://github.com/o/r/pull/1
   "$owner" retired "$id" normal
   rm "$FM_HOME/state/$id.meta"
-  key=$(jq -r --arg id "$id" 'select(.id==$id)|.key' "$FM_HOME/state/terminal-delivery/"*.json)
-  if [ "$resolution" = answered ] || [ "$resolution" = current ]; then
-    answer_captain_task "$call"
-  else
-    tx 'done' "$call" --no-prune --json >/dev/null
-  fi
+  key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  case "$resolution" in
+    answered|current) answer_captain_task "$call" ;;
+    *) tx 'done' "$call" --no-prune --json >/dev/null ;;
+  esac
   if [ "$backend" = manual ]; then
     [ "$call" = "$id" ] || tx 'done' "$id" --no-prune --json >/dev/null
     set +e
@@ -109,6 +119,12 @@ run_terminal_captain_case() {
       [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
         || fail "$backend/$shape/$resolution replay lost terminal progress"
       "$owner" refill-reviewed "$key"
+      [ "$(jq -sr --arg id "$id" '[.[] | select(.id==$id and ((.superseded_by // "") == ""))] | length' \
+        "$FM_HOME/state/terminal-delivery/"*.json)" = 1 ] \
+        || fail "$backend/$shape/$resolution retained parallel active receipts"
+      [ "$(jq -sr --arg id "$id" '[.[] | select(.id==$id and .backlog==true)] | length' \
+        "$FM_HOME/state/terminal-delivery/"*.json)" = 1 ] \
+        || fail "$backend/$shape/$resolution duplicated terminal completion"
       ;;
     *) fail "unknown terminal captain matrix expectation: $expected" ;;
   esac
@@ -190,6 +206,18 @@ rm "$FM_HOME/state/defaultproof.meta"
 "$owner" reconcile
 assert_contains "$(tx show defaultproof)" 'state: done' 'verified default-branch landing did not advance backlog'
 pass 'authenticated default-branch delivery survives metadata deletion'
+make_task exactproof
+"$owner" default-landed exactproof 2123456789012345678901234567890123456789
+"$owner" landing-proven exactproof
+proof_count=$(find "$FM_HOME/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d ' ')
+printf 'spawn_gen=exactproof-replacement\nkind=ship\nmode=no-mistakes\n' > "$FM_HOME/state/exactproof.meta"
+"$owner" landing-proven exactproof && fail 'mismatched incarnation reused prior landing proof'
+[ "$(find "$FM_HOME/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d ' ')" = "$proof_count" ] \
+  || fail 'landing proof query created a replacement receipt'
+make_task custodyproof
+"$owner" custody custodyproof https://github.com/o/r/pull/1
+"$owner" landing-proven custodyproof && fail 'PR custody was accepted as landing proof'
+pass 'landing proof lookup is exact-incarnation, read-only, and custody-safe'
 printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
 make_task manualdone
 "$owner" merged manualdone https://github.com/o/r/pull/1
@@ -213,6 +241,8 @@ auto transferred unanswered blocked
 auto transferred answered progressed
 auto origin unanswered blocked
 auto origin answered progressed
+auto origin released blocked
+auto resumed-origin resumed progressed
 auto legacy unanswered blocked
 auto legacy answered progressed
 auto reheld-origin historical blocked
@@ -221,6 +251,8 @@ manual transferred unanswered blocked
 manual transferred answered progressed
 manual origin unanswered blocked
 manual origin answered progressed
+manual origin released blocked
+manual resumed-origin resumed progressed
 manual legacy unanswered blocked
 manual legacy answered progressed
 manual reheld-origin historical blocked

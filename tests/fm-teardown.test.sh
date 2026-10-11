@@ -2662,6 +2662,76 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+install_interrupting_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+target=${@: -1}
+if [ ! -e "$FM_TEST_TREEHOUSE_INTERRUPTED" ]; then
+  : > "$FM_TEST_TREEHOUSE_INTERRUPTED"
+  rm -rf -- "$target"
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_persisted_landing_proof_replays_after_worktree_return() {
+  local case_dir head rc=0 receipt
+  case_dir=$(make_case terminal-proof-replay)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$head"
+  install_interrupting_treehouse "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-replay: interruption should stop the first teardown"
+  assert_absent "$case_dir/wt" "terminal-proof-replay: fixture did not remove the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-replay: interruption removed metadata"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  assert_present "$receipt" "terminal-proof-replay: landing proof was not journaled before removal"
+  [ "$(jq -r .local_head "$receipt")" = "$head" ] \
+    || fail "terminal-proof-replay: journal did not retain authenticated local landing"
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "terminal-proof-replay: exact-incarnation retry should complete"
+  assert_absent "$case_dir/state/task-x1.meta" "terminal-proof-replay: retry retained metadata"
+  [ "$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "terminal-proof-replay: retry duplicated its terminal receipt"
+  [ "$(jq -r .retired "$receipt")" = true ] \
+    || fail "terminal-proof-replay: retry did not finish the recorded teardown stage"
+  pass "same-incarnation landing proof survives worktree-return interruption and replay"
+}
+
+test_persisted_landing_proof_rejects_replacement_incarnation() {
+  local case_dir head rc=0
+  case_dir=$(make_case terminal-proof-mismatch)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$head"
+  install_interrupting_treehouse "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-mismatch: interruption should stop the first teardown"
+  printf 'spawn_gen=replacement-incarnation\n' >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-mismatch: replacement must not reuse prior proof"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-mismatch: refusal removed replacement metadata"
+  assert_grep "not landed in its intended default branch" "$case_dir/retry.stderr" \
+    "terminal-proof-mismatch: refusal did not require replacement proof"
+  pass "persisted landing proof cannot cross terminal incarnations"
+}
+
 test_local_only_fork_remote_refuses_without_default_landing
 test_open_pr_poll_blocks_teardown_until_landing
 test_manual_backend_open_pr_poll_blocks_teardown_until_landing
@@ -2721,3 +2791,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_persisted_landing_proof_replays_after_worktree_return
+test_persisted_landing_proof_rejects_replacement_incarnation

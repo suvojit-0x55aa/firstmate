@@ -1140,6 +1140,9 @@ work_is_landed() {
 persist_terminal_landing_proof() {
   local branch name ref current
   [ "$KIND" = ship ] && [ "$FORCE" != --force ] || return 0
+  if "$SCRIPT_DIR/fm-terminal-reconcile.sh" landing-proven "$ID"; then
+    return 0
+  fi
   if [ "$MODE" = local-only ]; then
     if [ -z "$TEARDOWN_VERIFIED_DEFAULT_HEAD" ]; then
       name=$(default_branch) || {
