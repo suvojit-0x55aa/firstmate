@@ -7,6 +7,7 @@
 #        fm-terminal-reconcile.sh local-landed <id> <commit>
 #        fm-terminal-reconcile.sh default-landed <id> <commit>
 #        fm-terminal-reconcile.sh retired <id> <normal|discard>
+#        fm-terminal-reconcile.sh prepare-retirement <id>
 #        fm-terminal-reconcile.sh landing-proven <id>
 #        fm-terminal-reconcile.sh completed-after <id> <receipt-key>
 #        fm-terminal-reconcile.sh completed-exact <id> <receipt-key>
@@ -348,8 +349,12 @@ case "$mode" in
     jq -e '.discarded != true and ((.superseded_by // "") == "")' "$RECORD" >/dev/null || exit 1
     delivery_proven || exit 1
     ;;
-  observe|custody|merged|merge-observed|local-landed|default-landed|retired)
-    [ "$#" -ge 3 ] || exit 2
+  observe|custody|merged|merge-observed|local-landed|default-landed|prepare-retirement|retired)
+    if [ "$mode" = prepare-retirement ]; then
+      [ "$#" -eq 2 ] || exit 2
+    else
+      [ "$#" -ge 3 ] || exit 2
+    fi
     if [ "$mode" = merged ] || [ "$mode" = merge-observed ]; then
       if ! select_record "$2" && ! select_retired_record "$2" "$3"; then
         [ "$mode" = merge-observed ] && exit 0
@@ -372,10 +377,32 @@ case "$mode" in
         else
           put --arg head "$3" '.default_head=$head' || exit 1
         fi ;;
-      retired)
-        captain_keys=$(resolve_captain_keys "$2" "$(field "$STATE/$2.meta" decision_keys)") || exit 1
+      prepare-retirement)
+        retirement_decision_keys=$(field "$STATE/$2.meta" decision_keys)
         decisions_reviewed=false
         [ "$(field "$STATE/$2.meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
+        if jq -e --arg raw "$retirement_decision_keys" --argjson reviewed "$decisions_reviewed" \
+          '.retirement_prepared == true and (.retirement_decision_keys // "") == $raw and .decisions_reviewed == $reviewed' \
+          "$RECORD" >/dev/null; then
+          :
+        else
+          captain_keys=$(resolve_captain_keys "$2" "$retirement_decision_keys") || exit 1
+          put --arg keys "$captain_keys" --arg raw "$retirement_decision_keys" \
+            --argjson reviewed "$decisions_reviewed" \
+            '.captain_keys=$keys | .decisions_reviewed=$reviewed | .retirement_prepared=true | .retirement_decision_keys=$raw' \
+            || exit 1
+        fi ;;
+      retired)
+        retirement_decision_keys=$(field "$STATE/$2.meta" decision_keys)
+        decisions_reviewed=false
+        [ "$(field "$STATE/$2.meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
+        if jq -e --arg raw "$retirement_decision_keys" --argjson reviewed "$decisions_reviewed" \
+          '.retirement_prepared == true and (.retirement_decision_keys // "") == $raw and .decisions_reviewed == $reviewed' \
+          "$RECORD" >/dev/null; then
+          captain_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
+        else
+          captain_keys=$(resolve_captain_keys "$2" "$retirement_decision_keys") || exit 1
+        fi
         case "$3" in
           normal) put --arg keys "$captain_keys" --argjson reviewed "$decisions_reviewed" \
             '.retired=true | .captain_keys=$keys | .decisions_reviewed=$reviewed' ;;

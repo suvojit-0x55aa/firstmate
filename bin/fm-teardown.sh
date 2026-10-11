@@ -2649,13 +2649,18 @@ if [ -n "$X_REQUEST" ]; then
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
-  if ! inspectable_git_worktree "$WT"; then
+  if inspectable_git_worktree "$WT"; then
+    require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
+    ORCA_PATH_MATCH_VERIFIED=1
+  elif [ ! -e "$WT" ] && [ ! -L "$WT" ] \
+    && [ -d "$STATE/terminal-delivery" ] \
+    && "$SCRIPT_DIR/fm-terminal-reconcile.sh" landing-proven "$ID"; then
+    :
+  else
     echo "REFUSED: Orca ship task $ID has no inspectable git worktree at ${WT:-<missing>}." >&2
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
     exit 1
   fi
-  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
-  ORCA_PATH_MATCH_VERIFIED=1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -2672,6 +2677,13 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 persist_terminal_landing_proof || exit 1
+
+if [ "$KIND" != secondmate ] && [ "$FORCE" = "--force" ]; then
+  "$SCRIPT_DIR/fm-terminal-reconcile.sh" prepare-retirement "$ID" || {
+    echo "REFUSED: discard receipt prerequisites for task $ID could not be durably staged; preserving its endpoint, worktree, and metadata." >&2
+    exit 1
+  }
+fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
 # them). Fix 1 and Fix 2 (see script header) run here, unconditionally on

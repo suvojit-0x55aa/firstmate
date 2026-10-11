@@ -2969,11 +2969,94 @@ test_persisted_landing_proof_revalidates_existing_worktree() {
   pass "persisted landing proof never replaces current worktree validation"
 }
 
+test_forced_discard_refuses_unstageable_inventory_before_removal() {
+  local case_dir rc=0
+  case_dir=$(make_case discard-stage-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'decision_keys=missing-captain-call' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_DESTRUCTIVE_LOG"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_TEST_DESTRUCTIVE_LOG="$case_dir/destructive.log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "discard-stage-refusal: unresolved inventory must refuse forced teardown"
+  assert_absent "$case_dir/destructive.log" \
+    "discard-stage-refusal: forced teardown reached destructive worktree cleanup"
+  assert_present "$case_dir/wt" \
+    "discard-stage-refusal: forced teardown removed the worktree before receipt validation"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "discard-stage-refusal: forced teardown removed metadata before receipt validation"
+  assert_grep "could not be durably staged" "$case_dir/stderr" \
+    "discard-stage-refusal: refusal did not identify the durable receipt prerequisite"
+  pass "forced discard validates captain inventory before destructive cleanup"
+}
+
+test_forced_discard_replays_staged_inventory_after_interruption() {
+  local case_dir rc=0 call=staged-captain-call decision receipt
+  case_dir=$(make_case discard-stage-replay)
+  write_meta "$case_dir" no-mistakes ship
+  tasks-axi add "$call" "Staged captain call" --json \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi hold "$call" --reason "captain answer pending" --kind captain --json \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  printf '%s\n' "decision_keys=$call" >> "$case_dir/state/task-x1.meta"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" prepare-retirement task-x1
+  decision="$case_dir/captain-answer.txt"
+  printf '%s\n' 'Proceed with the forced discard.' > "$decision"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$call" --decision-file "$decision" >/dev/null
+  install_interrupting_treehouse "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" --force > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "discard-stage-replay: interruption should stop the first teardown"
+  [ ! -e "$case_dir/wt" ] \
+    || fail "discard-stage-replay: fixture did not remove the worktree before interruption: $(cat "$case_dir/first.stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "discard-stage-replay: interruption removed metadata needed for replay"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  assert_present "$receipt" "discard-stage-replay: receipt prerequisites were not staged"
+  jq -e --arg call "$call" \
+    '.retirement_prepared == true and .captain_keys == $call and (.retired != true)' \
+    "$receipt" >/dev/null \
+    || fail "discard-stage-replay: staged receipt did not preserve captain inventory"
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "discard-stage-replay: exact staged retry should complete"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "discard-stage-replay: successful retry retained task metadata"
+  jq -e --arg call "$call" \
+    '.retired and .discarded and (.reviewed != true) and (.backlog != true) and (.refill != true) and .captain_keys == $call' \
+    "$receipt" >/dev/null \
+    || fail "discard-stage-replay: discard retirement lost its staged review obligation"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" report > "$case_dir/report"
+  assert_grep "discard-reviewed $(basename "$receipt" .json)" "$case_dir/report" \
+    "discard-stage-replay: pending discard review was not reportable"
+  pass "forced discard replays durable inventory after destructive interruption"
+}
+
 case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
   '') ;;
   ship-captain-attestation)
     test_ship_teardown_requires_captain_inventory_attestation
     test_manual_backend_attestation_without_tasks_axi
+    exit
+    ;;
+  discard-retirement-recovery)
+    test_forced_discard_refuses_unstageable_inventory_before_removal
+    test_forced_discard_replays_staged_inventory_after_interruption
     exit
     ;;
   *) fail "unknown focused teardown test: $FM_TEARDOWN_FOCUSED_TEST" ;;
@@ -3043,3 +3126,5 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_persisted_landing_proof_replays_after_worktree_return
 test_persisted_landing_proof_rejects_replacement_incarnation
 test_persisted_landing_proof_revalidates_existing_worktree
+test_forced_discard_refuses_unstageable_inventory_before_removal
+test_forced_discard_replays_staged_inventory_after_interruption
