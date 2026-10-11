@@ -1560,6 +1560,31 @@ test_merge_observation_stays_bound_to_exact_receipt() {
   local id=merge-observed-reuse p1=https://github.com/o/r/pull/101 p2=https://github.com/o/r/pull/202
   local p3=https://github.com/o/r/pull/303 key_a key_b record_a record_b before_b current_key
   local ambiguous=merge-observed-ambiguous ambiguous_a ambiguous_b before_a before_ambiguous_b
+  local early=merge-observed-early early_pr=https://github.com/o/r/pull/404 early_key early_record
+
+  report_merge() {
+    FM_HOME="$FM_HOME" bash -c \
+      '. "$1"; fm_merge_outcome_report "$2" "$3" "$4" "$5" poll' \
+      _ "$ROOT/bin/fm-merge-outcome-lib.sh" "$FM_HOME" "$FM_HOME/state" "$1" "$2"
+  }
+
+  make_task "$early"
+  printf 'spawn_gen=%s\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$early" "$early_pr" > "$FM_HOME/state/$early.meta"
+  report_merge "$early" "$early_pr" \
+    || fail 'merge poll before first receipt did not persist exact current proof'
+  early_key=$("$owner" receipt-key "$early")
+  early_record="$FM_HOME/state/terminal-delivery/$early_key.json"
+  jq -e --arg pr "$early_pr" '.pr == $pr and .merged == true and .retired == false' \
+    "$early_record" >/dev/null || fail 'early merge poll did not create merged current receipt'
+  [ -f "$FM_HOME/state/$early.pr-poll-merge-notified" ] \
+    || fail 'early merge poll was not acknowledged after proof persisted'
+  "$owner" retired "$early" normal
+  rm "$FM_HOME/state/$early.meta"
+  "$owner" reconcile
+  "$owner" reconcile
+  assert_contains "$(tx show "$early")" 'state: done' \
+    'persisted early merge proof did not recover after metadata disappeared'
 
   make_task "$id"
   "$owner" observe "$id" done "$p1"
@@ -1592,7 +1617,11 @@ test_merge_observation_stays_bound_to_exact_receipt() {
   "$owner" merge-observed "$id" "$p1"
   jq -e --arg pr "$p1" '.pr == $pr and .merged == true' "$record_a" >/dev/null \
     || fail 'exact retired merge observation was not idempotent'
-  "$owner" merge-observed "$id" "$p3"
+  if report_merge "$id" "$p3"; then
+    fail 'absent merge observation was acknowledged instead of remaining retryable'
+  fi
+  [ ! -e "$FM_HOME/state/$id.pr-poll-merge-notified" ] \
+    || fail 'absent merge observation committed its notification marker'
   [ "$(shasum -a 256 "$record_b" | awk '{print $1}')" = "$before_b" ] \
     || fail 'absent P3 evidence mutated current receipt B'
 
@@ -1612,11 +1641,15 @@ test_merge_observation_stays_bound_to_exact_receipt() {
   ambiguous_b=$("$owner" receipt-key "$ambiguous")
   before_a=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')
   before_ambiguous_b=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_b.json" | awk '{print $1}')
-  "$owner" merge-observed "$ambiguous" "$p1"
+  if report_merge "$ambiguous" "$p1"; then
+    fail 'ambiguous merge observation was acknowledged instead of remaining retryable'
+  fi
+  [ ! -e "$FM_HOME/state/$ambiguous.pr-poll-merge-notified" ] \
+    || fail 'ambiguous merge observation committed its notification marker'
   [ "$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')" = "$before_a" ] \
     && [ "$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_b.json" | awk '{print $1}')" = "$before_ambiguous_b" ] \
     || fail 'ambiguous exact PR evidence mutated one reused incarnation'
-  pass 'merge observations reconcile only one exact authenticated receipt'
+  pass 'merge observations persist or retry only exact authenticated receipts'
 }
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;

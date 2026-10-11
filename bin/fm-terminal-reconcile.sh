@@ -210,26 +210,44 @@ select_retired_record() {
 }
 select_merge_observation_record() {
   local id=$1 pr=$2 meta="$STATE/$1.meta" current= candidate found= count=0
+  local current_pr_matches=0 current_missing=0
   valid "$id" || return 2
   [ -n "$pr" ] || return 2
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
     select_record_path "$id" || return 1
     current=$RECORD
+    [ "$(field "$meta" pr)" != "$pr" ] || current_pr_matches=1
     if [ -e "$current" ] || [ -L "$current" ]; then
       receipt_path_authenticated "$current" || return 1
+      if [ "$current_pr_matches" -eq 1 ]; then
+        jq -e --arg id "$id" --arg pr "$pr" '.id == $id and .pr == $pr' \
+          "$current" >/dev/null || return 1
+      fi
+    else
+      current_missing=1
     fi
   fi
   for candidate in "$DIR"/*.json; do
     receipt_path_authenticated "$candidate" || continue
     jq -e --arg id "$id" --arg pr "$pr" '.id == $id and .pr == $pr' \
       "$candidate" >/dev/null || continue
-    if [ "$candidate" != "$current" ]; then
+    if [ "$candidate" = "$current" ]; then
+      [ "$current_pr_matches" -eq 1 ] || continue
+    else
       jq -e '.retired == true' "$candidate" >/dev/null || continue
     fi
     count=$((count + 1))
     found=$candidate
   done
+  if [ "$current_pr_matches" -eq 1 ] && [ "$current_missing" -eq 1 ]; then
+    [ "$count" -eq 0 ] || return 1
+    select_record "$id" || return $?
+    receipt_path_authenticated "$RECORD" || return 1
+    jq -e --arg id "$id" --arg pr "$pr" '.id == $id and .pr == $pr' \
+      "$RECORD" >/dev/null || return 1
+    return 0
+  fi
   [ "$count" -eq 1 ] || return 1
   RECORD=$found
   KEY=${found##*/}
@@ -398,7 +416,7 @@ case "$mode" in
       [ "$#" -ge 3 ] || exit 2
     fi
     if [ "$mode" = merge-observed ]; then
-      select_merge_observation_record "$2" "$3" || exit 0
+      select_merge_observation_record "$2" "$3" || exit $?
     elif [ "$mode" = merged ]; then
       if ! select_record "$2" && ! select_retired_record "$2" "$3"; then
         exit 1
