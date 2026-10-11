@@ -2,8 +2,8 @@
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
-# (a secondmate teardown prints none, since secondmates are not backlog items).
+# tasks, then replay durable delivery obligations through fm-terminal-reconcile.sh
+# (secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -1131,33 +1131,6 @@ work_is_landed() {
   content_in_default
 }
 
-backlog_refresh_reminder() {
-  local pr done_cmd report_path
-  [ "$KIND" = secondmate ] && return 0
-  if fm_tasks_axi_backend_available "$CONFIG"; then
-    case "$KIND" in
-      scout)
-        report_path="data/$ID/report.md"
-        done_cmd="tasks-axi done $ID --report $report_path"
-        ;;
-      *)
-        if [ "$MODE" = local-only ]; then
-          done_cmd="tasks-axi done $ID --note \"local main\""
-        else
-          pr=$PR_URL
-          if [ -n "$pr" ]; then
-            done_cmd="tasks-axi done $ID --pr $pr"
-          else
-            done_cmd="tasks-axi done $ID --pr PR_URL"
-          fi
-        fi
-        ;;
-    esac
-    printf '%s\n' "Backlog: $ID just finished. Run $done_cmd, then run tasks-axi ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
-  else
-    printf '%s\n' "Backlog: $ID just finished. Update data/backlog.md - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
-  fi
-}
 
 path_is_ancestor_of() {
   local ancestor=$1 path=$2
@@ -2804,6 +2777,13 @@ if [ "$KIND" = secondmate ]; then
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   remove_secondmate_registry_entry "$ID"
 fi
+# Persist teardown evidence before any metadata deletion; restart can replay the
+# backlog transition without relying on the retiring worker or conversation.
+if [ "$KIND" != secondmate ]; then
+  terminal_retirement=normal
+  [ "$FORCE" != --force ] || terminal_retirement=discard
+  "$SCRIPT_DIR/fm-terminal-reconcile.sh" retired "$ID" "$terminal_retirement" || exit 1
+fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
@@ -2830,4 +2810,5 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
-backlog_refresh_reminder
+"$SCRIPT_DIR/fm-terminal-reconcile.sh" reconcile || true
+[ "$KIND" = secondmate ] || "$SCRIPT_DIR/fm-terminal-reconcile.sh" report

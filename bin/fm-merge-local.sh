@@ -72,3 +72,5 @@ before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+
+"$SCRIPT_DIR/fm-terminal-reconcile.sh" local-landed "$ID" "$(git -C "$PROJ" rev-parse "$DEFAULT")"

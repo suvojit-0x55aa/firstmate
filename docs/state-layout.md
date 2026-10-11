@@ -81,6 +81,7 @@ state/               runtime records and signals; gitignored
   x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (AGENTS.md section 14)
   public-followup/   generated private transport for promised public replies: retained open-loop registrations, typed terminal-result inbox, accepted/rejected ledgers, and retirement receipts (AGENTS.md section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated Relay and offer-claim diagnostic dedupe markers
+  terminal-delivery/ durable delivery obligations independent of presentation receipts; bin/fm-terminal-reconcile.sh owns evidence, backlog replay and explicit refill review
   terminal-outcomes/ durable pending, reported, and presented inactive terminal-outcome receipts retained until their upstream receipt is durable; bin/fm-inactive-reconcile.sh owns their lifecycle and exact schema
   .fm-inherited-config-reread.* .fm-inherited-config-reread.*.pending  private generation-stamped secondmate config-reread instructions and their pending-delivery markers
   .fm-inherited-config-reread-retry/  private source-home retry stages, reports, and sequence state for config-reread delivery

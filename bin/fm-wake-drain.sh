@@ -360,7 +360,9 @@ print_status_sections() {
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
 }
 
-print_status_presentation() {  # [<deduped-raw-rows>]
+print_status_presentation() {
+  "$SCRIPT_DIR/fm-terminal-reconcile.sh" report || return 1
+  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   fm_lock_acquire_wait "$lock" || return 1
   snapshot=$(status_presentation_snapshot "$STATE") || rc=1

@@ -587,15 +587,11 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
   add_compatible_tasks_axi "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
-    || fail "teardown did not prompt tasks-axi done: $out"
-  printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
-    || fail "teardown did not prompt tasks-axi ready: $out"
-  printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
-    || fail "teardown did not preserve date-gate check: $out"
-  printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
-    && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
-  pass "teardown prompts tasks-axi backlog refresh when compatible"
+  assert_contains "$out" 'TERMINAL DELIVERY: task-x1' 'teardown lost durable delivery obligation'
+  assert_contains "$out" 'teardown=true' 'teardown did not retain its evidence'
+  assert_contains "$out" 'backlog_done=false' 'open PR was silently marked delivered'
+  assert_not_contains "$out" 'tasks-axi done task-x1' 'teardown offered an unsafe shortcut around merge proof'
+  pass "teardown retains delivery obligation instead of treating custody as completion"
 }
 
 test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
@@ -607,11 +603,10 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
   add_compatible_tasks_axi "$case_dir"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
-    || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
-    && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
-  pass "teardown honors config/backlog-backend=manual even when tasks-axi is compatible"
+  assert_contains "$out" 'TERMINAL DELIVERY: task-x1' 'manual backlog lost durable next action'
+  assert_contains "$out" 'backlog_done=false' 'manual backlog claimed automatic completion'
+  assert_not_contains "$out" 'tasks-axi done' 'manual backend opt-out was ignored'
+  pass "manual backlog retains explicit delivery obligation"
 }
 
 test_local_only_truly_unpushed_refuses() {

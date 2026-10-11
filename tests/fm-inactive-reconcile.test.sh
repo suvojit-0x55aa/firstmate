@@ -123,7 +123,7 @@ reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 # The main retains a terminal presentation receipt until the corresponding wake
 # is handled and acknowledged.
 test_main_direct_terminal_presentation_receipt() {
-  local err seq generation
+  local err seq generation delivery
   make_world main-direct; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "main did not queue terminal presentation"
@@ -136,7 +136,10 @@ test_main_direct_terminal_presentation_receipt() {
   [ -n "$seq" ] && [ -n "$generation" ] || fail "main presentation did not require durable acknowledgement"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
-  pass "main direct terminal presentation has a durable receipt"
+  delivery=$(FM_HOME="$MAIN" "$ROOT/bin/fm-terminal-reconcile.sh" report)
+  assert_contains "$delivery" 'TERMINAL DELIVERY: child' 'presentation acknowledgement erased the next delivery action'
+  assert_contains "$delivery" 'backlog_done=false' 'acknowledgement falsely claimed backlog completion'
+  pass "main presentation acknowledgement retains an independent delivery obligation"
 }
 
 # A secondmate independently reports a genuinely terminal inactive child.
