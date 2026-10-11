@@ -413,12 +413,12 @@ fm-claude-stop-autoarm: ok
 
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Codex's strict successor path revalidated on 2026-10-10, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
 Claude Code 2.1.219
-codex-cli 0.144.4
+codex-cli 0.155.1
 OpenCode 1.17.18
 Pi 0.80.10
 grok 0.2.103 (89c3d36fb6f1) [stable]
@@ -427,10 +427,23 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper, and one interactive turn honored Stop payloads `false,true,true` under two consecutive exit-2 continuations. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
+
+Codex strict successor continuity was refreshed on 2026-10-10 with the tracked opt-in guard.
+The fixture used an isolated project and home, accepted the fresh directory-trust dialog, ran the real one-second foreground checkpoint, and captured three real Stop payloads from one `turn_id`.
+
+```sh
+FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - codex-cli 0.155.1 live E2E preserved the foreground checkpoint and honored Stop payloads false,true,true for one turn_id
+```
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

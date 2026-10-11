@@ -32,15 +32,20 @@
 # primary checkout - the main home or a genuinely marked secondmate home - and
 # stay a silent, fast no-op inside child task worktrees.
 #
-# Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
-# Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
-# takes precedence when both spellings are present. A true value means the
-# current stop attempt already follows a block, so this guard always allows it.
+# Loop-guard, Grok/default mode: never block twice in the same turn.
+# Grok uses stopHookActive, with stop_hook_active accepted for compatibility.
+# A true value means the current stop attempt already follows a block, so this
+# mode allows it.
 # Passive harness adapters provide their own one-follow-up guard before calling
 # this script.
-# That bounds those harnesses to at most one forced continuation per turn -
-# never a wedged, un-endable session - while still nagging again on a later turn
-# if the problem persists.
+# That bounds those harnesses to at most one forced continuation per turn.
+#
+# Codex runs with --codex and deliberately does not use stop_hook_active as an
+# unconditional allow.
+# Codex can honor repeated Stop continuations in one turn, so an unhealthy retry
+# is blocked again until one live identity-matched successor checkpoint owns the
+# home.
+# The watcher singleton refuses duplicate ownership.
 #
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
@@ -74,6 +79,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
+CODEX_MODE=0
 CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
@@ -85,8 +91,9 @@ case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
+    --codex) CODEX_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    *) echo "usage: $(basename "$0") [--claude|--codex|--cursor]" >&2; exit 2 ;;
   esac
 done
 
@@ -125,7 +132,8 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$CODEX_MODE" -eq 0 ] \
+  && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 

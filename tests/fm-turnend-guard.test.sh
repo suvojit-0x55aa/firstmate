@@ -124,7 +124,7 @@ install_guard_scripts() {
 mark_codex_hook_root() {
   local dir=$1
   mkdir -p "$dir/.codex"
-  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh --codex"}]}]}}\n' > "$dir/.codex/hooks.json"
 }
 
 # A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/,
@@ -193,6 +193,13 @@ run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
   printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+run_codex_hook() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s,"turn_id":"turn-codex-continuity"}' "$stop_active" \
+    | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --codex 2>&1
 }
 
 nonexistent_pid() {
@@ -430,7 +437,17 @@ test_hook_loop_guard_allows_retry() {
   out=$(run_hook "$dir" true); status=$?
   expect_code 0 "$status" "hook must allow the stop when stop_hook_active is already true"
   [ -z "$out" ] || fail "hook produced output on the loop-guarded retry: $out"
-  pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
+  pass "fm-turnend-guard default mode: stop_hook_active=true keeps the bounded Grok retry"
+}
+
+test_hook_codex_reblocks_retry_until_successor_is_live() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-loopguard")
+  : > "$dir/state/task1.meta"
+  out=$(run_codex_hook "$dir" true); status=$?
+  expect_code 2 "$status" "Codex retry must remain blocked without a live successor watcher"
+  assert_contains "$out" "TURN WOULD END BLIND" "Codex retry must retain the turn-end alarm"
+  pass "fm-turnend-guard --codex: stop_hook_active=true cannot bypass successor health"
 }
 
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
@@ -860,6 +877,7 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'guard=%s\n' "$0"
+printf 'args=%s\n' "$*"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
@@ -867,6 +885,7 @@ EOF
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
   assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must use the hook process root"
+  assert_contains "$out" "args=--codex" "codex hook must select strict successor continuity"
   assert_contains "$out" "$payload" "codex hook must pass the original payload to the guard"
   pass ".codex/hooks.json: Stop hook uses hook process root when payload cwd is outside"
 }
@@ -896,6 +915,7 @@ EOF
   cat > "$dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'guard=%s\n' "$0"
+printf 'args=%s\n' "$*"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
@@ -905,6 +925,7 @@ EOF
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must not execute a nested project guard"
   assert_contains "$out" "guard=$expected_root/bin/fm-turnend-guard.sh" "codex hook must keep using the outer firstmate guard"
+  assert_contains "$out" "args=--codex" "codex hook must retain strict successor continuity from a nested cwd"
   assert_not_contains "$out" "nested guard executed" "codex hook must not execute nested project code"
   pass ".codex/hooks.json: Stop hook ignores nested git root guard scripts"
 }
@@ -1771,6 +1792,7 @@ test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
+test_hook_codex_reblocks_retry_until_successor_is_live
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry
