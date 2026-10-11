@@ -535,7 +535,16 @@ command_hold() {
       tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
         || fail "could not create task $id"
     fi
+    show=$(task_show "$id") || fail "task $id disappeared after creation"
   fi
+  body=$(show_field "$show" body)
+  cycle=$(current_hold_cycle "$body" || true)
+  if [ "$was_captain" != 1 ] || [ -z "$cycle" ]; then
+    cycle=$(write_hold_cycle_record "$id" "$body")
+    show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
+  fi
+  [ "$(current_hold_cycle "$(show_field "$show" body)" || true)" = "$cycle" ] \
+    || fail "task $id did not retain its hold cycle"
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
       || fail "could not hold task $id for the captain"
@@ -546,12 +555,6 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  body=$(show_field "$show" body)
-  cycle=$(current_hold_cycle "$body" || true)
-  if [ "$was_captain" != 1 ] || [ -z "$cycle" ]; then
-    cycle=$(write_hold_cycle_record "$id" "$body")
-    show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
-  fi
   [ "$(current_hold_cycle "$(show_field "$show" body)" || true)" = "$cycle" ] \
     || fail "task $id did not retain its hold cycle"
   printf '%s\n' "$id"

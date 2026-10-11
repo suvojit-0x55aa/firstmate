@@ -429,6 +429,120 @@ EOF
   pass "captain answer identity is scoped to one durable hold cycle"
 }
 
+test_rehold_cycle_is_interruption_safe() {
+  local home show initial_cycle interrupted_cycle active_cycle replay_cycle records rc
+  home=$(make_home rehold-interruption)
+  tasks_in "$home" add sample-interrupted-work "Ship interruption-safe work" \
+    --kind ship --repo sample --body 'Interruption-safe work body.' >/dev/null \
+    || fail "could not create the interruption-safe work"
+  printf 'spawn_gen=interruption-one\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-interrupted-work.meta"
+  run_captain "$home" hold sample-interrupted-work --reason "captain first answer pending" >/dev/null \
+    || fail "could not establish the initial hold cycle"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  initial_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$initial_cycle" ] || fail "the initial hold did not persist its cycle"
+  printf 'Captain approved the initial release.\n' > "$home/initial-answer.txt"
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/initial-answer.txt" --release >/dev/null \
+    || fail "could not release the initial hold"
+
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/tasks-axi.log"
+if [ "${1:-}" = update ] && [ "${2:-}" != --help ] \
+   && [ -f "$FM_HOME/fail-update-after.once" ]; then
+  rm -f -- "$FM_HOME/fail-update-after.once"
+  "$REAL_TASKS_AXI" "$@" || exit $?
+  exit 42
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" != --help ] \
+   && [ -f "$FM_HOME/fail-hold-after.once" ]; then
+  rm -f -- "$FM_HOME/fail-hold-after.once"
+  "$REAL_TASKS_AXI" "$@" || exit $?
+  exit 43
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/tasks-axi.log"
+  printf 'spawn_gen=interruption-two\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-interrupted-work.meta"
+  : > "$home/fail-update-after.once"
+  rc=0
+  run_captain "$home" hold sample-interrupted-work --reason "captain second answer pending" \
+    > "$home/update-interruption.out" 2> "$home/update-interruption.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the cycle-persistence interruption did not stop the hold command"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  assert_contains "$show" 'held: no' "cycle persistence failure left the task actively held"
+  interrupted_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$interrupted_cycle" ] && [ "$interrupted_cycle" != "$initial_cycle" ] \
+    || fail "the interrupted cycle persistence did not leave a distinct durable intent"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt interrupted-update > "$home/update-ready.out" 2> "$home/update-ready.err"; then
+    fail "a persisted cycle without its hold reused the historical answer"
+  fi
+  run_captain "$home" hold sample-interrupted-work --reason "captain second answer pending" >/dev/null \
+    || fail "the cycle-persistence interruption did not retry safely"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  assert_contains "$show" 'held: yes' "the cycle-persistence retry did not establish the hold"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt retried-update > "$home/retried-ready.out" 2> "$home/retried-ready.err"; then
+    fail "the retried hold reused the historical answer"
+  fi
+  printf 'Captain approved the second release.\n' > "$home/second-answer.txt"
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/second-answer.txt" --release >/dev/null \
+    || fail "could not release the retried hold"
+
+  printf 'spawn_gen=interruption-three\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-interrupted-work.meta"
+  : > "$home/fail-hold-after.once"
+  rc=0
+  run_captain "$home" hold sample-interrupted-work --reason "captain final answer pending" \
+    > "$home/hold-interruption.out" 2> "$home/hold-interruption.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the hold-application interruption did not stop the hold command"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  assert_contains "$show" 'held: yes' "the hold-application interruption fixture did not apply the hold"
+  active_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  records=$(printf '%s\n' "$show" | grep -o 'Captain hold opened by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ -n "$active_cycle" ] || fail "the interrupted active hold had no durable cycle"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt interrupted-hold > "$home/hold-ready.out" 2> "$home/hold-ready.err"; then
+    fail "the interrupted active hold reused the historical answer"
+  fi
+  run_captain "$home" hold sample-interrupted-work --reason "captain final answer pending" >/dev/null \
+    || fail "the hold-application interruption did not retry safely"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  replay_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ "$replay_cycle" = "$active_cycle" ] \
+    || fail "an active same-cycle hold retry minted a different cycle"
+  [ "$(printf '%s\n' "$show" | grep -o 'Captain hold opened by fm-captain-hold\.' | wc -l | tr -d ' ')" = "$records" ] \
+    || fail "an active same-cycle hold retry duplicated its cycle record"
+
+  tasks_in "$home" done sample-interrupted-work >/dev/null \
+    || fail "could not reproduce the out-of-band completion"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt out-of-band > "$home/out-of-band-ready.out" 2> "$home/out-of-band-ready.err"; then
+    fail "out-of-band completion reused a historical captain answer"
+  fi
+  printf 'Captain approved the final completed state.\n' > "$home/final-answer.txt"
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/final-answer.txt" >/dev/null \
+    || fail "the genuine current answer was not accepted"
+  run_captain "$home" terminal-ready sample-interrupted-work --receipt current-answer >/dev/null \
+    || fail "the genuine current answer did not authorize terminal readiness"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/final-answer.txt" >/dev/null \
+    || fail "the current answer replay was not accepted"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  [ "$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')" = "$records" ] \
+    || fail "the current answer replay duplicated its resolution"
+  pass "re-hold cycles survive persistence and application interruptions"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -1239,11 +1353,21 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
+  rehold-interruption)
+    test_rehold_cycle_is_interruption_safe
+    exit 0
+    ;;
+  '') ;;
+  *) fail "unknown focused captain-hold test: $FM_CAPTAIN_HOLD_FOCUSED_TEST" ;;
+esac
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_answer_identity_is_hold_cycle_scoped
+test_rehold_cycle_is_interruption_safe
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
