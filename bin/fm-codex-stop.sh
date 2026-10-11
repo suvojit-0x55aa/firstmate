@@ -154,30 +154,44 @@ STOP_RECORD_OWNED=1
 still_ours() {
   session_generation_current
 }
+queued_wake_pending() {
+  [ -s "$STATE/.wake-queue" ]
+}
+watch_output_actionable() {
+  [ -n "$OUT" ] && grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT"
+}
 # shellcheck source=/dev/null
 [ ! -f "$CONFIG/x-mode.env" ] || . "$CONFIG/x-mode.env"
-fm_supervision_needed "$STATE" "$GRACE" || exit 0
 OUT=$(mktemp "$STATE/.codex-stop-output.XXXXXX") || exit 2
-# Keep the arm in the native hook process group so Codex cancellation also
-# reaps it when the hook shell receives SIGKILL and cannot run its EXIT trap.
-{ "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 & } 2>/dev/null
-ARM_PID=$!
-ARM_IDENTITY=$(fm_pid_identity "$ARM_PID")
-START=$SECONDS
-while kill -0 "$ARM_PID" 2>/dev/null; do
-  still_ours || exit 0
+if ! queued_wake_pending; then
   fm_supervision_needed "$STATE" "$GRACE" || exit 0
-  [ $((SECONDS - START)) -lt "$BUDGET" ] || break
-  sleep 1
-done
-still_ours || exit 0
-fm_supervision_needed "$STATE" "$GRACE" || exit 0
+  # Keep the arm in the native hook process group so Codex cancellation also
+  # reaps it when the hook shell receives SIGKILL and cannot run its EXIT trap.
+  { "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 & } 2>/dev/null
+  ARM_PID=$!
+  ARM_IDENTITY=$(fm_pid_identity "$ARM_PID")
+  START=$SECONDS
+  while kill -0 "$ARM_PID" 2>/dev/null; do
+    still_ours || exit 0
+    if ! fm_supervision_needed "$STATE" "$GRACE"; then
+      queued_wake_pending || exit 0
+    fi
+    [ $((SECONDS - START)) -lt "$BUDGET" ] || break
+    sleep 1
+  done
+  still_ours || exit 0
+  if ! watch_output_actionable && ! queued_wake_pending; then
+    fm_supervision_needed "$STATE" "$GRACE" || exit 0
+  fi
+fi
 if ! fm_codex_stop_handling_open "$STATE" "$OWNER" "$OWNER_IDENTITY" "$GRACE"; then
   printf 'Codex supervision could not persist its generation-bound handling successor.\n' >&2
   exit 2
 fi
 if grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT"; then
   grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" | head -8 >&2
+elif queued_wake_pending; then
+  printf 'Codex supervision found durable queued work awaiting handling.\n' >&2
 elif kill -0 "$ARM_PID" 2>/dev/null; then
   printf 'checkpoint: quiet Codex supervision interval completed (%ss).\n' "$BUDGET" >&2
 else

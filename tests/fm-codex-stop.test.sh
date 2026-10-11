@@ -42,12 +42,14 @@ SH
 run_stop() {
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
     FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" "$ROOT/bin/fm-codex-stop.sh"
 }
 run_stop_generation() {
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
     FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" \
     bash -c 'printf "%s\n" "$$" > "$1/state/.lock"; export FM_TEST_CODEX_OWNER=$$; exec "$2/bin/fm-codex-stop.sh"' \
@@ -56,6 +58,7 @@ run_stop_generation() {
 run_stop_trappable() {
   local dir=$1
   PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
     FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" \
     FM_TEST_CODEX_FINAL_MARKER="${FM_TEST_CODEX_FINAL_MARKER:-}" \
@@ -415,6 +418,118 @@ test_afk_handoff_clears_owned_successor() {
   pass 'away handoff clears only its owned Stop successor claim'
 }
 
+install_terminal_source() {
+  local dir=$1 release=$2
+  rm "$dir/bin"
+  cp -R "$ROOT/bin" "$dir/runtime-bin"
+  ln -s "$dir/runtime-bin" "$dir/bin"
+  cat > "$dir/runtime-bin/fm-procevent-terminal-test.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  terminal) exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$dir/terminal-source.sh" <<'SH'
+#!/usr/bin/env bash
+release=$1
+n=0
+while [ ! -e "$release" ] && [ "$n" -lt 600 ]; do
+  sleep 0.01
+  n=$((n + 1))
+done
+[ -e "$release" ] || exit 1
+printf 'terminal source completed\n'
+SH
+  chmod +x "$dir/runtime-bin/fm-procevent-terminal-test.sh" "$dir/terminal-source.sh"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    "$dir/bin/fm-procevent.sh" register terminal-test final-source \
+      -- "$dir/terminal-source.sh" "$release" >/dev/null
+}
+
+append_test_wake() {
+  local dir=$1 token=$2
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_wake_append check "$2" "check: $3"' \
+    _ "$ROOT" "$token" "$token" >/dev/null
+}
+
+test_final_source_wake_retains_continuation() {
+  local dir release rc marker stop_owner drain
+  dir=$(make_home final-source-wake)
+  rm "$dir/state/work.meta"
+  release="$dir/source.release"
+  install_terminal_source "$dir" "$release"
+  TEST_BUDGET=12 run_stop "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  await_lock "$dir"
+  : > "$release"
+  rc=0
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 2 "$rc" 'terminal final source wake did not request native continuation'
+  assert_absent "$dir/state/procevent/final-source.source" \
+    'terminal final source remained registered after publishing its result'
+  assert_grep 'procevent terminal-test final-source 1' "$dir/state/.wake-queue" \
+    'terminal final source wake was not retained for handling'
+  assert_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
+    'terminal final source wake returned without its native continuation'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'terminal final source wake did not preserve exactly-one successor state'
+  drain=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+    PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" "$ROOT/bin/fm-wake-drain.sh" 2>&1)
+  assert_contains "$drain" 'procevent terminal-test final-source 1' \
+    'terminal final source wake was not delivered to its handling turn'
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    "$dir/bin/fm-procevent.sh" handled final-source 1 >/dev/null
+  assert_present "$dir/state/procevent-inbox/final-source.1.handled" \
+    'terminal final source handling was not durably acknowledged'
+
+  dir=$(make_home pending-queue-only)
+  rm "$dir/state/work.meta"
+  append_test_wake "$dir" pending-only
+  rc=0
+  TEST_BUDGET=12 run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'pending queue without live sources did not request continuation'
+  assert_grep 'pending-only' "$dir/state/.wake-queue" \
+    'pending-queue continuation consumed durable work before handling'
+  assert_absent "$dir/state/.watch.lock/pid" \
+    'pending-queue continuation started a redundant watcher'
+
+  dir=$(make_home empty-source-no-wake)
+  rm "$dir/state/work.meta"
+  rc=0
+  TEST_BUDGET=1 run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 0 "$rc" 'truly empty Stop requested a native continuation'
+  assert_not_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
+    'truly empty Stop emitted a continuation prompt'
+
+  dir=$(make_home pending-queue-cancelled)
+  rm "$dir/state/work.meta"
+  append_test_wake "$dir" cancelled-pending
+  install_final_barrier "$dir"
+  marker="$dir/final.marker"
+  FM_TEST_CODEX_FINAL_MARKER="$marker" FM_TEST_CODEX_FINAL_RELEASE="$dir/final.release" \
+    FM_TEST_REAL_GREP="$(cat "$dir/real-grep")" run_stop_trappable "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  await_file "$marker"
+  stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+  kill -TERM "$stop_owner"
+  : > "$dir/final.release"
+  rc=0
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 0 "$rc" 'pending-queue cancellation returned a native continuation'
+  assert_grep 'cancelled-pending' "$dir/state/.wake-queue" \
+    'pending-queue cancellation consumed durable work'
+  assert_absent "$dir/state/.codex-stop-health" \
+    'pending-queue cancellation preserved a false handling successor'
+  assert_not_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
+    'pending-queue cancellation emitted a resurrection prompt'
+  pass 'final-source and queued wakes retain exactly one cancellable continuation'
+}
+
 case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
   expired-successor)
     test_expired_successor_requires_replacement_generation
@@ -430,6 +545,10 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   afk-handoff)
     test_afk_handoff_clears_owned_successor
+    exit 0
+    ;;
+  final-source-wake)
+    test_final_source_wake_retains_continuation
     exit 0
     ;;
   '') ;;
@@ -546,4 +665,5 @@ assert_absent "$dir/state/.watch.lock/pid" 'duplicate successor refusal started 
 pass 'public Stop rejects duplicate successor evidence before arming'
 test_expired_successor_requires_replacement_generation
 test_afk_handoff_clears_owned_successor
+test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling
