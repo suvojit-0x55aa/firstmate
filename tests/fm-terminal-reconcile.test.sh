@@ -1449,7 +1449,7 @@ run_ordinary_origin_obligation_case() {
 }
 
 test_unknown_origin_obligation_recovers_through_captain_owner() {
-  local id=unknown-origin-obligation key record report tmp
+  local id=unknown-origin-obligation key record report tmp saved_archive wrong_id wrong_key
   printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
   make_task "$id"
   "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
@@ -1458,12 +1458,53 @@ test_unknown_origin_obligation_recovers_through_captain_owner() {
     'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
     "$FM_HOME/state/terminal-delivery/"*.json)
   record="$FM_HOME/state/terminal-delivery/$key.json"
+  rm "$FM_HOME/state/$id.meta"
+  tx done "$id" --no-prune --json >/dev/null
+  archive_done_task "$id" "$id-archive"
+  saved_archive="$FM_HOME/data/done-archive.unknown-origin"
+  cp "$FM_HOME/data/done-archive.md" "$saved_archive"
   tmp=$(mktemp "$FM_HOME/state/terminal-delivery/.unknown.XXXXXX")
   jq '.origin_captain_cycle="corrupt"' "$record" > "$tmp"
   mv "$tmp" "$record"
   if "$owner" manual-complete "$key" >/dev/null 2>&1; then
     fail 'corrupt receipt origin obligation authorized manual completion'
   fi
+  report=$("$owner" report)
+  assert_contains "$report" 'Origin captain-cycle evidence is unknown' \
+    'corrupt origin obligation did not retain an actionable recovery path'
+
+  : > "$FM_HOME/data/done-archive.md"
+  if captain complete "$id" --receipt "$key" --none >/dev/null 2>&1; then
+    fail 'missing archive-only origin evidence authorized receipt recovery'
+  fi
+  cat > "$FM_HOME/data/done-archive.md" <<EOF
+## Archived 2026-10-12T00:00:00Z
+- [x] $id - corrupt archived origin (hold-kind: captain)
+  Captain hold opened by fm-captain-hold.
+  Hold cycle: corrupt
+  Captain hold marker end.
+EOF
+  if captain complete "$id" --receipt "$key" --none >/dev/null 2>&1; then
+    fail 'corrupt archive-only origin evidence authorized receipt recovery'
+  fi
+  cat "$saved_archive" "$saved_archive" > "$FM_HOME/data/done-archive.md"
+  if captain complete "$id" --receipt "$key" --none >/dev/null 2>&1; then
+    fail 'ambiguous archive-only origin evidence authorized receipt recovery'
+  fi
+  cp "$saved_archive" "$FM_HOME/data/done-archive.md"
+  wrong_id="$id-wrong-receipt"
+  make_task "$wrong_id"
+  "$owner" merged "$wrong_id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$wrong_id" normal >/dev/null
+  wrong_key=$(jq -r --arg id "$wrong_id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if captain complete "$id" --receipt "$wrong_key" --none >/dev/null 2>&1; then
+    fail 'mismatched terminal receipt authorized archive-only origin recovery'
+  fi
+  captain complete "$id" --receipt "$key" --none >/dev/null
+  [ "$(jq -r .origin_captain_cycle "$record")" = none ] \
+    || fail 'archive-only recovery did not repair a corrupt origin obligation'
   tmp=$(mktemp "$FM_HOME/state/terminal-delivery/.unknown.XXXXXX")
   jq 'del(.origin_captain_cycle)' "$record" > "$tmp"
   mv "$tmp" "$record"
@@ -1475,11 +1516,11 @@ test_unknown_origin_obligation_recovers_through_captain_owner() {
     'legacy-unknown origin obligation did not retain an actionable recovery path'
   captain complete "$id" --receipt "$key" --none >/dev/null
   [ "$(jq -r .origin_captain_cycle "$record")" = none ] \
-    || fail 'captain recovery did not authenticate the ordinary origin obligation'
+    || fail 'archive-only recovery did not repair a legacy origin obligation'
   "$owner" manual-complete "$key" >/dev/null
   "$owner" manual-complete "$key" >/dev/null
   [ "$(jq -r .backlog "$record")" = true ] \
-    || fail 'authenticated origin-obligation recovery did not complete backlog state'
+    || fail 'authenticated archive-only recovery did not complete backlog state'
 }
 
 test_archived_captain_answers_remain_exact_terminal_evidence() {

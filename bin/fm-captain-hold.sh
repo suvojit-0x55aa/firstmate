@@ -370,7 +370,7 @@ show_field_value() {  # <show-output> <field>
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  task_evidence_show "$1" >/dev/null 2>&1
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -1101,7 +1101,7 @@ command_answers() {
 
 command_complete() {
   local origin=${1:-} meta receipt='' receipt_state='' receipt_previous='' receipt_reviewed=false
-  local receipt_complete=false previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
+  local receipt_complete=false previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc origin_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1121,7 +1121,14 @@ command_complete() {
     [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
   fi
   require_task_reader
-  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  if origin_exists_here "$origin"; then
+    :
+  else
+    origin_rc=$?
+    [ "$origin_rc" -ne 3 ] \
+      || fail "origin $origin has no active or archived evidence in $FM_HOME"
+    fail "origin $origin evidence is unreadable or ambiguous in $FM_HOME"
+  fi
   if [ "$has_meta" != 1 ]; then
     [ -n "$receipt" ] || fail "retired origin $origin requires its exact terminal receipt for completion recovery"
   fi
