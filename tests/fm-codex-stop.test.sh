@@ -67,6 +67,37 @@ run_stop_trappable() {
     perl -e '$SIG{HUP}="DEFAULT"; $SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
       "$ROOT/bin/fm-codex-stop.sh"
 }
+freeze_configured_stop_runtime() {
+  local dir=$1
+  if [ -L "$dir/bin" ]; then
+    rm "$dir/bin"
+    cp -R "$ROOT/bin" "$dir/runtime-bin"
+    ln -s "$dir/runtime-bin" "$dir/bin"
+  fi
+  mkdir -p "$dir/.codex"
+  cp "$ROOT/.codex/hooks.json" "$dir/.codex/hooks.json"
+  printf 'PATH="%s/fakebin:$PATH"\nexport PATH\n' "$dir" > "$dir/configured-stop.bash-env"
+}
+run_configured_stop() {
+  local dir=$1 command
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$dir/.codex/hooks.json")
+  [ -n "$command" ] || fail 'configured Codex Stop command is missing'
+  (
+    cd "$dir" || exit 1
+    export PATH="$dir/fakebin:$PATH"
+    export BASH_ENV="$dir/configured-stop.bash-env"
+    export FM_TEST_CODEX_OWNER=$$
+    export FM_HOME="$dir"
+    export FM_ROOT_OVERRIDE="$dir"
+    export FM_PROCEVENT_CLAIM_ROOT="$dir/claims"
+    export FM_POLL=1
+    export FM_SIGNAL_GRACE=0
+    export FM_CHECK_INTERVAL=999999
+    export FM_ARM_CONFIRM_TIMEOUT=3
+    export FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}"
+    printf '{"stop_hook_active":false,"turn_id":"configured-stop"}' | bash -c "$command"
+  )
+}
 install_final_barrier() {
   local dir=$1 real_grep
   real_grep=$(command -v grep)
@@ -420,9 +451,7 @@ test_afk_handoff_clears_owned_successor() {
 
 install_terminal_source() {
   local dir=$1 release=$2
-  rm "$dir/bin"
-  cp -R "$ROOT/bin" "$dir/runtime-bin"
-  ln -s "$dir/runtime-bin" "$dir/bin"
+  freeze_configured_stop_runtime "$dir"
   cat > "$dir/runtime-bin/fm-procevent-terminal-test.sh" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -530,6 +559,126 @@ test_final_source_wake_retains_continuation() {
   pass 'final-source and queued wakes retain exactly one cancellable continuation'
 }
 
+test_public_stop_dispatches_pending_queue() {
+  local dir release rc drain ack_through recovery_generation stop_owner replacement_pid
+
+  dir=$(make_home public-final-source-before-stop)
+  rm "$dir/state/work.meta"
+  release="$dir/source.release"
+  install_terminal_source "$dir" "$release"
+  : > "$release"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    "$dir/bin/fm-procevent.sh" start final-source >/dev/null
+  assert_absent "$dir/state/procevent/final-source.source" \
+    'terminal source did not retire before the configured Stop hook'
+  assert_grep 'procevent terminal-test final-source 1' "$dir/state/.wake-queue" \
+    'terminal source did not leave its durable wake before the configured Stop hook'
+  rc=0
+  TEST_BUDGET=12 run_configured_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'configured Stop hook stranded a final-source wake'
+  assert_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
+    'configured Stop hook omitted the final-source continuation'
+  assert_grep 'procevent terminal-test final-source 1' "$dir/state/.wake-queue" \
+    'configured Stop hook consumed the final-source wake before handling'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'configured Stop hook omitted its exactly-one successor state'
+  drain=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+    PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" "$dir/bin/fm-wake-drain.sh" 2>&1)
+  assert_contains "$drain" 'procevent terminal-test final-source 1' \
+    'configured Stop continuation did not deliver the final-source wake'
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_PROCEVENT_CLAIM_ROOT="$dir/claims" \
+    "$dir/bin/fm-procevent.sh" handled final-source 1 >/dev/null
+  ack_through=$(printf '%s\n' "$drain" | awk '/^WAKE_ACK_REQUIRED:/ { for (i = 1; i <= NF; i++) if ($i == "--ack-through") print $(i + 1) }')
+  recovery_generation=$(printf '%s\n' "$drain" | awk '/^WAKE_ACK_REQUIRED:/ { for (i = 1; i <= NF; i++) if ($i == "--recovery-generation") print $(i + 1) }')
+  [ -n "$ack_through" ] && [ -n "$recovery_generation" ] \
+    || fail 'configured Stop continuation omitted its durable acknowledgement command'
+  env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+    PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" "$dir/bin/fm-wake-drain.sh" \
+      --ack-through "$ack_through" --recovery-generation "$recovery_generation" >/dev/null
+  rc=0
+  TEST_BUDGET=1 run_configured_stop "$dir" > "$dir/after-ack" 2>&1 || rc=$?
+  expect_code 0 "$rc" 'configured Stop hook continued after final-source acknowledgement'
+  assert_not_contains "$(cat "$dir/after-ack")" 'Run bin/fm-wake-drain.sh' \
+    'configured Stop hook duplicated an acknowledged continuation'
+
+  dir=$(make_home public-pending-queue-only)
+  rm "$dir/state/work.meta"
+  freeze_configured_stop_runtime "$dir"
+  append_test_wake "$dir" public-pending-only
+  rc=0
+  TEST_BUDGET=12 run_configured_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'configured Stop hook skipped a queue-only wake'
+  assert_grep 'public-pending-only' "$dir/state/.wake-queue" \
+    'configured queue-only continuation consumed durable work before handling'
+  assert_absent "$dir/state/.watch.lock/pid" \
+    'configured queue-only continuation started a redundant watcher'
+
+  dir=$(make_home public-truly-empty)
+  rm "$dir/state/work.meta"
+  freeze_configured_stop_runtime "$dir"
+  rc=0
+  TEST_BUDGET=1 run_configured_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 0 "$rc" 'configured Stop hook continued from truly empty state'
+  assert_not_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
+    'configured Stop hook emitted a continuation without work or sources'
+
+  dir=$(make_home public-live-source)
+  rm "$dir/state/work.meta"
+  release="$dir/source.release"
+  install_terminal_source "$dir" "$release"
+  rc=0
+  TEST_BUDGET=1 run_configured_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'configured Stop hook skipped a live source'
+  assert_present "$dir/state/procevent/final-source.source" \
+    'configured Stop hook retired an unfinished live source'
+
+  dir=$(make_home public-cancelled)
+  freeze_configured_stop_runtime "$dir"
+  TEST_BUDGET=12 run_configured_stop "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  await_file "$dir/state/.codex-stop.lock/pid"
+  stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+  await_arm_child "$stop_owner"
+  kill -TERM "$stop_owner"
+  rc=0
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 0 "$rc" 'configured Stop cancellation returned a continuation'
+  assert_absent "$dir/state/.codex-stop-health" \
+    'configured Stop cancellation preserved a false successor'
+  assert_not_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
+    'configured Stop cancellation emitted a resurrection prompt'
+
+  dir=$(make_home public-replacement)
+  rm "$dir/state/work.meta"
+  release="$dir/source.release"
+  install_terminal_source "$dir" "$release"
+  TEST_BUDGET=12 run_configured_stop "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  await_file "$dir/state/.codex-stop.lock/pid"
+  stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+  await_arm_child "$stop_owner"
+  sleep 30 &
+  STOP_PID_TWO=$!
+  replacement_pid=$STOP_PID_TWO
+  printf '%s\n' "$replacement_pid" > "$dir/state/.lock"
+  : > "$release"
+  rc=0
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 0 "$rc" 'configured Stop continued after session replacement'
+  [ "$(cat "$dir/state/.lock")" = "$replacement_pid" ] \
+    || fail 'configured Stop changed the replacement session owner'
+  assert_absent "$dir/state/.codex-stop-health" \
+    'configured Stop left a successor claim for the replaced session'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'configured Codex Stop dispatches pending queues through one owner'
+}
+
 case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
   expired-successor)
     test_expired_successor_requires_replacement_generation
@@ -549,6 +698,10 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   final-source-wake)
     test_final_source_wake_retains_continuation
+    exit 0
+    ;;
+  public-pending-queue)
+    test_public_stop_dispatches_pending_queue
     exit 0
     ;;
   '') ;;
@@ -666,4 +819,5 @@ pass 'public Stop rejects duplicate successor evidence before arming'
 test_expired_successor_requires_replacement_generation
 test_afk_handoff_clears_owned_successor
 test_final_source_wake_retains_continuation
+test_public_stop_dispatches_pending_queue
 test_cleanup_cancellation_revokes_handling
