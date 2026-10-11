@@ -968,3 +968,24 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 
 Scope of this evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+
+## Codex Stop continuation
+
+Verified on 2026-10-11 with `codex-cli 0.162.1` on macOS using a named, non-default Herdr lab.
+`bin/fm-codex-stop.sh` owns the current continuation contract; other primary harnesses keep their existing adapters.
+The live guard copies the runtime into its isolated seat and verifies quiet expiry, a later event, and native Escape cancellation.
+Run from a frozen checkout or leave the running guard and its helpers unchanged until it exits:
+
+```sh
+FM_CODEX_STOP_LIVE=1 tests/fm-codex-stop-live.test.sh
+```
+
+Observed result (the generated evidence-directory suffix is omitted):
+
+```text
+ok - codex-cli 0.162.1: real Stop quiet 180s, post-turn event and cancellation
+```
+
+The first and second Stop invocations returned exit 2, and the third was cancelled without a surviving watcher or fourth invocation.
+The helper's default-session tripwire passed at teardown.
+Portable singleton, ownership replacement, quiet-expiry and cancellation coverage lives in `tests/fm-codex-stop.test.sh`.

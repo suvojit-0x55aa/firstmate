@@ -42,9 +42,9 @@
 #
 # Codex runs with --codex and deliberately does not use stop_hook_active as an
 # unconditional allow.
-# Codex can honor repeated Stop continuations in one turn, so an unhealthy retry
-# is blocked again until one live identity-matched successor checkpoint owns the
-# home.
+# Codex can honor repeated Stop continuations in one turn. Its synchronous
+# Stop owner (fm-codex-stop.sh) waits for an actionable return or quiet expiry
+# before requesting the next turn; a live finite watcher alone is insufficient.
 # The watcher singleton refuses duplicate ownership.
 #
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
@@ -172,6 +172,12 @@ fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
+fi
+# A healthy finite checkpoint alone cannot deliver its result after turn end.
+# Codex parks its synchronous Stop on that cycle (or starts one) and uses the
+# native continuation response for both actionable close and quiet expiry.
+if [ "$CODEX_MODE" -eq 1 ] && [ ! -e "$STATE/.afk" ]; then
+  exec "$SCRIPT_DIR/fm-codex-stop.sh"
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0

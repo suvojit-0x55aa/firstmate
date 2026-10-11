@@ -107,6 +107,9 @@ test_predicate_source_needs_supervision() {
 install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-codex-stop.sh" "$dir/bin/fm-codex-stop.sh"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
@@ -446,7 +449,7 @@ test_hook_codex_reblocks_retry_until_successor_is_live() {
   : > "$dir/state/task1.meta"
   out=$(run_codex_hook "$dir" true); status=$?
   expect_code 2 "$status" "Codex retry must remain blocked without a live successor watcher"
-  assert_contains "$out" "TURN WOULD END BLIND" "Codex retry must retain the turn-end alarm"
+  assert_contains "$out" "verified session ownership" "Codex retry must refuse unowned supervision"
   pass "fm-turnend-guard --codex: stop_hook_active=true cannot bypass successor health"
 }
 
