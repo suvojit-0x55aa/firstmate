@@ -53,6 +53,49 @@ run_stop_generation() {
     bash -c 'printf "%s\n" "$$" > "$1/state/.lock"; export FM_TEST_CODEX_OWNER=$$; exec "$2/bin/fm-codex-stop.sh"' \
     _ "$dir" "$ROOT"
 }
+run_stop_trappable() {
+  local dir=$1
+  PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
+    FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" \
+    FM_TEST_CODEX_FINAL_MARKER="${FM_TEST_CODEX_FINAL_MARKER:-}" \
+    FM_TEST_CODEX_FINAL_RELEASE="${FM_TEST_CODEX_FINAL_RELEASE:-}" \
+    FM_TEST_REAL_GREP="${FM_TEST_REAL_GREP:-}" \
+    perl -e '$SIG{HUP}="DEFAULT"; $SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
+      "$ROOT/bin/fm-codex-stop.sh"
+}
+install_final_barrier() {
+  local dir=$1 real_grep
+  real_grep=$(command -v grep)
+  cat > "$dir/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+matched=0
+for arg in "$@"; do
+  [ "$arg" != '^(signal:|stale:|check:|heartbeat($|:))' ] || matched=1
+done
+if [ "$matched" = 1 ] && [ -n "${FM_TEST_CODEX_FINAL_MARKER:-}" ]; then
+  : > "$FM_TEST_CODEX_FINAL_MARKER"
+  n=0
+  while [ ! -e "$FM_TEST_CODEX_FINAL_RELEASE" ] && [ "$n" -lt 500 ]; do
+    sleep 0.01
+    n=$((n + 1))
+  done
+  [ -e "$FM_TEST_CODEX_FINAL_RELEASE" ] || exit 124
+fi
+exec "$FM_TEST_REAL_GREP" "$@"
+SH
+  chmod +x "$dir/fakebin/grep"
+  printf '%s\n' "$real_grep" > "$dir/real-grep"
+}
+await_file() {
+  local path=$1 n=0
+  while [ "$n" -lt 400 ]; do
+    [ ! -e "$path" ] || return 0
+    sleep 0.01
+    n=$((n + 1))
+  done
+  fail "timed out waiting for $path"
+}
 await_lock() {
   local dir=$1 n=0
   while [ "$n" -lt 100 ]; do
@@ -63,6 +106,92 @@ await_lock() {
     n=$((n+1))
   done
   fail 'Stop never acquired healthy identity-matched watcher ownership'
+}
+
+test_final_cancellation_revokes_handling() {
+  local signal dir marker release stop_owner rc guard continuation_identity replacement_pid replacement_identity
+  for signal in HUP INT TERM; do
+    dir=$(make_home "final-cancel-$signal")
+    install_final_barrier "$dir"
+    marker="$dir/final.marker"
+    release="$dir/final.release"
+    rc=0
+    TEST_BUDGET=1 FM_TEST_CODEX_FINAL_MARKER="$marker" \
+      FM_TEST_CODEX_FINAL_RELEASE="$release" FM_TEST_REAL_GREP="$(cat "$dir/real-grep")" \
+      run_stop_trappable "$dir" > "$dir/out" 2>&1 &
+    STOP_PID=$!
+    await_file "$marker"
+    assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+      "$signal cancellation fixture did not reach persisted handling"
+    stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+    kill -"$signal" "$stop_owner"
+    : > "$release"
+    wait "$STOP_PID" || rc=$?
+    STOP_PID=
+    expect_code 0 "$rc" "$signal cancellation did not override native continuation"
+    assert_absent "$dir/state/.codex-stop-health" \
+      "$signal cancellation preserved a false handling successor"
+    assert_absent "$dir/state/.watch.lock/pid" \
+      "$signal cancellation left its owned watcher alive"
+    assert_not_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
+      "$signal cancellation emitted a native continuation prompt"
+    guard=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ \
+      FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_GUARD_GRACE=999 \
+      FM_SUPERVISION_MODEL=stop-managed "$ROOT/bin/fm-guard.sh" 2>&1)
+    assert_contains "$guard" 'WATCHER DOWN - SUPERVISION IS OFF' \
+      "public guard accepted the false handling state after $signal cancellation"
+  done
+
+  dir=$(make_home final-continuation)
+  rc=0
+  TEST_BUDGET=1 run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'ordinary final Stop did not schedule native continuation'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'ordinary native continuation lost its handling successor'
+  continuation_identity=$(sed -n 's/^generation_identity=//p' "$dir/state/.codex-stop-health")
+  [ -n "$continuation_identity" ] || fail 'ordinary native continuation lost its generation identity'
+  guard=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ \
+    FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=stop-managed "$ROOT/bin/fm-guard.sh" 2>&1)
+  assert_not_contains "$guard" 'WATCHER DOWN - SUPERVISION IS OFF' \
+    'public guard rejected an ordinary native continuation handling window'
+
+  dir=$(make_home final-replacement-owner)
+  install_final_barrier "$dir"
+  marker="$dir/final.marker"
+  release="$dir/final.release"
+  TEST_BUDGET=1 FM_TEST_CODEX_FINAL_MARKER="$marker" \
+    FM_TEST_CODEX_FINAL_RELEASE="$release" FM_TEST_REAL_GREP="$(cat "$dir/real-grep")" \
+    run_stop_trappable "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  await_file "$marker"
+  sleep 30 &
+  STOP_PID_TWO=$!
+  replacement_pid=$STOP_PID_TWO
+  replacement_identity=$(FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$replacement_pid")
+  printf '%s\n' "$replacement_pid" > "$dir/state/.lock"
+  FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$(( $(date +%s) + 300 ))" replacement' \
+    _ "$ROOT" "$dir" "$replacement_pid" "$replacement_identity"
+  stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+  kill -TERM "$stop_owner"
+  : > "$release"
+  wait "$STOP_PID" || true
+  STOP_PID=
+  assert_grep "generation_pid=$replacement_pid" "$dir/state/.codex-stop-health" \
+    'cancelled predecessor cleared the replacement generation handling claim'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'cancelled predecessor changed the replacement generation phase'
+  guard=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$replacement_pid \
+    FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=stop-managed "$ROOT/bin/fm-guard.sh" 2>&1)
+  assert_not_contains "$guard" 'WATCHER DOWN - SUPERVISION IS OFF' \
+    'public guard rejected the preserved replacement generation handling claim'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'final Stop cancellation revokes only its own false handling successor'
 }
 
 test_expired_successor_requires_replacement_generation() {
@@ -106,6 +235,10 @@ test_expired_successor_requires_replacement_generation() {
 case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
   expired-successor)
     test_expired_successor_requires_replacement_generation
+    exit 0
+    ;;
+  final-cancellation)
+    test_final_cancellation_revokes_handling
     exit 0
     ;;
   '') ;;

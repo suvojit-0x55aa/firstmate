@@ -116,7 +116,11 @@ cleanup() {
   fm_lock_release "$LOCK"
 }
 trap cleanup EXIT
-trap 'exit 0' HUP INT TERM
+cancel() {
+  CONTINUATION_READY=0
+  exit 0
+}
+trap cancel HUP INT TERM
 if ! fm_codex_stop_successor_begin "$STATE" "$OWNER" "$OWNER_IDENTITY"; then
   printf '%s\n' "${FM_CODEX_STOP_SUCCESSOR_ERROR:-Codex supervision rejected a duplicate or invalid Stop successor; reconcile the session generation before continuing.}" >&2
   exit 2
