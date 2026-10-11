@@ -238,6 +238,67 @@ task_show() {  # <id>
   tasks_axi show "$1" --full 2>/dev/null
 }
 
+archived_captain_task_show() {  # <id>
+  local archive="$DATA/done-archive.md"
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 3
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    use open qw(:encoding(UTF-8));
+    my ($wanted, $path) = @ARGV;
+    open my $fh, "<", $path or exit 3;
+    my (@matches, $current_id, $tail, @body);
+    my $finish = sub {
+      return unless defined $current_id;
+      if ($current_id eq $wanted) {
+        pop @body while @body && $body[-1] eq "";
+        push @matches, [$tail, join("\n", @body)];
+      }
+      undef $current_id;
+      $tail = "";
+      @body = ();
+    };
+    while (my $line = <$fh>) {
+      $line =~ s/\r?\n\z//;
+      if ($line =~ /^- \[x\] ([A-Za-z0-9][A-Za-z0-9._-]*) - (.*)\z/) {
+        $finish->();
+        ($current_id, $tail) = ($1, $2);
+      } elsif ($line =~ /^## Archived /) {
+        $finish->();
+      } elsif (defined $current_id) {
+        if ($line =~ /^  (.*)\z/) {
+          push @body, $1;
+        } elsif ($line eq "") {
+          push @body, "";
+        }
+      }
+    }
+    $finish->();
+    exit 3 unless @matches;
+    exit 1 unless @matches == 1;
+    my ($matched_tail, $matched_body) = @{$matches[0]};
+    my @hold_kinds = ($matched_tail =~ /(?:^|\s)\(hold-kind:\s*([^)]+)\)/g);
+    exit 1 unless @hold_kinds == 1 && $hold_kinds[0] eq "captain";
+    print "  id: $wanted\n";
+    print "  state: done\n";
+    print "  hold_kind: captain\n";
+    print "  body: ", JSON::PP->new->encode($matched_body), "\n";
+  ' "$1" "$archive"
+}
+
+captain_evidence_show() {  # <id>
+  local id=$1 show rc
+  if show=$(task_show "$id"); then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  show=$(archived_captain_task_show "$id")
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  task_show "$id" >/dev/null 2>&1 && return 1
+  printf '%s\n' "$show"
+}
+
 manual_task_show() {  # <id>
   local snapshot
   snapshot=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
@@ -520,7 +581,8 @@ resolution_block() {  # <mode> <terminal-receipt> <hold-cycle> <terminal-incarna
 # surviving even when a date gate has expired) or a recorded captain answer.
 verify_hold_durable() {  # <task-id>
   local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+  show=$(captain_evidence_show "$id") \
+    || fail "captain-held task $id has no unique active or archived captain-answer record"
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -536,20 +598,26 @@ verify_hold_durable() {  # <task-id>
 # Resolve one inventory entry or channel key to the task that carries it: the
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
-  local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  local origin=$1 entry=$2 legacy rc
+  if captain_evidence_show "$entry" >/dev/null 2>&1; then
     printf '%s' "$entry"
     return 0
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || fail "captain-held task $entry has ambiguous or invalid archived evidence"
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    if captain_evidence_show "$legacy" >/dev/null 2>&1; then
       printf '%s' "$legacy"
       return 0
+    else
+      rc=$?
+      [ "$rc" -eq 3 ] || fail "legacy captain-held task $legacy has ambiguous or invalid archived evidence"
     fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
+    fail "no active or archived captain-held task $entry and no legacy identity $legacy"
   fi
-  fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
+  fail "no active or archived captain-held task $entry"
 }
 
 command_hold() {
@@ -1205,7 +1273,7 @@ command_terminal_ready() {
   done
   for id in "${resolved_ids[@]}"; do
     [ "$id" != "$origin" ] || continue
-    show=$(task_show "$id") || return 1
+    show=$(captain_evidence_show "$id") || return 1
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)

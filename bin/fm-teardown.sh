@@ -1821,6 +1821,14 @@ require_orca_worktree_absent() {
   return 1
 }
 
+revalidate_orca_teardown_identity() {
+  if [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" = 1 ]; then
+    require_orca_worktree_absent "$ORCA_WORKTREE_ID"
+  else
+    require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT"
+  fi
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -2747,6 +2755,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
+  revalidate_orca_teardown_identity || exit 1
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
@@ -2758,8 +2767,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ -n "$T_ORCA" ]; then
+    revalidate_orca_teardown_identity || exit 1
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fi
   if [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" != 1 ]; then
+    revalidate_orca_teardown_identity || exit 1
     fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
   fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then

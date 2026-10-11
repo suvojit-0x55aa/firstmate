@@ -829,7 +829,9 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
     "backend=orca" "orca_worktree_id=wt-teardown" \
     "decisions_reviewed=1" "decision_keys="
   orca_case teardown
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  for response in 1 2 3 5; do
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown","path":"%s"}}}\n' "$wt" > "$RESP/$response.out"
+  done
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -902,7 +904,9 @@ test_teardown_removes_orca_worktree_when_path_missing() {
     "backend=orca" "orca_worktree_id=wt-missing-path" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-path
-  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
+  for response in 1 2 3; do
+    printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/$response.out"
+  done
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -937,9 +941,11 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
     "backend=orca" "orca_worktree_id=wt-remove-error" \
     "decisions_reviewed=1" "decision_keys="
   orca_case remove-error-teardown
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-remove-error","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
-  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
-  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/3.out"
+  for response in 1 2 3 5; do
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-remove-error","path":"%s"}}}\n' "$wt" > "$RESP/$response.out"
+  done
+  printf '{"ok":true,"result":{}}\n' > "$RESP/4.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/6.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1050,6 +1056,10 @@ run_ship_teardown_orca_landing_replay_case() {
   case "$variant" in
     exact|replacement)
       printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
+      if [ "$variant" = exact ]; then
+        printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/2.out"
+        printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/3.out"
+      fi
       ;;
     redirected)
       other_wt="$TMP_ROOT/landing-$variant-redirected"
@@ -1149,7 +1159,9 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
     "backend=orca" "orca_worktree_id=wt-ship-match" \
     "decisions_reviewed=1" "decision_keys="
   orca_case ship-match
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  for response in 1 2 3 5; do
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/$response.out"
+  done
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1267,14 +1279,41 @@ run_orca_preflight_order_case() {
     "decisions_reviewed=1" "decision_keys="
   orca_case "preflight-$suffix"
   add_teardown_side_effect_fakes "$FB"
-  if [ "$identity" = mismatch ]; then
+  if [ "$identity" != exact ]; then
     git -C "$proj" worktree add --quiet -b "fm/$id-other" "$other_wt"
+  fi
+  if [ "$identity" = mismatch ]; then
     printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
       "$suffix" "$other_wt" > "$RESP/1.out"
   else
     printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
       "$suffix" "$wt" > "$RESP/1.out"
   fi
+  case "$identity" in
+    exact)
+      for response in 2 3 5; do
+        printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+          "$suffix" "$wt" > "$RESP/$response.out"
+      done
+      ;;
+    changed)
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+        "$suffix" "$other_wt" > "$RESP/2.out"
+      ;;
+    unavailable)
+      printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"runtime unavailable"}}\n' \
+        > "$RESP/2.out"
+      ;;
+    changedremove)
+      for response in 2 3; do
+        printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+          "$suffix" "$wt" > "$RESP/$response.out"
+      done
+      printf '{"ok":true,"result":{}}\n' > "$RESP/4.out"
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+        "$suffix" "$other_wt" > "$RESP/5.out"
+      ;;
+  esac
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   if [ "$force_mode" = forced ]; then
@@ -1303,7 +1342,7 @@ run_orca_preflight_order_case() {
     assert_present "$state/$id.meta" "Orca $suffix refusal removed task metadata"
     assert_present "$wt" "Orca $suffix refusal removed the recorded worktree"
     assert_present "$other_wt" "Orca $suffix refusal removed the unrelated worktree"
-  else
+  elif [ "$identity" = exact ]; then
     expect_code 0 "$rc" "Orca $suffix teardown should accept an exact worktree identity"$'\n'"$out"
     assert_contains "$(cat "$LOG")" 'side-effect:lsof:' \
       "Orca $suffix exact-match teardown did not reach process cleanup"
@@ -1316,6 +1355,21 @@ run_orca_preflight_order_case() {
     assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
       "Orca $suffix exact-match teardown did not remove its worktree"
     assert_absent "$state/$id.meta" "Orca $suffix exact-match teardown retained task metadata"
+  else
+    [ "$rc" -ne 0 ] || fail "Orca $suffix teardown accepted stale control-plane identity evidence"
+    assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+      "Orca $suffix teardown removed a worktree after identity evidence changed"
+    assert_present "$state/$id.meta" "Orca $suffix stale-identity refusal removed task metadata"
+    assert_present "$wt" "Orca $suffix stale-identity refusal removed the recorded worktree"
+    [ "$identity" = unavailable ] || assert_present "$other_wt" \
+      "Orca $suffix stale-identity refusal removed the replacement worktree"
+    if [ "$identity" = changedremove ]; then
+      assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+        "Orca $suffix fixture did not reach the endpoint boundary before identity changed"
+    else
+      assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+        "Orca $suffix teardown closed an endpoint after revalidation failed"
+    fi
   fi
 }
 
@@ -1327,6 +1381,15 @@ test_orca_identity_precedes_all_teardown_side_effects() {
   run_orca_preflight_order_case ship forced mismatch
   run_orca_preflight_order_case ship forced exact
   pass "fm-teardown.sh backend=orca: identity preflight precedes every cleanup path"
+}
+
+test_orca_identity_is_revalidated_at_destructive_boundaries() {
+  run_orca_preflight_order_case scout ordinary changed
+  run_orca_preflight_order_case ship forced changed
+  run_orca_preflight_order_case ship forced unavailable
+  run_orca_preflight_order_case scout ordinary changedremove
+  run_orca_preflight_order_case ship forced changedremove
+  pass "fm-teardown.sh backend=orca: identity is revalidated at each destructive boundary"
 }
 
 test_teardown_refuses_orca_missing_worktree_id() {
@@ -1542,6 +1605,10 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     test_orca_identity_precedes_all_teardown_side_effects
     exit
     ;;
+  teardown-identity-lifetime)
+    test_orca_identity_is_revalidated_at_destructive_boundaries
+    exit
+    ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;
 esac
 
@@ -1597,6 +1664,7 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_orca_identity_precedes_all_teardown_side_effects
+test_orca_identity_is_revalidated_at_destructive_boundaries
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca

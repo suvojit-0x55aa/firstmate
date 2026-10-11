@@ -9,8 +9,9 @@ FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
 export FM_HOME="$TMP_ROOT/home" FM_ROOT_OVERRIDE="$ROOT"
 mkdir -p "$FM_HOME"/{state,config,data}
+cp "$ROOT/.tasks.toml" "$FM_HOME/.tasks.toml"
 owner="$ROOT/bin/fm-terminal-reconcile.sh"
-tx() { tasks-axi "$@" --file "$FM_HOME/data/backlog.md"; }
+tx() { (cd "$FM_HOME" && tasks-axi "$@" --file "$FM_HOME/data/backlog.md"); }
 captain() {
   FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
     FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
@@ -1231,6 +1232,75 @@ EOF
   export FM_HOME
   pass 'terminal reconciliation orders streamed candidates before cursor traversal'
 }
+
+run_archived_captain_answer_case() {
+  local backend=$1 id="archived-answer-$1" call filler key backlog
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown archived captain-answer backend: $backend" ;;
+  esac
+  make_task "$id"
+  call="$id-call"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$call"
+  printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
+  answer_captain_task "$call"
+  for filler in $(seq 1 11); do
+    tx add "$id-filler-$filler" "$id filler $filler" --json >/dev/null
+    tx done "$id-filler-$filler" --json >/dev/null
+  done
+  if tx show "$call" --full >/dev/null 2>&1; then
+    fail "$backend answered captain call did not cross the configured Done archive boundary"
+  fi
+  assert_present "$FM_HOME/data/done-archive.md" \
+    "$backend Done pruning did not produce the configured captain-answer archive"
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  rm "$FM_HOME/state/$id.meta"
+  key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$backend" = manual ]; then
+    tx done "$id" --no-prune --json >/dev/null
+    "$owner" manual-complete "$key" >/dev/null
+    "$owner" manual-complete "$key" >/dev/null
+  else
+    "$owner" reconcile >/dev/null
+    "$owner" reconcile >/dev/null
+  fi
+  backlog=$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")
+  [ "$backlog" = true ] || fail "$backend archived captain answer blocked origin reconciliation"
+  ARCHIVED_CALL=$call
+}
+
+test_archived_captain_answers_remain_exact_terminal_evidence() {
+  local auto_call manual_call
+  run_archived_captain_answer_case auto
+  auto_call=$ARCHIVED_CALL
+  run_archived_captain_answer_case manual
+  manual_call=$ARCHIVED_CALL
+  captain terminal-ready archive-replay "$auto_call" \
+    || fail "archived captain answer was not replay-stable"
+  cat >> "$FM_HOME/data/done-archive.md" <<EOF
+
+## Archived 2026-10-12T00:00:00Z
+- [x] $auto_call - ambiguous reused identity (hold-kind: captain)
+  Resolution recorded by fm-captain-hold.
+EOF
+  if captain terminal-ready archive-ambiguous "$auto_call" >/dev/null 2>&1; then
+    fail "ambiguous archived captain-answer identities were accepted"
+  fi
+  tx add "$manual_call" "$manual_call reused" --json >/dev/null
+  hold_captain_task "$manual_call"
+  if captain terminal-ready archive-reheld "$manual_call" >/dev/null 2>&1; then
+    fail "a new active hold reused an archived captain answer"
+  fi
+  if captain terminal-ready archive-missing missing-captain-call >/dev/null 2>&1; then
+    fail "missing captain-answer evidence was accepted"
+  fi
+  pass 'archived captain answers retain exact cycle-aware terminal evidence'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -1297,6 +1367,10 @@ manual undelivered blocked
 manual discarded blocked
 manual delivered progressed
 EOF
+    exit
+    ;;
+  archived-captain-answer)
+    test_archived_captain_answers_remain_exact_terminal_evidence
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
@@ -1502,6 +1576,7 @@ done
 test_report_batches_receipts_at_scale
 test_reconcile_streams_history_past_argv_limit
 test_reconcile_cursor_orders_streamed_candidates
+test_archived_captain_answers_remain_exact_terminal_evidence
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"
