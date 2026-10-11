@@ -133,7 +133,7 @@ select_authenticated_receipt_key() {
   receipt_path_authenticated "$RECORD"
 }
 select_captain_review_receipt() {
-  local id=$1 key=$2 meta="$STATE/$1.meta" incarnation expected candidate count=0
+  local id=$1 key=$2 meta="$STATE/$1.meta" incarnation expected candidate active_key= count=0
   select_authenticated_receipt_key "$key" || return $?
   jq -e --arg id "$id" \
     '.id == $id and .incarnation != "||" and .retired == true and .discarded != true and ((.superseded_by // "") == "")' \
@@ -149,10 +149,14 @@ select_captain_review_receipt() {
   [ ! -e "$meta" ] && [ ! -L "$meta" ] || return 1
   for candidate in "$DIR"/*.json; do
     receipt_path_authenticated "$candidate" || continue
-    jq -e --arg id "$id" '.id == $id' "$candidate" >/dev/null || continue
+    jq -e --arg id "$id" \
+      '.id == $id and .retired == true and .discarded != true and .reviewed != true and ((.superseded_by // "") == "")' \
+      "$candidate" >/dev/null || continue
     count=$((count + 1))
+    active_key=${candidate##*/}
+    active_key=${active_key%.json}
   done
-  [ "$count" -eq 1 ]
+  [ "$count" -eq 1 ] && [ "$active_key" = "$key" ]
 }
 select_record() {
   local id=$1 meta="$STATE/$1.meta" tmp captain_keys decisions_reviewed=false
@@ -353,21 +357,18 @@ case "$mode" in
   reconcile)
     deadline=$((SECONDS+8))
     cursor=$(cat "$DIR/.cursor" 2>/dev/null || true)
-    reconcile_records=()
-    for RECORD in "$DIR"/*.json; do
-      [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
-      reconcile_records+=("$RECORD")
-    done
-    [ "${#reconcile_records[@]}" -gt 0 ] || exit 0
     RECONCILE_CANDIDATES=$(mktemp "$DIR/.candidates.XXXXXX") || exit 1
-    jq -r '
+    find "$DIR" -type f -name '*.json' -exec cat {} + | jq -r '
       select(.reviewed != true and ((.superseded_by // "") == "") and .discarded != true)
-      | input_filename
-    ' "${reconcile_records[@]}" > "$RECONCILE_CANDIDATES" || exit 1
+      | .key
+      | select(type == "string")
+    ' > "$RECONCILE_CANDIDATES" || exit 1
     for range in after through; do
-      while IFS= read -r RECORD || [ -n "$RECORD" ]; do
-        [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
-        name=${RECORD##*/}
+      while IFS= read -r KEY || [ -n "$KEY" ]; do
+        valid "$KEY" || continue
+        RECORD="$DIR/$KEY.json"
+        receipt_path_authenticated "$RECORD" || continue
+        name="$KEY.json"
         if [ "$range" = after ]; then [[ "$name" > "$cursor" ]] || continue
         else [[ "$name" > "$cursor" ]] && continue
         fi

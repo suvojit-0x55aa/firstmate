@@ -502,7 +502,7 @@ run_attestation_case() {
 
 run_retired_attestation_recovery_case() {
   local backend=$1 id="retired-review-$1" call key record report rc before after
-  local forged=forged-recovery missing_key ambiguous="reused-review-$1" first_key second_key
+  local forged=forged-recovery missing_key ambiguous="reused-review-$1" reused_call first_key second_key first_record second_record first_before
   local fakebin="$FM_HOME/$id-fakebin"
   call="$id-call"
   case "$backend" in
@@ -604,26 +604,76 @@ EOF
   [ "$(jq -r .backlog "$record")" = true ] \
     || fail "$backend exact retired attestation did not unblock reconciliation"
 
-  make_unreviewed_task "$ambiguous"
+  make_task "$ambiguous"
   "$owner" merged "$ambiguous" https://github.com/o/r/pull/1
   "$owner" retired "$ambiguous" normal
-  first_key=$(jq -r --arg id "$ambiguous" \
-    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+  first_key=$(jq -r --arg id "$ambiguous" --arg incarnation "$ambiguous" \
+    'select(.id==$id and .incarnation==$incarnation)|.key' \
     "$FM_HOME/state/terminal-delivery/"*.json)
+  first_record="$FM_HOME/state/terminal-delivery/$first_key.json"
+  if [ "$backend" = manual ]; then
+    tx done "$ambiguous" --no-prune --json >/dev/null
+    "$owner" manual-complete "$first_key"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  "$owner" refill-reviewed "$first_key"
+  first_before=$(jq -cS . "$first_record")
+  reused_call="$ambiguous-call"
+  tx add "$reused_call" "$reused_call" --json >/dev/null
+  tx hold "$reused_call" --reason 'reused incarnation captain review pending' --kind captain --json >/dev/null
   printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' \
     "$ambiguous" > "$FM_HOME/state/$ambiguous.meta"
+  printf 'decision_keys=%s\n' "$reused_call" >> "$FM_HOME/state/$ambiguous.meta"
   "$owner" merged "$ambiguous" https://github.com/o/r/pull/1
   "$owner" retired "$ambiguous" normal
-  second_key=$(jq -r --arg id "$ambiguous" \
-    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+  second_key=$(jq -r --arg id "$ambiguous" --arg incarnation "$ambiguous-reused" \
+    'select(.id==$id and .incarnation==$incarnation)|.key' \
     "$FM_HOME/state/terminal-delivery/"*.json)
+  second_record="$FM_HOME/state/terminal-delivery/$second_key.json"
   [ "$first_key" != "$second_key" ] || fail "$backend reused-id fixture did not create a second incarnation"
   rm "$FM_HOME/state/$ambiguous.meta"
-  if captain complete "$ambiguous" --receipt "$second_key" --none \
-    > "$FM_HOME/$ambiguous.out" 2> "$FM_HOME/$ambiguous.err"; then
-    fail "$backend metadata-free recovery accepted an ambiguous reused task id"
+  if captain complete "$ambiguous" --receipt "$first_key" --none \
+    > "$FM_HOME/$ambiguous-stale.out" 2> "$FM_HOME/$ambiguous-stale.err"; then
+    fail "$backend metadata-free recovery accepted the historical completed receipt"
   fi
-  pass "$backend retired captain attestation recovers exact receipts and rejects ambiguity"
+  if captain complete "$ambiguous" --receipt "$key" "$reused_call" \
+    > "$FM_HOME/$ambiguous-wrong.out" 2> "$FM_HOME/$ambiguous-wrong.err"; then
+    fail "$backend metadata-free recovery accepted another task's authenticated receipt"
+  fi
+  if captain complete "$ambiguous" --receipt "$second_key" --none \
+    > "$FM_HOME/$ambiguous-none.out" 2> "$FM_HOME/$ambiguous-none.err"; then
+    fail "$backend reused-id recovery erased its unresolved captain call"
+  fi
+  captain complete "$ambiguous" --receipt "$second_key" "$reused_call" >/dev/null \
+    || fail "$backend explicit active reused-id receipt was not recoverable"
+  captain complete "$ambiguous" --receipt "$second_key" "$reused_call" >/dev/null \
+    || fail "$backend active reused-id receipt recovery was not idempotent"
+  [ "$(jq -cS . "$first_record")" = "$first_before" ] \
+    || fail "$backend reused-id recovery mutated the completed historical receipt"
+  if [ "$backend" = manual ]; then
+    rc=0
+    "$owner" manual-complete "$second_key" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "$backend unresolved reused-id call advanced manual completion"
+  else
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$second_record")" = false ] \
+    || fail "$backend unresolved reused-id call advanced reconciliation"
+  answer_captain_task "$reused_call"
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$second_key"
+    "$owner" manual-complete "$second_key"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$second_record")" = true ] \
+    || fail "$backend active reused-id receipt did not complete after its genuine answer"
+  [ "$(jq -cS . "$first_record")" = "$first_before" ] \
+    || fail "$backend reused-id completion altered historical receipt A"
+  pass "$backend retired captain attestation recovers active reused-id receipts exactly"
 }
 
 run_preserved_key_recovery_case() {
@@ -899,6 +949,62 @@ EOF
     'startup reconciliation changed the actionable receipt set'
   pass 'terminal report and startup reconciliation batch parser work while preserving proof history'
 }
+
+test_reconcile_streams_history_past_argv_limit() {
+  local original_home=$FM_HOME home="$TMP_ROOT/reconcile-argv-scale" dir fakebin real_jq
+  local id=argv-scale-active key record argmax target total=0 i=0 padding name path count report
+  FM_HOME=$home
+  export FM_HOME
+  mkdir -p "$home"/{state/terminal-delivery,config,data,fakebin}
+  dir="$home/state/terminal-delivery"
+  printf '%s\n' tasks-axi > "$home/config/backlog-backend"
+  make_task "$id"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  key=$(jq -r --arg id "$id" 'select(.id==$id)|.key' "$dir/"*.json)
+  record="$dir/$key.json"
+
+  argmax=$(getconf ARG_MAX 2>/dev/null || printf 262144)
+  target=$((argmax + argmax / 4))
+  padding=$(printf '%160s' '' | tr ' ' x)
+  while [ "$total" -lt "$target" ]; do
+    name=$(printf 'reviewed-%06d-%s' "$i" "$padding")
+    path="$dir/$name.json"
+    printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"history-%06d","incarnation":"history-%06d","kind":"ship","mode":"no-mistakes","state":"done","pr":"","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","decisions_reviewed":true}\n' \
+      "$name" "$i" "$i" > "$path"
+    total=$((total + ${#path} + 1))
+    i=$((i + 1))
+  done
+
+  real_jq=$(command -v jq)
+  fakebin="$home/fakebin"
+  cat > "$fakebin/jq" <<'EOF'
+#!/usr/bin/env bash
+count=$(cat "$FM_JQ_COUNT" 2>/dev/null || printf 0)
+printf '%s\n' "$((count + 1))" > "$FM_JQ_COUNT"
+exec "$FM_REAL_JQ" "$@"
+EOF
+  chmod +x "$fakebin/jq"
+  : > "$home/jq.count"
+  report=$(PATH="$fakebin:$PATH" FM_REAL_JQ="$real_jq" FM_JQ_COUNT="$home/jq.count" \
+    "$owner" report)
+  [ "$(cat "$home/jq.count")" = 1 ] || fail 'argv-scale report did not use one bounded parser'
+  assert_contains "$report" "TERMINAL DELIVERY: $id " \
+    'argv-scale report lost its actionable active receipt'
+
+  : > "$home/jq.count"
+  PATH="$fakebin:$PATH" FM_REAL_JQ="$real_jq" FM_JQ_COUNT="$home/jq.count" \
+    "$owner" reconcile
+  count=$(cat "$home/jq.count")
+  [ "$count" -le 30 ] || fail "argv-scale reconcile launched jq $count times"
+  [ "$(jq -r .backlog "$record")" = true ] \
+    || fail 'argv-scale reconcile did not advance the actionable active receipt'
+  [ "$(find "$dir" -type f -name 'reviewed-*.json' | wc -l | tr -d ' ')" = "$i" ] \
+    || fail 'argv-scale reconcile did not preserve retained receipt history'
+  FM_HOME=$original_home
+  export FM_HOME
+  pass 'terminal report and reconciliation stream history beyond the argv limit'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -923,6 +1029,7 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
     for attestation_backend in auto manual; do
       run_retired_attestation_recovery_case "$attestation_backend"
     done
+    test_reconcile_streams_history_past_argv_limit
     exit
     ;;
   preserved-key-recovery)
@@ -1122,6 +1229,7 @@ for attestation_backend in auto manual; do
   run_completed_inventory_replay_case "$attestation_backend"
 done
 test_report_batches_receipts_at_scale
+test_reconcile_streams_history_past_argv_limit
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"
