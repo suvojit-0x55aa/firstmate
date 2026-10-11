@@ -100,7 +100,7 @@ supersede_prior_records() {
     [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
     [ "$candidate" != "$current" ] || continue
     jq -e --arg id "$id" \
-      '.id == $id and .backlog != true and .reviewed != true and ((.superseded_by // "") == "")' \
+      '.id == $id and .discarded != true and .backlog != true and .reviewed != true and ((.superseded_by // "") == "")' \
       "$candidate" >/dev/null || continue
     RECORD=$candidate
     put --arg key "$KEY" '.superseded_by=$key' || { RECORD=$current; return 1; }

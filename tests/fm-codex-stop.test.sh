@@ -706,6 +706,81 @@ test_public_stop_dispatches_pending_queue() {
   pass 'configured Codex Stop dispatches pending queues through one owner'
 }
 
+test_public_afk_handoff_clears_owned_successor() {
+  local timing dir rc drain ack_through recovery_generation old_expiry now
+  local replacement_pid replacement_identity replacement_before
+  for timing in before after; do
+    dir=$(make_home "public-afk-$timing")
+    rm "$dir/state/work.meta"
+    freeze_configured_stop_runtime "$dir"
+    append_test_wake "$dir" "public-afk-$timing"
+    rc=0
+    TEST_BUDGET=12 TEST_GRACE=10 run_configured_stop "$dir" > "$dir/initial" 2>&1 || rc=$?
+    expect_code 2 "$rc" "configured Stop did not create the $timing-away handling claim"
+    assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+      "configured Stop omitted the $timing-away handling claim"
+    old_expiry=$(sed -n 's/^expires_epoch=//p' "$dir/state/.codex-stop-health")
+    drain=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+      PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+      FM_PROCEVENT_CLAIM_ROOT="$dir/claims" "$dir/bin/fm-wake-drain.sh" 2>&1)
+    ack_through=$(printf '%s\n' "$drain" | awk '/^WAKE_ACK_REQUIRED:/ { for (i = 1; i <= NF; i++) if ($i == "--ack-through") print $(i + 1) }')
+    recovery_generation=$(printf '%s\n' "$drain" | awk '/^WAKE_ACK_REQUIRED:/ { for (i = 1; i <= NF; i++) if ($i == "--recovery-generation") print $(i + 1) }')
+    [ -n "$ack_through" ] && [ -n "$recovery_generation" ] \
+      || fail "configured $timing-away continuation omitted its acknowledgement"
+    env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+      PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+      FM_PROCEVENT_CLAIM_ROOT="$dir/claims" "$dir/bin/fm-wake-drain.sh" \
+        --ack-through "$ack_through" --recovery-generation "$recovery_generation" >/dev/null
+    if [ "$timing" = after ]; then
+      now=$(date +%s)
+      if [ "$now" -le "$old_expiry" ]; then sleep "$((old_expiry - now + 1))"; fi
+    fi
+    : > "$dir/state/.afk"
+    rc=0
+    TEST_BUDGET=1 TEST_GRACE=10 run_configured_stop "$dir" > "$dir/away" 2>&1 || rc=$?
+    expect_code 0 "$rc" "configured $timing-deadline away handoff did not retire its owned claim"
+    assert_present "$dir/state/.afk" "configured $timing-deadline handoff removed away ownership"
+    assert_absent "$dir/state/.codex-stop-health" \
+      "configured $timing-deadline away handoff preserved its owned claim"
+    assert_absent "$dir/state/.watch.lock/pid" \
+      "configured $timing-deadline away handoff armed a watcher"
+    rm "$dir/state/.afk"
+    : > "$dir/state/later-work.meta"
+    rc=0
+    TEST_BUDGET=1 TEST_GRACE=3 run_configured_stop "$dir" > "$dir/later" 2>&1 || rc=$?
+    expect_code 2 "$rc" "later work failed after the $timing-deadline away handoff"
+    assert_not_contains "$(cat "$dir/later")" 'handling window expired' \
+      "later work inherited the $timing-deadline away claim"
+  done
+
+  dir=$(make_home public-afk-replacement)
+  rm "$dir/state/work.meta"
+  freeze_configured_stop_runtime "$dir"
+  sleep 30 &
+  STOP_PID_TWO=$!
+  replacement_pid=$STOP_PID_TWO
+  replacement_identity=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$dir" "$replacement_pid")
+  printf '%s\n' "$replacement_pid" > "$dir/state/.lock"
+  PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$5" public-afk-replacement' \
+    _ "$dir" "$dir" "$replacement_pid" "$replacement_identity" "$(( $(date +%s) + 300 ))"
+  replacement_before=$(cat "$dir/state/.codex-stop-health")
+  : > "$dir/state/.afk"
+  rc=0
+  TEST_BUDGET=1 run_configured_stop "$dir" > "$dir/away" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'configured away handoff entered a replacement generation owner'
+  [ "$(cat "$dir/state/.codex-stop-health")" = "$replacement_before" ] \
+    || fail 'configured away handoff changed the replacement generation claim'
+  assert_present "$dir/state/.afk" 'configured replacement isolation removed away ownership'
+  assert_absent "$dir/state/.watch.lock/pid" \
+    'configured replacement isolation armed a watcher'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'configured Codex Stop retires only its owned claim during away handoff'
+}
+
 case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
   expired-successor)
     test_expired_successor_requires_replacement_generation
@@ -729,6 +804,10 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   public-pending-queue)
     test_public_stop_dispatches_pending_queue
+    exit 0
+    ;;
+  public-afk-handoff)
+    test_public_afk_handoff_clears_owned_successor
     exit 0
     ;;
   '') ;;
@@ -847,4 +926,5 @@ test_expired_successor_requires_replacement_generation
 test_afk_handoff_clears_owned_successor
 test_final_source_wake_retains_continuation
 test_public_stop_dispatches_pending_queue
+test_public_afk_handoff_clears_owned_successor
 test_cleanup_cancellation_revokes_handling

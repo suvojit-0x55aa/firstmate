@@ -172,8 +172,9 @@ fm_supervision_status "$STATE" "$GRACE"
 # A healthy finite checkpoint alone cannot deliver its result after turn end.
 # Codex parks its synchronous Stop on that cycle (or starts one) and uses the
 # native continuation response for both actionable close and quiet expiry.
-if [ "$CODEX_MODE" -eq 1 ] && [ ! -e "$STATE/.afk" ] \
-  && { [ "$FM_SUP_NEEDED" = true ] || [ "$FM_SUP_QUEUE_PENDING" = true ] \
+if [ "$CODEX_MODE" -eq 1 ] \
+  && { { [ ! -e "$STATE/.afk" ] \
+      && { [ "$FM_SUP_NEEDED" = true ] || [ "$FM_SUP_QUEUE_PENDING" = true ]; }; } \
     || fm_codex_stop_handling_owned_by_session "$STATE"; }; then
   exec "$SCRIPT_DIR/fm-codex-stop.sh"
 fi

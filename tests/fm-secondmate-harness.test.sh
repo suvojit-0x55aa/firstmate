@@ -890,7 +890,7 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
 }
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
-  local harness w sm launchlog launch fakebin out
+  local harness w sm launchlog launch fakebin out identity
   for harness in codex claude; do
     w="$TMP_ROOT/spawn-supervision-model-$harness"
     sm="$w/sm"
@@ -912,13 +912,26 @@ FM_ROOT_OVERRIDE="$sm" "$ROOT/bin/fm-guard.sh"
 SH
     chmod +x "$fakebin/$harness"
     launch=$(cat "$launchlog")
+    if [ "$harness" = codex ]; then
+      printf '%s\n' $$ > "$sm/state/.lock"
+      identity=$(FM_STATE_OVERRIDE="$sm/state" bash -c \
+        '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" $$)
+      FM_STATE_OVERRIDE="$sm/state" bash -c \
+        '. "$1"; fm_codex_stop_record_write "$2" "$3" "$4" handling 0 "$5" secondmate-stop' \
+        _ "$ROOT/bin/fm-wake-lib.sh" "$sm/state" $$ "$identity" "$(( $(date +%s) + 300 ))"
+    fi
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
       codex)
         assert_contains "$launch" "FM_SUPERVISION_MODEL=stop-managed" \
           "Codex secondmate launch did not carry its synchronous Stop supervision model"
         [ -z "$out" ] \
-          || fail "Codex secondmate with a fresh post-Stop beacon should stay silent, got: $out"
+          || fail "Codex secondmate with a healthy Stop handling claim should stay silent, got: $out"
+        rm "$sm/state/.codex-stop-health"
+        touch "$sm/state/.last-watcher-beat"
+        out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
+        assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" \
+          "Codex secondmate accepted a bare beacon without Stop handling health"
         ;;
       claude)
         [ -z "$out" ] \
@@ -2547,6 +2560,15 @@ SH
     "spawn cleanup failure left a stale reread pointer eligible for delivery"
   pass "B25 spawn quarantines stale rereads without blocking relaunch"
 }
+
+case "${FM_SECONDMATE_HARNESS_FOCUSED_TEST:-}" in
+  supervision-model)
+    test_spawned_secondmate_uses_its_harness_supervision_model
+    exit
+    ;;
+  '') ;;
+  *) fail "unknown focused secondmate harness test: $FM_SECONDMATE_HARNESS_FOCUSED_TEST" ;;
+esac
 
 test_harness_resolution
 test_cursor_marker_detection

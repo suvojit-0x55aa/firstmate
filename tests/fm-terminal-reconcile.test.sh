@@ -862,6 +862,7 @@ run_completed_inventory_replay_case() {
 
 test_discard_review_acknowledgement() {
   local id=discarded key record report forged=forged-discard
+  local new_key new_record new_before
   make_task "$id"
   "$owner" retired "$id" discard
   "$owner" reconcile
@@ -874,6 +875,20 @@ test_discard_review_acknowledgement() {
   report=$("$owner" report)
   assert_contains "$report" "discard-reviewed $key" \
     'discard report omitted its explicit presentation acknowledgement'
+
+  printf 'spawn_gen=%s-next\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" > "$FM_HOME/state/$id.meta"
+  "$owner" observe "$id" done https://github.com/o/r/pull/1
+  new_key=$(jq -r --arg id "$id" 'select(.id==$id and .incarnation==($id+"-next"))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  [ -n "$new_key" ] || fail 'replacement incarnation did not create its own receipt'
+  new_record="$FM_HOME/state/terminal-delivery/$new_key.json"
+  new_before=$(jq -cS . "$new_record")
+  [ -z "$(jq -r '.superseded_by // ""' "$record")" ] \
+    || fail 'replacement incarnation superseded a pending discard review'
+  report=$("$owner" report)
+  assert_contains "$report" "discard-reviewed $key" \
+    'replacement incarnation hid the pending discard review'
 
   jq --arg key "$forged" '.key=$key | .reviewed=false' "$record" \
     > "$FM_HOME/state/terminal-delivery/$forged.json"
@@ -888,11 +903,13 @@ test_discard_review_acknowledgement() {
   "$owner" discard-reviewed "$key"
   jq -e '.discarded and .reviewed and (.backlog != true) and (.refill != true)' \
     "$record" >/dev/null || fail 'discard acknowledgement inferred delivery or lost replay safety'
-  assert_not_contains "$("$owner" report)" "TERMINAL DELIVERY: $id " \
+  assert_not_contains "$("$owner" report)" "receipt=$key " \
     'acknowledged discard remained a presentation alert'
+  [ "$(jq -cS . "$new_record")" = "$new_before" ] \
+    || fail 'discard acknowledgement mutated the replacement incarnation'
   assert_contains "$(tx show "$id")" 'state: in_flight' \
     'discard acknowledgement completed the backlog item'
-  pass 'authenticated discard acknowledgement retires presentation only'
+  pass 'authenticated discard review survives task-id reuse and retires presentation only'
 }
 
 test_report_batches_receipts_at_scale() {
@@ -1106,6 +1123,10 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
         run_attestation_case "$attestation_backend" "$attestation_terminal"
       done
     done
+    test_discard_review_acknowledgement
+    exit
+    ;;
+  discard-reuse)
     test_discard_review_acknowledgement
     exit
     ;;
