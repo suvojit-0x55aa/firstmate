@@ -389,7 +389,7 @@ body_has_current_resolution() {  # <task-body>
 }
 
 release_resolution_matches_current() {  # <task-id> <task-body>
-  local current receipt receipt_rc
+  local current current_incarnation incarnation_rc receipt receipt_rc recorded_incarnation
   body_has_current_resolution "$2" || return 1
   if current=$(terminal_receipt_key "$1"); then
     :
@@ -400,14 +400,21 @@ release_resolution_matches_current() {  # <task-id> <task-body>
   fi
   receipt=$(recorded_release_receipt "$2" || true)
   if [ -z "$current" ]; then
-    [ "$receipt" = none ]
+    [ "$receipt" = none ] || return 1
+    recorded_incarnation=$(recorded_release_incarnation "$2" || true)
+    if current_incarnation=$(terminal_incarnation_key "$1"); then
+      [ "$recorded_incarnation" = "$current_incarnation" ]
+    else
+      incarnation_rc=$?
+      [ "$incarnation_rc" = 3 ] && [ -z "$recorded_incarnation" ]
+    fi
   else
     [ "$receipt" = "$current" ]
   fi
 }
 
 terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1> <task-id>
-  local mode release_receipt cycle
+  local mode release_receipt release_incarnation cycle
   if ! body_has_resolution_record "$1"; then
     cycle=$(current_hold_cycle "$1" || true)
     [ -z "$cycle" ]
@@ -419,7 +426,16 @@ terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <ori
   [ "$2" != captain ] || return 1
   release_receipt=$(recorded_release_receipt "$1" || true)
   [ -n "$release_receipt" ] || return 1
-  [ "$release_receipt" != none ] || return 0
+  if [ "$release_receipt" = none ]; then
+    [ "$4" != 1 ] || return 0
+    release_incarnation=$(recorded_release_incarnation "$1" || true)
+    [ "${#release_incarnation}" -eq 64 ] || return 1
+    case "$release_incarnation" in *[!0-9a-f]*) return 1 ;; esac
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+      completed-exact "$5" "$release_incarnation" >/dev/null 2>&1
+    return
+  fi
   [ "${#release_receipt}" -eq 64 ] || return 1
   case "$release_receipt" in *[!0-9a-f]*) return 1 ;; esac
   if [ "$4" = 1 ]; then
@@ -468,16 +484,27 @@ recorded_release_receipt() {  # <task-body>
   newest_resolution_field "$1" 'Terminal receipt'
 }
 
+recorded_release_incarnation() {  # <task-body>
+  newest_resolution_field "$1" 'Terminal incarnation'
+}
+
 terminal_receipt_key() {  # <task-id>
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
     receipt-key "$1"
 }
 
-resolution_block() {  # <mode> <terminal-receipt> <hold-cycle>
+terminal_incarnation_key() {  # <task-id>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+    current-incarnation "$1"
+}
+
+resolution_block() {  # <mode> <terminal-receipt> <hold-cycle> <terminal-incarnation>
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\nHold cycle: %s\n' \
     "$DECISION_DIGEST" "$1" "$3"
   [ -z "$2" ] || printf 'Terminal receipt: %s\n' "$2"
+  [ -z "$4" ] || printf 'Terminal incarnation: %s\n' "$4"
   printf '\nCaptain decision:\n%s\n' "$DECISION_TEXT"
 }
 
@@ -636,7 +663,7 @@ write_hold_cycle_record() {  # <task-id> <shown-body>
 }
 
 write_resolution_record() {  # <task-id> <mode> <shown-body> <hold-cycle>
-  local id=$1 mode=$2 body=$3 cycle=$4 receipt='' receipt_rc record
+  local id=$1 mode=$2 body=$3 cycle=$4 receipt='' receipt_rc incarnation='' incarnation_rc record
   [ -n "$cycle" ] || fail "cannot record a captain answer without a hold cycle"
   if [ "$mode" = released ]; then
     if receipt=$(terminal_receipt_key "$id"); then
@@ -646,9 +673,17 @@ write_resolution_record() {  # <task-id> <mode> <shown-body> <hold-cycle>
       [ "$receipt_rc" = 3 ] \
         || fail "cannot authenticate terminal receipt state for captain-held task $id"
       receipt=none
+      if incarnation=$(terminal_incarnation_key "$id"); then
+        :
+      else
+        incarnation_rc=$?
+        [ "$incarnation_rc" = 3 ] \
+          || fail "cannot authenticate terminal incarnation for captain-held task $id"
+        incarnation=''
+      fi
     fi
   fi
-  record=$(resolution_block "$mode" "$receipt" "$cycle")
+  record=$(resolution_block "$mode" "$receipt" "$cycle" "$incarnation")
   prepend_body_record "$id" "$body" "$record"
 }
 

@@ -9,6 +9,8 @@
 #        fm-terminal-reconcile.sh retired <id> <normal|discard>
 #        fm-terminal-reconcile.sh landing-proven <id>
 #        fm-terminal-reconcile.sh completed-after <id> <receipt-key>
+#        fm-terminal-reconcile.sh completed-exact <id> <receipt-key>
+#        fm-terminal-reconcile.sh current-incarnation <id>
 #        fm-terminal-reconcile.sh receipt-key <id>
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
@@ -232,6 +234,14 @@ terminal_completed_after() {
   done
   return 1
 }
+terminal_completed_exact() {
+  local id=$1 key=$2
+  select_authenticated_receipt_key "$key" || return $?
+  jq -e --arg id "$id" --arg key "$key" \
+    '.id == $id and .key == $key and .retired == true and .discarded != true and .backlog == true and ((.superseded_by // "") == "")' \
+    "$RECORD" >/dev/null || return 1
+  delivery_proven
+}
 captain_calls_resolved() {
   local id receipt captain_keys captain_key
   jq -e '.decisions_reviewed == true' "$RECORD" >/dev/null || return 1
@@ -296,16 +306,25 @@ reconcile_record() {
 }
 mode=${1:-report}
 case "$mode" in -h|--help) sed -n '2,29{s/^# \{0,1\}//;p;}' "$0"; exit 0;; esac
-if [ "$mode" = completed-after ] || [ "$mode" = receipt-key ]; then
+if [ "$mode" = completed-after ] || [ "$mode" = completed-exact ] \
+  || [ "$mode" = current-incarnation ] || [ "$mode" = receipt-key ]; then
   if [ "$mode" = completed-after ]; then
     [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
     [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
     terminal_completed_after "$2" "$3"
+  elif [ "$mode" = completed-exact ]; then
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
+    [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
+    terminal_completed_exact "$2" "$3"
   else
     [ "$#" -eq 2 ] && valid "$2" || exit 2
     [ ! -L "$STATE/$2.meta" ] || exit 1
     [ -e "$STATE/$2.meta" ] || exit 3
     select_record_path "$2" || exit 1
+    if [ "$mode" = current-incarnation ]; then
+      printf '%s\n' "$KEY"
+      exit
+    fi
     [ -e "$DIR" ] || exit 3
     [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
     [ -e "$RECORD" ] || exit 3

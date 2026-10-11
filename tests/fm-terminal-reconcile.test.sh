@@ -251,6 +251,100 @@ run_transferred_release_resume_case() {
     *) fail "unknown transferred release expectation: $expected" ;;
   esac
 }
+run_preterminal_transferred_release_case() {
+  local backend=$1 proof=$2 expected=$3
+  local origin="preterminal-$backend-$proof-origin" call="preterminal-$backend-$proof-work"
+  local origin_key call_key rc=0 backlog
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown preterminal transferred backend: $backend" ;;
+  esac
+  make_task "$origin"
+  make_task "$call"
+  hold_captain_task "$call"
+  release_captain_task "$call"
+  printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$origin.meta"
+  "$owner" merged "$origin" https://github.com/o/r/pull/1
+  origin_key=$("$owner" receipt-key "$origin")
+  "$owner" retired "$origin" normal
+  if [ "$backend" = manual ]; then
+    tx 'done' "$origin" --no-prune --json >/dev/null
+    "$owner" manual-complete "$origin_key" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "$backend/$proof advanced the origin before transferred proof"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" = false ] \
+    || fail "$backend/$proof advanced the origin before transferred proof"
+  case "$proof" in
+    running) ;;
+    presented)
+      "$owner" observe "$call" done https://github.com/o/r/pull/1
+      "$owner" report >/dev/null
+      ;;
+    undelivered)
+      "$owner" custody "$call" https://github.com/o/r/pull/1
+      "$owner" retired "$call" normal
+      ;;
+    discarded)
+      "$owner" retired "$call" discard
+      ;;
+    delivered)
+      "$owner" merged "$call" https://github.com/o/r/pull/1
+      call_key=$("$owner" receipt-key "$call")
+      "$owner" retired "$call" normal
+      if [ "$backend" = manual ]; then
+        tx 'done' "$call" --no-prune --json >/dev/null
+        "$owner" manual-complete "$call_key"
+        "$owner" manual-complete "$call_key"
+      else
+        "$owner" reconcile
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$call_key.json")" = true ] \
+        || fail "$backend/$proof did not complete the released transferred receipt"
+      ;;
+    *) fail "unknown preterminal transferred proof: $proof" ;;
+  esac
+  rc=0
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$origin_key" >/dev/null 2>&1 || rc=$?
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  backlog=$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")
+  case "$expected" in
+    blocked)
+      [ "$backlog" = false ] || fail "$backend/$proof advanced the referring origin"
+      [ "$backend" != manual ] || [ "$rc" -ne 0 ] \
+        || fail "$backend/$proof reported manual completion"
+      if [ "$backend" = manual ]; then
+        "$owner" manual-complete "$origin_key" >/dev/null 2>&1 \
+          && fail "$backend/$proof replay advanced the referring origin"
+      else
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" = false ] \
+        || fail "$backend/$proof replay advanced the referring origin"
+      ;;
+    progressed)
+      [ "$backlog" = true ] || fail "$backend/$proof did not advance the referring origin"
+      [ "$backend" != manual ] || [ "$rc" -eq 0 ] \
+        || fail "$backend/$proof refused manual completion"
+      if [ "$backend" = manual ]; then
+        "$owner" manual-complete "$origin_key"
+      else
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" = true ] \
+        || fail "$backend/$proof replay lost referring-origin progress"
+      ;;
+    *) fail "unknown preterminal transferred expectation: $expected" ;;
+  esac
+}
 run_terminal_identity_case() {
   local backend=$1 shape=$2 expected=$3
   local id="identity-$backend-$shape" call key rc=0 backlog
@@ -1154,6 +1248,24 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
     test_reconcile_cursor_orders_streamed_candidates
     exit
     ;;
+  preterminal-transfer)
+    while read -r release_backend release_proof release_expected; do
+      [ -n "$release_backend" ] || continue
+      run_preterminal_transferred_release_case "$release_backend" "$release_proof" "$release_expected"
+    done <<'EOF'
+auto running blocked
+auto presented blocked
+auto undelivered blocked
+auto discarded blocked
+auto delivered progressed
+manual running blocked
+manual presented blocked
+manual undelivered blocked
+manual discarded blocked
+manual delivered progressed
+EOF
+    exit
+    ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
 esac
 make_task article
@@ -1299,6 +1411,22 @@ manual unrelated blocked
 manual new-success progressed
 EOF
 pass 'transferred releases require their own later verified terminal incarnation'
+while read -r release_backend release_proof release_expected; do
+  [ -n "$release_backend" ] || continue
+  run_preterminal_transferred_release_case "$release_backend" "$release_proof" "$release_expected"
+done <<'EOF'
+auto running blocked
+auto presented blocked
+auto undelivered blocked
+auto discarded blocked
+auto delivered progressed
+manual running blocked
+manual presented blocked
+manual undelivered blocked
+manual discarded blocked
+manual delivered progressed
+EOF
+pass 'preterminal transferred releases require exact delivered terminal evidence'
 while read -r identity_backend identity_shape identity_expected; do
   [ -n "$identity_backend" ] || continue
   run_terminal_identity_case "$identity_backend" "$identity_shape" "$identity_expected"

@@ -456,6 +456,8 @@ test_release_uses_existing_terminal_evidence_only() {
   show=$(tasks_in "$home" show "$id" --full)
   assert_contains "$show" 'Terminal receipt: none' \
     "preterminal release did not record the absence of prior terminal evidence"
+  assert_contains "$show" 'Terminal incarnation: ' \
+    "preterminal release did not bind its future receipt identity"
   if run_terminal "$home" receipt-key "$id" > "$home/preterminal-key.out" 2> "$home/preterminal-key.err"; then
     fail "terminal owner reported a receipt before the first terminal event"
   fi
