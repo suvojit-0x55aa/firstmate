@@ -409,7 +409,12 @@ release_resolution_matches_current() {  # <task-id> <task-body>
       [ "$incarnation_rc" = 3 ] && [ -z "$recorded_incarnation" ]
     fi
   else
-    [ "$receipt" = "$current" ]
+    if [ "$receipt" = none ]; then
+      recorded_incarnation=$(recorded_release_incarnation "$2" || true)
+      [ "$recorded_incarnation" = "$current" ]
+    else
+      [ "$receipt" = "$current" ]
+    fi
   fi
 }
 
@@ -761,20 +766,22 @@ command_answer() {
       show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
       body=$(show_field "$show" body)
     fi
-    if body_has_current_resolution "$body" \
-      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+    if body_has_current_resolution "$body"; then
+      [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+        || fail "captain-held task $id records a different captain decision"
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
         released)
-          if release_resolution_matches_current "$id" "$body"; then
-            [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release"
-            retry=1
-          fi
+          [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release"
+          release_resolution_matches_current "$id" "$body" \
+            || fail "task $id release belongs to a different terminal incarnation"
+          retry=1
           ;;
         answered)
           [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release"
           retry=1
           ;;
+        *) fail "task $id records this answer with an unsupported resolution mode" ;;
       esac
     fi
     if [ "$retry" = 1 ]; then

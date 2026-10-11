@@ -594,6 +594,37 @@ run_attestation_case() {
     || fail "$backend/$terminal reviewed inventory did not survive metadata deletion and replay"
 }
 
+run_active_attestation_recovery_case() {
+  local backend=$1 id="active-review-$1" call key record report
+  call="$id-call"
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown active attestation backend: $backend" ;;
+  esac
+  make_unreviewed_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  tx hold "$call" --reason 'active captain review pending' --kind captain --json >/dev/null
+  printf '%s\n' 'needs-decision [key=delivery]: choose active delivery treatment' \
+    > "$FM_HOME/state/$id.status"
+  "$owner" observe "$id" done https://github.com/o/r/pull/1
+  key=$("$owner" receipt-key "$id")
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  report=$("$owner" report)
+  assert_contains "$report" "fm-captain-hold.sh complete $id (" \
+    "$backend active missing attestation omitted its metadata recovery command"
+  assert_not_contains "$report" "complete $id --receipt" \
+    "$backend active missing attestation emitted a retired-only receipt command"
+  captain complete "$id" "$call" >/dev/null \
+    || fail "$backend active emitted recovery command did not execute"
+  assert_contains "$(tx show "$call")" 'held: yes' \
+    "$backend active attestation erased its unresolved captain call"
+  "$owner" retired "$id" normal
+  jq -e --arg call "$call" \
+    '.retired == true and .decisions_reviewed == true and .captain_keys == $call' \
+    "$record" >/dev/null || fail "$backend active recovery did not become durable at retirement"
+}
+
 run_retired_attestation_recovery_case() {
   local backend=$1 id="retired-review-$1" call key record report rc before after
   local forged=forged-recovery missing_key ambiguous="reused-review-$1" reused_call first_key second_key first_record second_record first_before
@@ -1204,9 +1235,11 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
     for attestation_backend in auto manual; do
+      run_active_attestation_recovery_case "$attestation_backend"
       for attestation_terminal in done failed; do
         run_attestation_case "$attestation_backend" "$attestation_terminal"
       done
+      run_retired_attestation_recovery_case "$attestation_backend"
     done
     test_report_batches_receipts_at_scale
     exit
@@ -1454,6 +1487,7 @@ manual legacy
 EOF
 pass 'terminal reconciliation binds repeated answers to the current hold cycle'
 for attestation_backend in auto manual; do
+  run_active_attestation_recovery_case "$attestation_backend"
   for attestation_terminal in done failed; do
     run_attestation_case "$attestation_backend" "$attestation_terminal"
   done

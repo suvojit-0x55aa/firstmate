@@ -380,7 +380,7 @@ test_release_frees_held_work() {
 }
 
 test_answer_identity_is_hold_cycle_scoped() {
-  local home show records
+  local home show records mismatch
   home=$(make_home answer-cycle)
   tasks_in "$home" add sample-cycle-work "Ship cycle-aware sample work" \
     --kind ship --repo sample --body 'Cycle-aware work body.' >/dev/null \
@@ -409,9 +409,10 @@ EOF
   assert_contains "$show" 'held: yes' "the interrupted release lost the active hold"
   records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
   [ "$records" = 1 ] || fail "the interrupted release did not write exactly one resolution"
+  run_terminal "$home" merged sample-cycle-work https://github.com/o/r/pull/1
   run_captain "$home" answer sample-cycle-work \
     --decision-file "$home/cycle-answer.txt" --release >/dev/null \
-    || fail "same-cycle release retry did not finish the interrupted close"
+    || fail "same-cycle release retry did not accept its first authenticated receipt"
   show=$(tasks_in "$home" show sample-cycle-work --full)
   records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
   [ "$records" = 1 ] || fail "same-cycle retry duplicated the resolution record"
@@ -434,6 +435,38 @@ EOF
   [ "$records" = 2 ] || fail "the later same-cycle replay duplicated its resolution"
   assert_contains "$show" 'state: queued' "the later release completed resumed work"
   assert_contains "$show" 'held: no' "the later release retained its hold"
+
+  mismatch=sample-cycle-mismatch
+  tasks_in "$home" add "$mismatch" "Reject a mismatched same-cycle receipt" \
+    --kind ship --repo sample --start >/dev/null
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\n' "$mismatch" \
+    > "$home/state/$mismatch.meta"
+  run_captain "$home" hold "$mismatch" --reason "captain mismatch answer pending" >/dev/null
+  printf 'Captain approved the original incarnation.\n' > "$home/mismatch-answer.txt"
+  : > "$home/fail-unhold.once"
+  if run_captain "$home" answer "$mismatch" \
+    --decision-file "$home/mismatch-answer.txt" --release \
+    > "$home/mismatch-interrupted.out" 2> "$home/mismatch-interrupted.err"; then
+    fail "the mismatched-incarnation fixture did not interrupt after recording"
+  fi
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\n' "$mismatch" \
+    > "$home/state/$mismatch.meta"
+  run_terminal "$home" merged "$mismatch" https://github.com/o/r/pull/2
+  if run_captain "$home" answer "$mismatch" \
+    --decision-file "$home/mismatch-answer.txt" --release \
+    > "$home/mismatch-retry.out" 2> "$home/mismatch-retry.err"; then
+    fail "a same-cycle release borrowed another terminal incarnation"
+  fi
+  printf 'Captain gave a different same-cycle answer.\n' > "$home/mismatch-drift.txt"
+  if run_captain "$home" answer "$mismatch" \
+    --decision-file "$home/mismatch-drift.txt" --release \
+    > "$home/mismatch-drift.out" 2> "$home/mismatch-drift.err"; then
+    fail "a different same-cycle answer replaced the recorded decision"
+  fi
+  show=$(tasks_in "$home" show "$mismatch" --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "mismatched same-cycle retries duplicated the resolution record"
+  assert_contains "$show" 'held: yes' "mismatched same-cycle retries released the held task"
   pass "captain answer identity is scoped to one durable hold cycle"
 }
 
@@ -1559,6 +1592,7 @@ EOF
 
 case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
   release-boundaries)
+    test_answer_identity_is_hold_cycle_scoped
     test_release_uses_existing_terminal_evidence_only
     test_answer_markers_cannot_replace_hold_cycle
     exit 0

@@ -96,8 +96,33 @@ run_configured_stop() {
     export FM_ARM_CONFIRM_TIMEOUT=3
     export FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}"
     export FM_GUARD_GRACE="${TEST_GRACE:-300}"
+    export FM_TEST_CODEX_STANDDOWN_MARKER="${FM_TEST_CODEX_STANDDOWN_MARKER:-}"
+    export FM_TEST_CODEX_STANDDOWN_RELEASE="${FM_TEST_CODEX_STANDDOWN_RELEASE:-}"
     printf '{"stop_hook_active":false,"turn_id":"configured-stop"}' | bash -c "$command"
   )
+}
+install_standdown_barrier() {
+  local dir=$1
+  cat >> "$dir/configured-stop.bash-env" <<'SH'
+if [ -n "${FM_TEST_CODEX_STANDDOWN_MARKER:-}" ]; then
+  set -T
+  fm_test_codex_standdown_barrier() {
+    local marker release n=0
+    [ "$BASH_COMMAND" = 'fm_supervision_needed "$STATE" "$GRACE"' ] || return 0
+    marker=$FM_TEST_CODEX_STANDDOWN_MARKER
+    release=$FM_TEST_CODEX_STANDDOWN_RELEASE
+    unset FM_TEST_CODEX_STANDDOWN_MARKER
+    trap - DEBUG
+    : > "$marker"
+    while [ ! -e "$release" ] && [ "$n" -lt 500 ]; do
+      sleep 0.01
+      n=$((n + 1))
+    done
+    [ -e "$release" ] || exit 124
+  }
+  trap fm_test_codex_standdown_barrier DEBUG
+fi
+SH
 }
 install_final_barrier() {
   local dir=$1 real_grep
@@ -484,6 +509,41 @@ append_test_wake() {
     _ "$ROOT" "$token" "$token" >/dev/null
 }
 
+test_public_stop_closes_source_retirement_race() {
+  local dir marker release rc prompts
+  dir=$(make_home public-source-retirement-race)
+  rm "$dir/state/work.meta"
+  freeze_configured_stop_runtime "$dir"
+  install_standdown_barrier "$dir"
+  mkdir -p "$dir/state/procevent"
+  : > "$dir/state/procevent/racing-source.source"
+  marker="$dir/standdown.marker"
+  release="$dir/standdown.release"
+  FM_TEST_CODEX_STANDDOWN_MARKER="$marker" \
+    FM_TEST_CODEX_STANDDOWN_RELEASE="$release" TEST_BUDGET=12 TEST_GRACE=8 \
+    run_configured_stop "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  await_file "$marker"
+  append_test_wake "$dir" retirement-race
+  rm "$dir/state/procevent/racing-source.source"
+  : > "$release"
+  rc=0
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 2 "$rc" 'configured Stop stranded a wake published during source retirement'
+  assert_grep 'retirement-race' "$dir/state/.wake-queue" \
+    'source-retirement interleaving lost its durable queued wake'
+  assert_absent "$dir/state/.watch.lock/pid" \
+    'source-retirement interleaving armed a redundant watcher'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'source-retirement interleaving omitted its handling successor'
+  assert_grep 'successor_count=0' "$dir/state/.codex-stop-health" \
+    'source-retirement interleaving created duplicate successors'
+  prompts=$(grep -Fc 'Run bin/fm-wake-drain.sh' "$dir/out" || true)
+  [ "$prompts" = 1 ] || fail 'source-retirement interleaving emitted multiple continuations'
+  pass 'public Codex Stop closes the terminal-source retirement race'
+}
+
 test_final_source_wake_retains_continuation() {
   local dir release rc marker stop_owner drain
   dir=$(make_home final-source-wake)
@@ -799,6 +859,7 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     exit 0
     ;;
   final-source-wake)
+    test_public_stop_closes_source_retirement_race
     test_final_source_wake_retains_continuation
     exit 0
     ;;

@@ -433,7 +433,12 @@ case "$mode" in
       elif .discarded == true then
         "\nReview the authenticated discard, then run bin/fm-terminal-reconcile.sh discard-reviewed \(.key). This retires presentation without marking delivery or backlog complete."
       elif (.decisions_reviewed // false) != true then
-        "\nCaptain-call inventory is not attested. Review every captain call, then run bin/fm-captain-hold.sh complete \(.id) --receipt \(.key) (--none | <task-id>...)."
+        "\nCaptain-call inventory is not attested. Review every captain call, then run " +
+        (if .retired == true then
+          "bin/fm-captain-hold.sh complete \(.id) --receipt \(.key)"
+        else
+          "bin/fm-captain-hold.sh complete \(.id)"
+        end) + " (--none | <task-id>...)."
       elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then
         "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key)."
       else
