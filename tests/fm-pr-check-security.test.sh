@@ -3676,6 +3676,30 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_receipt_consumes_authenticated_poll_merge() {
+  local dir state rc receipt
+  dir=$(make_case receipt-poll-merge)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2> "$dir/check.err" \
+    || fail "receipt-poll-merge: could not arm the authenticated poll"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" custody task-a https://github.com/o/r/pull/1
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "receipt-poll-merge: authenticated watcher failed: $(cat "$dir/watch.err")"
+  receipt=$(jq -c 'select(.id == "task-a")' "$state/terminal-delivery/"*.json)
+  printf '%s' "$receipt" | jq -e \
+    '.retired == false and .merged == true and .pr == "https://github.com/o/r/pull/1"' >/dev/null \
+    || fail "receipt-poll-merge: verified poll did not publish merge proof: $receipt"
+  assert_poll_absent "$state" task-a
+  pass "authenticated poll publishes merge proof before endpoint retirement"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3690,6 +3714,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_receipt_consumes_authenticated_poll_merge
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

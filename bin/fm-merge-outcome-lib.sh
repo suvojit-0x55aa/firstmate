@@ -94,10 +94,8 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
 
   # Persist delivery proof before notification deduplication can return early.
-  if [ -f "$state/$id.meta" ]; then
-    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-terminal-reconcile.sh" merged "$id" "$url" || return 1
-  fi
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$_FM_MERGE_OUTCOME_LIB_DIR/fm-terminal-reconcile.sh" merge-observed "$id" "$url" || return 1
 
   if self=$(fm_merge_outcome_home_id "$home"); then
     fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 3

@@ -695,7 +695,6 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 TEARDOWN_VERIFIED_MERGED_PR=
-TEARDOWN_DISCOVERED_PR=
 TEARDOWN_VERIFIED_DEFAULT_HEAD=
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
@@ -1086,7 +1085,6 @@ pr_is_merged() {
   view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   IFS=$'\t' read -r state head url extra <<< "$view"
   [ -n "$state" ] && [ -n "$head" ] && [ -n "$url" ] && [ -z "$extra" ] || return 1
-  TEARDOWN_DISCOVERED_PR=$url
   case "$state" in
     MERGED|merged) ;;
     *) return 1 ;;
@@ -1144,12 +1142,18 @@ persist_terminal_landing_proof() {
   [ "$KIND" = ship ] && [ "$FORCE" != --force ] || return 0
   if [ "$MODE" = local-only ]; then
     if [ -z "$TEARDOWN_VERIFIED_DEFAULT_HEAD" ]; then
-      name=$(default_branch) || return 0
+      name=$(default_branch) || {
+        echo "REFUSED: local-only task $ID has no intended default branch landing proof; preserving its worktree and metadata." >&2
+        return 1
+      }
       ref="refs/heads/$name"
-      git -C "$WT" rev-parse --verify "$ref^{commit}" >/dev/null 2>&1 || return 0
-      current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 0
-      git -C "$WT" merge-base --is-ancestor "$current" "$ref" 2>/dev/null || return 0
-      TEARDOWN_VERIFIED_DEFAULT_HEAD=$(git -C "$WT" rev-parse --verify "$ref^{commit}" 2>/dev/null) || return 0
+      if ! git -C "$WT" rev-parse --verify "$ref^{commit}" >/dev/null 2>&1 \
+        || ! current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) \
+        || ! git -C "$WT" merge-base --is-ancestor "$current" "$ref" 2>/dev/null \
+        || ! TEARDOWN_VERIFIED_DEFAULT_HEAD=$(git -C "$WT" rev-parse --verify "$ref^{commit}" 2>/dev/null); then
+        echo "REFUSED: local-only task $ID is not landed in its intended default branch; preserving its worktree and metadata." >&2
+        return 1
+      fi
     fi
     "$SCRIPT_DIR/fm-terminal-reconcile.sh" local-landed "$ID" "$TEARDOWN_VERIFIED_DEFAULT_HEAD"
     return $?
@@ -1159,12 +1163,20 @@ persist_terminal_landing_proof() {
     [ -n "$branch" ] || branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     pr_is_merged "$branch" || true
   fi
+  if [ -z "$TEARDOWN_VERIFIED_MERGED_PR" ] && [ -z "$TEARDOWN_VERIFIED_DEFAULT_HEAD" ]; then
+    content_in_default || true
+  fi
   if [ -n "$TEARDOWN_VERIFIED_MERGED_PR" ]; then
     "$SCRIPT_DIR/fm-terminal-reconcile.sh" merged "$ID" "$TEARDOWN_VERIFIED_MERGED_PR"
   elif [ -n "$TEARDOWN_VERIFIED_DEFAULT_HEAD" ]; then
     "$SCRIPT_DIR/fm-terminal-reconcile.sh" default-landed "$ID" "$TEARDOWN_VERIFIED_DEFAULT_HEAD"
-  elif [ -n "$TEARDOWN_DISCOVERED_PR" ]; then
-    "$SCRIPT_DIR/fm-terminal-reconcile.sh" custody "$ID" "$TEARDOWN_DISCOVERED_PR"
+  elif fm_pr_poll_artifacts_valid "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+    "$SCRIPT_DIR/fm-terminal-reconcile.sh" custody "$ID" "$FM_PR_REG_URL" || return 1
+    echo "REFUSED: task $ID has an authenticated merge observer but no landing proof; preserving its worktree, metadata, branch, and poll." >&2
+    return 1
+  else
+    echo "REFUSED: task $ID has custody but no authenticated landing proof or merge observer; preserving its worktree, metadata, and branch." >&2
+    return 1
   fi
 }
 

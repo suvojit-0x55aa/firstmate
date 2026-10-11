@@ -3,6 +3,7 @@
 # Usage: fm-terminal-reconcile.sh observe <id> <done|failed> [pr]
 #        fm-terminal-reconcile.sh custody <id> <pr>
 #        fm-terminal-reconcile.sh merged <id> <pr>
+#        fm-terminal-reconcile.sh merge-observed <id> <pr>
 #        fm-terminal-reconcile.sh local-landed <id> <commit>
 #        fm-terminal-reconcile.sh default-landed <id> <commit>
 #        fm-terminal-reconcile.sh retired <id> <normal|discard>
@@ -64,7 +65,8 @@ select_record() {
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
   jq -n --arg id "$id" --arg key "$KEY" --arg incarnation "$incarnation" \
     --arg kind "$(field "$meta" kind)" --arg mode "$(field "$meta" mode)" --arg pr "$(field "$meta" pr)" \
-    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false}' > "$tmp" \
+    --arg captain_keys "$(field "$meta" decision_keys)" \
+    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,captain_keys:$captain_keys}' > "$tmp" \
     && mv "$tmp" "$RECORD"
 }
 select_retired_record() {
@@ -144,16 +146,19 @@ reconcile_record() {
   fi
 }
 mode=${1:-report}
-case "$mode" in -h|--help) sed -n '2,28{s/^# \{0,1\}//;p;}' "$0"; exit 0;; esac
+case "$mode" in -h|--help) sed -n '2,29{s/^# \{0,1\}//;p;}' "$0"; exit 0;; esac
 mkdir -p "$DIR" || exit 1
 [ ! -L "$DIR" ] || exit 1
 fm_lock_acquire_wait "$DIR/.lock" || exit 1
 trap 'fm_lock_release "$DIR/.lock"' EXIT
 case "$mode" in
-  observe|custody|merged|local-landed|default-landed|retired)
+  observe|custody|merged|merge-observed|local-landed|default-landed|retired)
     [ "$#" -ge 3 ] || exit 2
-    if [ "$mode" = merged ]; then
-      select_record "$2" || select_retired_record "$2" "$3" || exit $?
+    if [ "$mode" = merged ] || [ "$mode" = merge-observed ]; then
+      if ! select_record "$2" && ! select_retired_record "$2" "$3"; then
+        [ "$mode" = merge-observed ] && exit 0
+        exit 1
+      fi
     else
       select_record "$2" || exit $?
     fi
@@ -162,7 +167,7 @@ case "$mode" in
         case "$3" in done|failed) ;; *) exit 2;; esac
         put --arg state "$3" --arg pr "${4:-}" '.state=$state | if $pr!="" and .pr!=$pr then .pr=$pr | .merged=false | .custody=false | .backlog=false | .refill=false | .reviewed=false else . end' || exit 1 ;;
       custody) put --arg pr "$3" 'if .pr!=$pr then .pr=$pr | .merged=false | .custody=false | .backlog=false | .refill=false | .reviewed=false else . end' || exit 1 ;;
-      merged) put --arg pr "$3" '.pr=$pr | .merged=true' || exit 1 ;;
+      merged|merge-observed) put --arg pr "$3" '.pr=$pr | .merged=true' || exit 1 ;;
       local-landed|default-landed)
         case "$3" in ''|*[!a-fA-F0-9]*) exit 2;; esac
         [ "${#3}" -eq 40 ] || [ "${#3}" -eq 64 ] || exit 2
@@ -172,7 +177,12 @@ case "$mode" in
           put --arg head "$3" '.default_head=$head' || exit 1
         fi ;;
       retired)
-        case "$3" in normal) put '.retired=true';; discard) put '.retired=true | .discarded=true';; *) exit 2;; esac || exit 1 ;;
+        captain_keys=$(field "$STATE/$2.meta" decision_keys)
+        case "$3" in
+          normal) put --arg keys "$captain_keys" '.retired=true | .captain_keys=$keys' ;;
+          discard) put --arg keys "$captain_keys" '.retired=true | .discarded=true | .captain_keys=$keys' ;;
+          *) exit 2 ;;
+        esac || exit 1 ;;
     esac
     # Producers record facts only; bounded recovery owns backend work.
     ;;
@@ -206,7 +216,21 @@ case "$mode" in
     RECORD="$DIR/$2.json"
     [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || exit 1
     record_matches_current_incarnation || exit 1
-    [ -z "$(status_open_decisions "$STATE/$(jq -r .id "$RECORD").status")" ] || exit 1
+    id=$(jq -r .id "$RECORD") || exit 1
+    [ -z "$(status_open_decisions "$STATE/$id.status")" ] || exit 1
+    captain_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
+    captain_args=()
+    while IFS= read -r captain_key; do
+      [ -n "$captain_key" ] || continue
+      captain_args+=("$captain_key")
+    done <<EOF
+$(printf '%s\n' "$captain_keys" | tr ',' '\n')
+EOF
+    if [ "${#captain_args[@]}" -gt 0 ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+        FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
+        terminal-ready "$id" "${captain_args[@]}" >/dev/null || exit 1
+    fi
     jq -e '.retired and (.discarded != true)' "$RECORD" >/dev/null || exit 1
     delivery_proven || exit 1
     put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \

@@ -8,8 +8,8 @@
 # is already in the up-to-date default branch.
 #
 # Covers three fixes:
-#   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
-#     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
+#   - local-only fork-remote: fork reachability preserves custody but does not
+#     prove that work landed in the intended local default branch.
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
 #     remote after a squash merge deletes the head branch, yet the change is fully in
 #     main. Reachability alone false-refused this common GitHub flow; the check now
@@ -21,10 +21,10 @@
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
+#   (a) local-only + HEAD on a fork remote-tracking branch     -> REFUSE (not landed)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (d) no-mistakes + HEAD on origin without merge observer    -> REFUSE (custody only)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
@@ -301,6 +301,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'OPEN' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
 esac
@@ -308,6 +309,15 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+arm_open_pr_poll() {
+  local case_dir=$1 head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 }
 
 append_pr_meta_for_current_head() {
@@ -589,7 +599,7 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
-test_local_only_fork_remote_allows() {
+test_local_only_fork_remote_refuses_without_default_landing() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
   write_meta "$case_dir" local-only ship
@@ -601,39 +611,51 @@ test_local_only_fork_remote_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
-  pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
+  expect_code 1 "$rc" "fork-allow: fork custody must not replace intended-default landing"
+  assert_present "$case_dir/state/task-x1.meta" "fork-allow: refusal removed task metadata"
+  assert_present "$case_dir/wt" "fork-allow: refusal removed the only locally landable branch"
+  assert_grep "not landed in its intended default branch" "$case_dir/stderr" \
+    "fork-allow: refusal did not name the missing local landing"
+  pass "local-only fork custody preserves the work until intended-default landing"
 }
 
-test_teardown_prompts_tasks_axi_done_when_compatible() {
-  local case_dir out
+test_open_pr_poll_blocks_teardown_until_landing() {
+  local case_dir rc
   case_dir=$(make_case tasks-axi-reminder)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  arm_open_pr_poll "$case_dir"
   add_compatible_tasks_axi "$case_dir"
 
-  out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
-  assert_contains "$out" 'TERMINAL DELIVERY: task-x1' 'teardown lost durable delivery obligation'
-  assert_contains "$out" 'teardown=true' 'teardown did not retain its evidence'
-  assert_contains "$out" 'backlog_done=false' 'open PR was silently marked delivered'
-  assert_not_contains "$out" 'tasks-axi done task-x1' 'teardown offered an unsafe shortcut around merge proof'
-  pass "teardown retains delivery obligation instead of treating custody as completion"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "tasks-axi-reminder: open PR retirement must wait for landing proof"
+  assert_present "$case_dir/state/task-x1.check.sh" 'teardown deleted the authenticated open-PR observer'
+  assert_present "$case_dir/state/task-x1.meta" 'teardown deleted metadata required to authenticate the observer'
+  assert_present "$case_dir/wt" 'teardown deleted the worktree before merge proof'
+  pass "teardown preserves authenticated open-PR custody until landing proof"
 }
 
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
-  local case_dir out
+test_manual_backend_open_pr_poll_blocks_teardown_until_landing() {
+  local case_dir rc
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  arm_open_pr_poll "$case_dir"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   add_compatible_tasks_axi "$case_dir"
 
-  out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  assert_contains "$out" 'TERMINAL DELIVERY: task-x1' 'manual backlog lost durable next action'
-  assert_contains "$out" 'backlog_done=false' 'manual backlog claimed automatic completion'
-  assert_not_contains "$out" 'tasks-axi done' 'manual backend opt-out was ignored'
-  pass "manual backlog retains explicit delivery obligation"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "tasks-axi-manual-optout: open PR retirement must wait for landing proof"
+  assert_present "$case_dir/state/task-x1.check.sh" 'manual backend teardown deleted the merge observer'
+  assert_present "$case_dir/state/task-x1.meta" 'manual backend teardown deleted observer metadata'
+  assert_present "$case_dir/wt" 'manual backend teardown deleted work before merge proof'
+  pass "manual backlog opt-out preserves open-PR custody until landing proof"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -675,11 +697,11 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
-test_no_mistakes_origin_remote_allows() {
+test_no_mistakes_remote_custody_without_observer_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -689,11 +711,12 @@ test_no_mistakes_origin_remote_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
-  grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
-    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  expect_code 1 "$rc" "nm-origin: remote reachability without a merge observer must refuse"
+  assert_present "$case_dir/state/task-x1.meta" "nm-origin: refusal removed task metadata"
+  assert_present "$case_dir/wt" "nm-origin: refusal removed remotely-custodied work"
+  assert_grep "no authenticated landing proof or merge observer" "$case_dir/stderr" \
+    "nm-origin: refusal did not name the missing observer"
+  pass "remote custody without an authenticated merge observer refuses teardown"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -792,7 +815,7 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 }
 
 test_no_pr_recorded_open_pr_retains_reconciliation_custody() {
-  local case_dir rc head report
+  local case_dir rc head
   case_dir=$(make_case no-pr-open-custody)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
@@ -806,18 +829,11 @@ test_no_pr_recorded_open_pr_retains_reconciliation_custody() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "no-pr-open-custody: remotely reachable open PR should retain safe teardown custody"
-  report=$(cat "$case_dir/stdout")
-  assert_contains "$report" 'pr=https://github.com/example/repo/pull/7 merge_proven=false' \
-    'no-pr-open-custody: teardown lost the discovered open PR'
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
-    FM_CONFIG_OVERRIDE="$case_dir/config" \
-    "$ROOT/bin/fm-terminal-reconcile.sh" merged task-x1 https://github.com/example/repo/pull/7
-  report=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
-    FM_CONFIG_OVERRIDE="$case_dir/config" "$ROOT/bin/fm-terminal-reconcile.sh" report)
-  assert_contains "$report" 'merge_proven=true' \
-    'no-pr-open-custody: retired receipt could not accept later verified merge proof'
-  pass "open PR custody remains reconcilable after metadata retirement"
+  expect_code 1 "$rc" "no-pr-open-custody: discovered open PR without an armed observer must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    'no-pr-open-custody: refusal removed the metadata needed to arm a poll'
+  assert_present "$case_dir/wt" 'no-pr-open-custody: refusal removed the worktree before merge proof'
+  pass "discovered open PR without an authenticated observer preserves its landing path"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
@@ -2646,12 +2662,12 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
-test_local_only_fork_remote_allows
-test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+test_local_only_fork_remote_refuses_without_default_landing
+test_open_pr_poll_blocks_teardown_until_landing
+test_manual_backend_open_pr_poll_blocks_teardown_until_landing
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
+test_no_mistakes_remote_custody_without_observer_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes

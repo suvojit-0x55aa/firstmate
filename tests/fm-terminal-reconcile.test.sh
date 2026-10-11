@@ -115,6 +115,30 @@ manual_held_key=$(jq -r 'select(.id=="manualheld")|.key' "$FM_HOME/state/termina
 "$owner" manual-complete "$manual_held_key" && fail 'manual completion bypassed a captain-held decision'
 assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: manualheld')" 'backlog_done=false' 'captain-held manual receipt was completed'
 pass 'manual completion preserves captain-held decisions'
+make_task transferred
+tx add transferred-call 'Choose transferred delivery' --json >/dev/null
+tx hold transferred-call --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+printf '%s\n' 'decisions_reviewed=1' 'decision_keys=transferred-call' >> "$FM_HOME/state/transferred.meta"
+printf '%s\n' \
+  'needs-decision [key=delivery]: choose transferred delivery' \
+  'captain-held [key=delivery]: tracked by transferred-call' \
+  > "$FM_HOME/state/transferred.status"
+"$owner" merged transferred https://github.com/o/r/pull/1
+"$owner" retired transferred normal
+rm "$FM_HOME/state/transferred.meta"
+transferred_key=$(jq -r 'select(.id=="transferred")|.key' "$FM_HOME/state/terminal-delivery/"*.json)
+tx 'done' transferred --pr https://github.com/o/r/pull/1 --no-prune --json >/dev/null
+"$owner" manual-complete "$transferred_key" && fail 'manual completion bypassed a transferred captain hold'
+tx 'done' transferred-call --no-prune --json >/dev/null
+"$owner" manual-complete "$transferred_key" && fail 'out-of-band close masqueraded as a recorded captain answer'
+printf '%s\n' 'Captain chose the transferred delivery.' > "$FM_HOME/transferred-answer.txt"
+FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+  FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+  answer transferred-call --decision-file "$FM_HOME/transferred-answer.txt" >/dev/null
+"$owner" manual-complete "$transferred_key"
+assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: transferred')" 'backlog_done=true' \
+  'recorded captain answer did not release manual completion'
+pass 'manual completion requires the transferred captain hold actual answer'
 make_task manualopen
 "$owner" retired manualopen normal
 manual_open_key=$(jq -r 'select(.id=="manualopen")|.key' "$FM_HOME/state/terminal-delivery/"*.json)

@@ -28,6 +28,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh terminal-ready <origin-id> [<captain-task-id>...]
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -867,6 +868,28 @@ EOF
   printf 'verified: %s captain-call inventory\n' "$origin"
 }
 
+command_terminal_ready() {
+  local origin=${1:-} id show state hold_kind body
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  shift
+  require_tasks_axi
+  if show=$(task_show "$origin"); then
+    state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    [ "$state" = "done" ] || [ "$hold_kind" != captain ] || return 1
+  fi
+  for id in "$@"; do
+    validate_slug captain-task-id "$id"
+    show=$(task_show "$id") || return 1
+    state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    body=$(show_field "$show" body)
+    [ "$state" = "done" ] || [ "$hold_kind" != captain ] || return 1
+    body_has_resolution_record "$body" || return 1
+  done
+}
+
 # --- record divergence ------------------------------------------------------
 #
 # A captain call can be written down twice, and until now nothing said when
@@ -995,6 +1018,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
+  terminal-ready) shift; command_terminal_ready "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
