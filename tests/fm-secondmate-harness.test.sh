@@ -890,7 +890,7 @@ test_spawn_explicit_harness_uses_explicit_profile_axes() {
 }
 
 test_spawned_secondmate_uses_its_harness_supervision_model() {
-  local harness expected w sm launchlog launch fakebin out
+  local harness w sm launchlog launch fakebin out
   for harness in codex claude; do
     w="$TMP_ROOT/spawn-supervision-model-$harness"
     sm="$w/sm"
@@ -915,9 +915,10 @@ SH
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
       codex)
-        expected='WATCHER DOWN - SUPERVISION IS OFF'
-        assert_contains "$out" "$expected" \
-          "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
+        assert_contains "$launch" "FM_SUPERVISION_MODEL=stop-managed" \
+          "Codex secondmate launch did not carry its synchronous Stop supervision model"
+        [ -z "$out" ] \
+          || fail "Codex secondmate with a fresh post-Stop beacon should stay silent, got: $out"
         ;;
       claude)
         [ -z "$out" ] \

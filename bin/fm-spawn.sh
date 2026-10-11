@@ -2822,11 +2822,12 @@ fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
-  # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
-  # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
-  # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
+  # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): the launch
+  # carries the secondmate harness's own continuity model rather than inheriting
+  # the primary's process ancestry.
   case "$HARNESS" in
     claude|cursor) supervision_model=autoarm ;;
+    codex) supervision_model=stop-managed ;;
     *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off

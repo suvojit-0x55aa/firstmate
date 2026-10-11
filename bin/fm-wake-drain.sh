@@ -162,6 +162,8 @@ esac
 # Reuse fm-guard.sh's model-aware alarm and FM_GUARD_GRACE instead of duplicating
 # its supervision verdict. Under Claude's between-turns auto-arm model, a normal
 # fire leaves a recent beacon well inside grace and stays silent mid-turn. Under
+# Codex's Stop-managed model, a completed synchronous Stop leaves the same fresh
+# beacon while the native continuation handles its durable wake. Under
 # the Pi extension model, a fresh beacon also stays silent during a genuinely
 # unheld-lock hand-off only while the live session proves extension ownership.
 # Persistent-watcher models still require the live identity-matched watcher.

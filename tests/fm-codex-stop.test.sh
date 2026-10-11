@@ -89,6 +89,11 @@ STOP_PID=
 expect_code 2 "$rc" 'actionable return must request native continuation'
 assert_contains "$(cat "$dir/out")" 'signal:' 'post-Stop event was not delivered'
 assert_grep 'article.status' "$dir/state/.wake-queue" 'Stop consumed the durable event before handling'
+drain=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
+  PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+  "$ROOT/bin/fm-wake-drain.sh" 2>&1)
+assert_not_contains "$drain" 'WATCHER DOWN - SUPERVISION IS OFF' \
+  'public wake drain treated the fresh post-Stop handling window as a supervision lapse'
 pass 'an event after Stop reaches continuation once; duplicate Stop preserves singleton ownership'
 
 dir=$(make_home replacement-contention)

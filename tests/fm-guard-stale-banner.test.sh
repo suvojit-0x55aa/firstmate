@@ -74,6 +74,18 @@ run_guard_case_autoarm() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+# The Codex synchronous Stop model: Stop removes its completed watcher before
+# returning the native continuation, so a fresh beacon is healthy while that
+# continuation handles the durable wake.
+run_guard_case_stop_managed() {
+  local dir=$1
+  FM_ROOT_OVERRIDE="$(case_root "$dir")" \
+    FM_HOME="$(case_home "$dir")" \
+    FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=stop-managed \
+    "$ROOT/bin/fm-guard.sh" 2>&1
+}
+
 # The Pi extension model: .pi/extensions/fm-primary-pi-watch.ts tears the watcher
 # down on every actionable wake and spawns the replacement itself, so the lock is
 # legitimately unheld during a hand-off.
@@ -381,6 +393,27 @@ test_autoarm_stale_episode_is_stable() {
   assert_contains "$out2" "full banner already printed this episode" \
     "second auto-arm stale call did not print the concise reminder"
   pass "fm-guard stale banner: auto-arm stale episode stays one episode across calls"
+}
+
+test_stop_managed_fresh_beacon_without_watcher_is_healthy() {
+  local dir out
+  dir=$(make_guard_case stop-managed-fresh)
+  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  out=$(run_guard_case_stop_managed "$dir")
+  [ -z "$out" ] \
+    || fail "Stop-managed model with a fresh beacon and no live watcher must stay silent, got: $out"
+  pass "fm-guard stale banner: Stop-managed handling stays healthy after watcher cleanup"
+}
+
+test_stop_managed_stale_beacon_alarms_with_correct_reason() {
+  local dir out
+  dir=$(make_guard_case stop-managed-stale)
+  out=$(run_guard_case_stop_managed "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "Stop-managed model with an absent beacon must alarm: $out"
+  assert_contains "$out" "no watcher has a fresh beacon" \
+    "Stop-managed stale-beacon banner must name the stale-beacon reason"
+  pass "fm-guard stale banner: Stop-managed model alarms after grace"
 }
 
 test_persistent_no_watcher_banner_names_missing_process() {
@@ -695,6 +728,8 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
+test_stop_managed_fresh_beacon_without_watcher_is_healthy
+test_stop_managed_stale_beacon_alarms_with_correct_reason
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
 test_fresh_beacon_without_live_watcher_stays_alarm
