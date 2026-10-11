@@ -1122,6 +1122,10 @@ run_orca_term_mutation_case() {
   marker="$TMP_ROOT/term-$mutation-finished"
   ready="$TMP_ROOT/term-$mutation-ready"
   fm_git_worktree "$proj" "$wt" "fm/$id"
+  if [ "$mutation" = pushed ]; then
+    git init -q --bare "$TMP_ROOT/term-$mutation-fork.git"
+    git -C "$proj" remote add fork "$TMP_ROOT/term-$mutation-fork.git"
+  fi
   scan_wt=$(cd "$wt" && pwd -P)
   mkdir -p "$data/$id" "$state" "$config"
   printf '# Backlog\n\n## In flight\n\n- [ ] %s - TERM mutation fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
@@ -1142,13 +1146,21 @@ run_orca_term_mutation_case() {
 set -u
 cd "${FM_ORCA_TERM_WT:?}"
 on_term() {
-  if [ "${FM_ORCA_TERM_MUTATION:?}" = commit ]; then
-    printf 'committed after TERM\n' > term-commit.txt
-    git add term-commit.txt
-    git -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'commit after TERM'
-  else
-    printf 'dirty after TERM\n' > term-dirty.txt
-  fi
+  case "${FM_ORCA_TERM_MUTATION:?}" in
+    commit)
+      printf 'committed after TERM\n' > term-commit.txt
+      git add term-commit.txt
+      git -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'commit after TERM'
+      ;;
+    pushed)
+      printf 'pushed after TERM\n' > term-pushed.txt
+      git add term-pushed.txt
+      git -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'pushed after TERM'
+      git push -q fork HEAD:refs/heads/fm/term-pushed
+      git fetch -q fork
+      ;;
+    *) printf 'dirty after TERM\n' > term-dirty.txt ;;
+  esac
   : > "${FM_ORCA_TERM_MARKER:?}"
   exit 0
 }
@@ -1200,11 +1212,18 @@ SH
     "Orca TERM $mutation teardown removed the changed worktree"
   assert_present "$state/$id.meta" "Orca TERM $mutation teardown removed task metadata"
   assert_present "$wt" "Orca TERM $mutation teardown removed the changed worktree path"
+  if [ "$mutation" = pushed ]; then
+    git -C "$wt" merge-base --is-ancestor HEAD refs/remotes/fork/fm/term-pushed \
+      || fail "Orca TERM pushed fixture did not retain H2 in remote custody"
+    assert_contains "$out" "not landed in its intended default branch" \
+      "Orca TERM pushed refusal did not require current landing proof"
+  fi
 }
 
 test_orca_rechecks_safety_after_process_cleanup() {
   run_orca_term_mutation_case dirty
   run_orca_term_mutation_case commit
+  run_orca_term_mutation_case pushed
   pass "fm-teardown.sh backend=orca: post-TERM mutations stop destructive teardown"
 }
 
@@ -1401,6 +1420,8 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   config="$TMP_ROOT/ship-match-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  printf '# Backlog\n\n## In flight\n\n- [ ] %s - Exact landed Orca fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-match" "worktree=$wt" "project=$proj" \
@@ -1408,9 +1429,10 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
     "backend=orca" "orca_worktree_id=wt-ship-match" \
     "decisions_reviewed=1" "decision_keys="
   orca_case ship-match
-  for response in 1 2 3 5; do
-    printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/$response.out"
-  done
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/worktree.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1955,6 +1977,7 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     test_orca_cleanup_refusals_precede_destructive_teardown
     test_teardown_retries_after_orca_remove_failures
     test_orca_rechecks_safety_after_process_cleanup
+    test_ship_teardown_removes_orca_worktree_when_id_path_matches
     exit
     ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;

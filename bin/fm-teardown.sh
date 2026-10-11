@@ -5,12 +5,11 @@
 # tasks, then replay durable delivery obligations through fm-terminal-reconcile.sh
 # (secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
-# hard-resets/removes the worktree and kills its processes. Work has landed when it is
-# reachable from any remote-tracking branch (a fork counts as a remote, so
-# upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
-# normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# hard-resets/removes the worktree and kills its processes. Remote reachability,
+# including a pushed fork branch, proves custody only and never authorizes teardown.
+# Work has landed when its PR is merged and GitHub reports a PR head that contains
+# the current local work, or its content is already present in the up-to-date
+# default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
@@ -697,6 +696,7 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
 TEARDOWN_VERIFIED_MERGED_PR=
 TEARDOWN_VERIFIED_DEFAULT_HEAD=
+TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=
 PUBLIC_FOLLOWUP_HOME=$FM_HOME
 PUBLIC_FOLLOWUP_STATE=$STATE
 PUBLIC_FOLLOWUP_WORK_HOME=main
@@ -1328,6 +1328,10 @@ teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
   local out lock attempt=0 max_retries lock_desc
 
+  if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+    echo "teardown: $label return aborted because current landing and safety checks failed" >&2
+    return 1
+  fi
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
   if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
@@ -1355,6 +1359,10 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
+    if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
+      echo "teardown: $label return aborted before retry because current landing and safety checks failed" >&2
+      return 1
+    fi
     if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
@@ -1443,7 +1451,7 @@ validate_worktree_teardown_safety() {
       echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
       [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or get the captain's explicit OK to discard, then --force; pushing elsewhere preserves custody but does not land the work." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
@@ -1460,10 +1468,33 @@ validate_worktree_teardown_safety() {
     if ! work_is_landed "$branch"; then
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
-      echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
+      echo "Land the PR or merge its content into the default branch, or get the captain's explicit OK to discard, then --force; pushing the branch preserves custody but does not authorize teardown." >&2
       return 1
     fi
   fi
+}
+
+validate_current_worktree_removal() {
+  local safety_rc branch
+  if validate_worktree_teardown_safety; then
+    :
+  else
+    safety_rc=$?
+    if [ "$safety_rc" -eq "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ]; then
+      cleanup_stale_lock_for_safety_check "$WT" || return 1
+      validate_worktree_teardown_safety || return 1
+    else
+      return 1
+    fi
+  fi
+  [ "$KIND" = ship ] && [ "$FORCE" != --force ] || return 0
+  if [ -z "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    [ "$branch" = HEAD ] || TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+  fi
+  TEARDOWN_VERIFIED_MERGED_PR=
+  TEARDOWN_VERIFIED_DEFAULT_HEAD=
+  persist_terminal_landing_proof
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in
@@ -2790,9 +2821,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
-    validate_worktree_teardown_safety || exit 1
-  fi
+  validate_current_worktree_removal || exit 1
   revalidate_orca_teardown_identity || exit 1
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2813,9 +2842,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fi
   if [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" != 1 ]; then
-    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
-      validate_worktree_teardown_safety || exit 1
-    fi
+    validate_current_worktree_removal || exit 1
     revalidate_orca_teardown_identity || exit 1
     fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" || {
       echo "error: Orca worktree removal failed for $ORCA_WORKTREE_ID; preserving task $ID metadata for retry" >&2
@@ -2823,6 +2850,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     }
   fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  validate_current_worktree_removal || exit 1
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
@@ -2836,10 +2864,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
-  fi
+  post_lock_cleanup_check=validate_current_worktree_removal
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1

@@ -2,10 +2,9 @@
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# treehouse return hard-resets the worktree. Remote reachability preserves custody
+# only. The teardown contract in bin/fm-teardown.sh requires current merged-PR or
+# intended-default proof before removal.
 #
 # Covers three fixes:
 #   - local-only fork-remote: fork reachability preserves custody but does not
@@ -681,6 +680,8 @@ test_local_only_merged_to_local_main_allows() {
   local case_dir rc
   case_dir=$(make_case merged-main)
   write_meta "$case_dir" local-only ship
+  printf '# Backlog\n\n## In flight\n\n- [ ] task-x1 - Exact landed treehouse fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+    > "$case_dir/data/backlog.md"
   wt_commit "$case_dir" "merged work"
   # Fast-forward the project's main to the worktree's HEAD commit so HEAD is
   # reachable from main. update-ref works whether or not main is checked out,
@@ -2969,6 +2970,91 @@ test_persisted_landing_proof_revalidates_existing_worktree() {
   pass "persisted landing proof never replaces current worktree validation"
 }
 
+test_term_pushed_followup_requires_current_landing() {
+  local case_dir landed_head current_head scan_wt marker ready pid i rc=0 receipt
+  case_dir=$(make_case term-pushed-followup)
+  write_meta "$case_dir" local-only ship
+  printf '# Backlog\n\n## In flight\n\n- [ ] task-x1 - TERM pushed treehouse fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+    > "$case_dir/data/backlog.md"
+  wt_commit_file "$case_dir" landed.txt landed "initial landed work"
+  landed_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$landed_head"
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  scan_wt=$(cd "$case_dir/wt" && pwd -P)
+  marker="$case_dir/term-finished"
+  ready="$case_dir/term-ready"
+  cat > "$case_dir/term-worker" <<'SH'
+#!/usr/bin/env bash
+set -u
+cd "${FM_TEST_TERM_WT:?}"
+on_term() {
+  printf 'pushed after TERM\n' > term-pushed.txt
+  git add term-pushed.txt
+  git -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'pushed after TERM'
+  git push -q fork HEAD:refs/heads/fm/task-x1
+  git fetch -q fork
+  : > "${FM_TEST_TERM_MARKER:?}"
+  exit 0
+}
+trap on_term TERM
+: > "${FM_TEST_TERM_READY:?}"
+while :; do sleep 0.1; done
+SH
+  chmod +x "$case_dir/term-worker"
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+if [ ! -f "${FM_TEST_TERM_MARKER:?}" ]; then
+  printf 'p%s\nfcwd\nn%s\n' "${FM_TEST_TERM_PID:?}" "${FM_TEST_TERM_SCAN_WT:?}"
+fi
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "${FM_TEST_TREEHOUSE_CALLS:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
+  FM_TEST_TERM_WT="$case_dir/wt" FM_TEST_TERM_MARKER="$marker" FM_TEST_TERM_READY="$ready" \
+    "$case_dir/term-worker" &
+  pid=$!
+  i=0
+  while [ ! -f "$ready" ] && [ "$i" -lt 50 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "term-pushed-followup: worker did not become ready"
+
+  FM_TEST_TERM_PID="$pid" FM_TEST_TERM_SCAN_WT="$scan_wt" FM_TEST_TERM_MARKER="$marker" \
+  FM_TEST_TREEHOUSE_CALLS="$case_dir/treehouse.calls" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+
+  [ -f "$marker" ] || fail "term-pushed-followup: TERM handler did not push follow-up work: $(cat "$case_dir/stderr")"
+  expect_code 1 "$rc" "term-pushed-followup: pushed custody must not replace current landing"
+  current_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  [ "$current_head" != "$landed_head" ] || fail "term-pushed-followup: HEAD did not advance"
+  git -C "$case_dir/wt" merge-base --is-ancestor "$current_head" refs/remotes/fork/fm/task-x1 \
+    || fail "term-pushed-followup: fixture did not preserve H2 in fork custody"
+  assert_grep "not landed in its intended default branch" "$case_dir/stderr" \
+    "term-pushed-followup: refusal did not require current landing proof"
+  assert_no_grep "teardown task-x1 complete" "$case_dir/stdout" \
+    "term-pushed-followup: teardown reported false success"
+  assert_absent "$case_dir/treehouse.calls" \
+    "term-pushed-followup: teardown returned the worktree after H2 changed landing identity"
+  assert_present "$case_dir/wt" "term-pushed-followup: teardown removed the H2 worktree"
+  assert_present "$case_dir/state/task-x1.meta" "term-pushed-followup: teardown removed custody metadata"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  [ "$(jq -r .local_head "$receipt")" = "$landed_head" ] \
+    || fail "term-pushed-followup: refusal replaced authenticated H1 proof with H2 custody"
+  [ "$(jq -r .retired "$receipt")" != true ] \
+    || fail "term-pushed-followup: refusal recorded false retirement"
+  pass "TERM-pushed follow-up custody cannot replace current landing proof"
+}
+
 test_forced_discard_refuses_unstageable_inventory_before_removal() {
   local case_dir rc=0
   case_dir=$(make_case discard-stage-refusal)
@@ -3059,6 +3145,11 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
     test_forced_discard_replays_staged_inventory_after_interruption
     exit
     ;;
+  current-landing-removal)
+    test_term_pushed_followup_requires_current_landing
+    test_local_only_merged_to_local_main_allows
+    exit
+    ;;
   *) fail "unknown focused teardown test: $FM_TEARDOWN_FOCUSED_TEST" ;;
 esac
 
@@ -3126,5 +3217,6 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_persisted_landing_proof_replays_after_worktree_return
 test_persisted_landing_proof_rejects_replacement_incarnation
 test_persisted_landing_proof_revalidates_existing_worktree
+test_term_pushed_followup_requires_current_landing
 test_forced_discard_refuses_unstageable_inventory_before_removal
 test_forced_discard_replays_staged_inventory_after_interruption
