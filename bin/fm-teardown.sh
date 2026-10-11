@@ -689,6 +689,7 @@ if [ -z "$BUSY_GEN" ]; then
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+ORCA_WORKTREE_CONFIRMED_ABSENT=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -1806,6 +1807,20 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
+require_orca_worktree_absent() {
+  local worktree_id=$1 resolved rc
+  if resolved=$(fm_backend_worktree_path orca "$worktree_id"); then
+    echo "REFUSED: Orca worktree id $worktree_id still resolves to ${resolved:-<missing>}; preserving metadata." >&2
+    echo "Cannot inspect the recorded absent worktree path without risking removal of redirected or reused work." >&2
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 3 ] && return 0
+  echo "REFUSED: cannot prove Orca worktree id $worktree_id is absent; preserving metadata." >&2
+  return 1
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -2648,11 +2663,17 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] \
+  && [ ! -e "$WT" ] && [ ! -L "$WT" ]; then
+  require_orca_worktree_absent "$ORCA_WORKTREE_ID" || exit 1
+  ORCA_WORKTREE_CONFIRMED_ABSENT=1
+fi
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if inspectable_git_worktree "$WT"; then
     require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
-  elif [ ! -e "$WT" ] && [ ! -L "$WT" ] \
+  elif [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" = 1 ] \
     && [ -d "$STATE/terminal-delivery" ] \
     && "$SCRIPT_DIR/fm-terminal-reconcile.sh" landing-proven "$ID"; then
     :
@@ -2719,7 +2740,7 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
+  if [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" != 1 ] && [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
@@ -2735,7 +2756,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  if [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" != 1 ]; then
+    fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then

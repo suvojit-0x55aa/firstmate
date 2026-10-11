@@ -887,6 +887,7 @@ test_teardown_removes_orca_worktree_when_path_missing() {
     "backend=orca" "orca_worktree_id=wt-missing-path" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-path
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -897,10 +898,10 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   expect_code 0 "$rc" "Orca teardown should release helpers even when the path is absent"$'\n'"$out"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-missing-path'$'\x1f''--json' \
     "teardown did not close the recorded Orca terminal when the path was absent"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-missing-path'$'\x1f''--force'$'\x1f''--json' \
-    "teardown did not remove the recorded Orca worktree when the path was absent"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "teardown attempted to remove an Orca worktree already proven absent"
   assert_absent "$state/$id.meta" "successful helper cleanup should remove task metadata"
-  pass "fm-teardown.sh backend=orca: releases terminal/worktree when path is absent"
+  pass "fm-teardown.sh backend=orca: retires an authoritatively absent worktree"
 }
 
 test_teardown_preserves_metadata_when_orca_remove_error_json() {
@@ -911,6 +912,7 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   data="$TMP_ROOT/remove-error-data"
   state="$TMP_ROOT/remove-error-state"
   config="$TMP_ROOT/remove-error-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
@@ -920,8 +922,9 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
     "backend=orca" "orca_worktree_id=wt-remove-error" \
     "decisions_reviewed=1" "decision_keys="
   orca_case remove-error-teardown
-  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
-  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-remove-error","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/3.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -981,6 +984,7 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
     "backend=orca" "orca_worktree_id=wt-missing-ship" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-ship-path
+  printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"runtime unavailable"}}\n' > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -989,15 +993,20 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "Orca ship teardown should refuse a missing worktree path"
-  assert_contains "$out" "no inspectable git worktree" \
-    "Orca ship teardown should explain the fail-closed worktree requirement"
-  [ ! -s "$LOG" ] || fail "refused Orca ship teardown should not close terminals or remove worktrees"
+  assert_contains "$out" "cannot prove Orca worktree id wt-missing-ship is absent" \
+    "Orca ship teardown should explain the ambiguous control-plane state"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show' \
+    "refused Orca ship teardown did not consult the recorded worktree id"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "refused Orca ship teardown closed its terminal"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "refused Orca ship teardown removed a worktree"
   assert_present "$state/$id.meta" "refused Orca ship teardown should preserve metadata"
   pass "fm-teardown.sh backend=orca: ship teardown fails closed when worktree path is missing"
 }
 
 run_ship_teardown_orca_landing_replay_case() {
-  local variant=$1 proj wt data state config id out rc=0 neutral head receipt
+  local variant=$1 proj wt other_wt data state config id out rc=0 neutral head receipt
   id="orcalanding${variant}z6"
   proj="$TMP_ROOT/landing-$variant-project"
   wt="$TMP_ROOT/landing-$variant-wt"
@@ -1023,6 +1032,26 @@ run_ship_teardown_orca_landing_replay_case() {
   fi
   git -C "$proj" worktree remove --force "$wt"
   orca_case "landing-$variant"
+  case "$variant" in
+    exact|replacement)
+      printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
+      ;;
+    redirected)
+      other_wt="$TMP_ROOT/landing-$variant-redirected"
+      mkdir -p "$other_wt"
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-landing-%s","path":"%s"}}}\n' \
+        "$variant" "$other_wt" > "$RESP/1.out"
+      ;;
+    reused)
+      other_wt="$TMP_ROOT/landing-$variant-reused"
+      git -C "$proj" worktree add --quiet -b "fm/$id-reused" "$other_wt"
+      printf '{"ok":true,"result":{"worktree":{"id":"wt-landing-%s","path":"%s"}}}\n' \
+        "$variant" "$other_wt" > "$RESP/1.out"
+      ;;
+    unavailable)
+      printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"runtime unavailable"}}\n' > "$RESP/1.out"
+      ;;
+  esac
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
@@ -1031,20 +1060,35 @@ run_ship_teardown_orca_landing_replay_case() {
   set -e
   if [ "$variant" = exact ]; then
     expect_code 0 "$rc" "Orca exact landing-proof replay should complete"$'\n'"$out"
-    assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-landing-exact' \
-      "Orca exact landing-proof replay did not retire the recorded worktree id"
+    assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show'$'\x1f''--worktree'$'\x1f''id:wt-landing-exact' \
+      "Orca exact landing-proof replay did not prove the recorded worktree id absent"
+    assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+      "Orca exact landing-proof replay tried to remove an already absent worktree id"
     assert_absent "$state/$id.meta" "Orca exact landing-proof replay retained task metadata"
     jq -e '.retired and (.discarded != true)' "$receipt" >/dev/null \
       || fail "Orca exact landing-proof replay did not finish receipt retirement"
   else
-    [ "$rc" -ne 0 ] || fail "Orca replacement incarnation reused stale landing proof"
-    assert_contains "$out" "no inspectable git worktree" \
-      "Orca replacement refusal did not retain the missing-worktree safety boundary"
+    [ "$rc" -ne 0 ] || fail "Orca $variant landing replay accepted unsafe worktree identity"
+    case "$variant" in
+      replacement)
+        assert_contains "$out" "no inspectable git worktree" \
+          "Orca replacement refusal did not retain the missing-worktree safety boundary"
+        ;;
+      redirected|reused)
+        assert_contains "$out" "still resolves to" \
+          "Orca $variant refusal did not identify the live control-plane worktree"
+        assert_present "$other_wt" "Orca $variant refusal removed the unrelated worktree"
+        ;;
+      unavailable)
+        assert_contains "$out" "cannot prove Orca worktree id wt-landing-unavailable is absent" \
+          "Orca unavailable refusal did not fail closed on ambiguous control-plane state"
+        ;;
+    esac
     assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
-      "Orca replacement refusal closed the endpoint using stale proof"
+      "Orca $variant refusal closed the endpoint"
     assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
-      "Orca replacement refusal removed a worktree using stale proof"
-    assert_present "$state/$id.meta" "Orca replacement refusal removed task metadata"
+      "Orca $variant refusal removed a worktree"
+    assert_present "$state/$id.meta" "Orca $variant refusal removed task metadata"
   fi
 }
 
@@ -1056,6 +1100,21 @@ test_ship_teardown_replays_exact_orca_landing_proof() {
 test_ship_teardown_rejects_replacement_orca_landing_proof() {
   run_ship_teardown_orca_landing_replay_case replacement
   pass "fm-teardown.sh backend=orca: replacement incarnation rejects stale landing proof"
+}
+
+test_ship_teardown_rejects_redirected_orca_landing_replay() {
+  run_ship_teardown_orca_landing_replay_case redirected
+  pass "fm-teardown.sh backend=orca: absent-path replay rejects redirected ids"
+}
+
+test_ship_teardown_rejects_reused_orca_landing_replay() {
+  run_ship_teardown_orca_landing_replay_case reused
+  pass "fm-teardown.sh backend=orca: absent-path replay rejects reused ids"
+}
+
+test_ship_teardown_rejects_unavailable_orca_landing_replay() {
+  run_ship_teardown_orca_landing_replay_case unavailable
+  pass "fm-teardown.sh backend=orca: absent-path replay rejects unavailable control planes"
 }
 
 test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
@@ -1072,7 +1131,8 @@ test_ship_teardown_removes_orca_worktree_when_id_path_matches() {
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-ship-match" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
-    "backend=orca" "orca_worktree_id=wt-ship-match"
+    "backend=orca" "orca_worktree_id=wt-ship-match" \
+    "decisions_reviewed=1" "decision_keys="
   orca_case ship-match
   printf '{"ok":true,"result":{"worktree":{"id":"wt-ship-match","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
@@ -1372,6 +1432,10 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     test_ship_teardown_refuses_orca_missing_worktree_path
     test_ship_teardown_replays_exact_orca_landing_proof
     test_ship_teardown_rejects_replacement_orca_landing_proof
+    test_ship_teardown_rejects_redirected_orca_landing_replay
+    test_ship_teardown_rejects_reused_orca_landing_replay
+    test_ship_teardown_rejects_unavailable_orca_landing_replay
+    test_ship_teardown_removes_orca_worktree_when_id_path_matches
     exit
     ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;
@@ -1422,6 +1486,9 @@ test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_replays_exact_orca_landing_proof
 test_ship_teardown_rejects_replacement_orca_landing_proof
+test_ship_teardown_rejects_redirected_orca_landing_replay
+test_ship_teardown_rejects_reused_orca_landing_replay
+test_ship_teardown_rejects_unavailable_orca_landing_replay
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch

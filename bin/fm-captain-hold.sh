@@ -432,10 +432,13 @@ terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <ori
   release_receipt=$(recorded_release_receipt "$1" || true)
   [ -n "$release_receipt" ] || return 1
   if [ "$release_receipt" = none ]; then
-    [ "$4" != 1 ] || return 0
     release_incarnation=$(recorded_release_incarnation "$1" || true)
     [ "${#release_incarnation}" -eq 64 ] || return 1
     case "$release_incarnation" in *[!0-9a-f]*) return 1 ;; esac
+    if [ "$4" = 1 ]; then
+      [ -n "$3" ] && [ "$release_incarnation" = "$3" ]
+      return
+    fi
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
       completed-exact "$5" "$release_incarnation" >/dev/null 2>&1

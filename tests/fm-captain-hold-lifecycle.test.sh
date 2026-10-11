@@ -471,7 +471,8 @@ EOF
 }
 
 test_release_uses_existing_terminal_evidence_only() {
-  local home id show key record later_id old_key new_key
+  local home id show key record replacement_id replacement_release_key replacement_key replacement_record
+  local later_id old_key new_key
   home=$(make_home release-terminal-evidence)
   id=sample-preterminal-release
   tasks_in "$home" add "$id" "Ship after a live captain gate" \
@@ -509,6 +510,36 @@ test_release_uses_existing_terminal_evidence_only() {
   run_terminal "$home" refill-reviewed "$key"
   jq -e '.backlog == true and .refill == true and .reviewed == true' "$record" >/dev/null \
     || fail "preterminal release refill acknowledgement did not replay safely"
+
+  replacement_id=sample-preterminal-replacement
+  tasks_in "$home" add "$replacement_id" "Reject another incarnation after a live captain gate" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the preterminal replacement fixture"
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/3\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$replacement_id" > "$home/state/$replacement_id.meta"
+  run_captain "$home" hold "$replacement_id" --reason "captain replacement release pending" >/dev/null \
+    || fail "could not hold the preterminal replacement fixture"
+  printf 'Captain released only this live incarnation.\n' > "$home/replacement-answer.txt"
+  run_captain "$home" answer "$replacement_id" \
+    --decision-file "$home/replacement-answer.txt" --release >/dev/null \
+    || fail "could not release the original preterminal incarnation"
+  replacement_release_key=$(run_terminal "$home" current-incarnation "$replacement_id") \
+    || fail "terminal owner did not expose the released future incarnation"
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/3\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$replacement_id" > "$home/state/$replacement_id.meta"
+  run_terminal "$home" merged "$replacement_id" https://github.com/o/r/pull/3
+  replacement_key=$(run_terminal "$home" receipt-key "$replacement_id") \
+    || fail "terminal owner did not authenticate the replacement receipt"
+  [ "$replacement_key" != "$replacement_release_key" ] \
+    || fail "replacement fixture reused the released incarnation identity"
+  run_terminal "$home" retired "$replacement_id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  replacement_record="$home/state/terminal-delivery/$replacement_key.json"
+  jq -e '.backlog != true and .refill != true' "$replacement_record" >/dev/null \
+    || fail "replacement incarnation borrowed a preterminal captain release"
+  assert_contains "$(tasks_in "$home" show "$replacement_id" --full)" 'state: in_flight' \
+    "replacement incarnation advanced backlog using another incarnation's release"
 
   later_id=sample-postreceipt-release
   tasks_in "$home" add "$later_id" "Require a successor after terminal evidence" \

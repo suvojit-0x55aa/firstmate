@@ -59,6 +59,8 @@ const fs = require("fs");
 const field = process.argv[1];
 const data = JSON.parse(fs.readFileSync(0, "utf8"));
 if (data.ok === false) {
+  const code = data.error && data.error.code;
+  if (field === "worktree-path" && code === "worktree_not_found") process.exit(3);
   const msg = data.error && (data.error.message || data.error.code);
   if (msg) console.error(msg);
   process.exit(2);
@@ -185,15 +187,24 @@ fm_backend_orca_remove_worktree() {  # <worktree-id>
 }
 
 fm_backend_orca_worktree_path() {
-  local worktree_id=${1:-} out path
+  local worktree_id=${1:-} out path command_rc parse_rc
   [ -n "$worktree_id" ] || { echo "error: missing Orca worktree id; cannot resolve worktree path" >&2; return 1; }
   fm_backend_orca_tool_check || return 1
-  out=$(orca worktree show --worktree "id:$worktree_id" --json) || return 1
-  path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path) || {
-    echo "error: orca worktree show did not return a path for $worktree_id" >&2
-    return 1
-  }
-  printf '%s' "$path"
+  if out=$(orca worktree show --worktree "id:$worktree_id" --json); then
+    command_rc=0
+  else
+    command_rc=$?
+  fi
+  if path=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path); then
+    [ "$command_rc" -eq 0 ] || return 1
+    printf '%s' "$path"
+    return 0
+  else
+    parse_rc=$?
+  fi
+  [ "$parse_rc" -ne 3 ] || return 3
+  echo "error: orca worktree show did not return a path for $worktree_id" >&2
+  return 1
 }
 
 fm_backend_orca_capture() {  # <terminal-id> <lines>
