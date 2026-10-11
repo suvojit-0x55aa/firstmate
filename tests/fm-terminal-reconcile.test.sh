@@ -29,6 +29,13 @@ release_captain_task() {
     FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
     answer "$id" --decision-file "$answer_file" --release >/dev/null
 }
+release_captain_task_again() {
+  local id=$1 answer_file="$FM_HOME/$1-release-again.txt"
+  printf 'Captain released %s after resumed review.\n' "$id" > "$answer_file"
+  FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+    FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer "$id" --decision-file "$answer_file" --release >/dev/null
+}
 run_terminal_captain_case() {
   local backend=$1 shape=$2 resolution=$3 expected=$4
   local id="gate-$backend-$shape-$resolution" call key rc=0 backlog
@@ -259,6 +266,36 @@ manual reheld-origin historical blocked
 manual reheld-origin current progressed
 EOF
 pass 'terminal captain matrix preserves unresolved calls and replays answered transitions'
+for identityless_backend in auto manual; do
+  printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
+    > "$FM_HOME/config/backlog-backend"
+  identityless_id="identityless-$identityless_backend"
+  make_task "$identityless_id"
+  tx hold "$identityless_id" --reason 'first captain review pending' --kind captain --json >/dev/null
+  release_captain_task "$identityless_id"
+  printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$identityless_id" > "$FM_HOME/state/$identityless_id.meta"
+  tx hold "$identityless_id" --reason 'new captain review pending' --kind captain --json >/dev/null
+  "$owner" merged "$identityless_id" https://github.com/o/r/pull/1
+  "$owner" retired "$identityless_id" normal
+  rm "$FM_HOME/state/$identityless_id.meta"
+  release_captain_task_again "$identityless_id"
+  identityless_key=$(jq -r --arg id "$identityless_id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$identityless_backend" = manual ]; then
+    "$owner" manual-complete "$identityless_key" \
+      && fail 'identity-less newest release advanced manual completion'
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$identityless_key.json")" = false ] \
+    || fail "$identityless_backend identity-less newest release advanced terminal backlog"
+  assert_contains "$(tx show "$identityless_id")" 'state: in_flight' \
+    "$identityless_backend identity-less newest release completed resumed work"
+done
+pass 'newest identity-less release cannot borrow an older receipt'
 make_task manualopen
 "$owner" retired manualopen normal
 manual_open_key=$(jq -r 'select(.id=="manualopen")|.key' "$FM_HOME/state/terminal-delivery/"*.json)

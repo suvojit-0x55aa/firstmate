@@ -2677,6 +2677,20 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 }
 
+install_retaining_treehouse_interruption() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "$FM_TEST_TREEHOUSE_CALLS"
+if [ ! -e "$FM_TEST_TREEHOUSE_INTERRUPTED" ]; then
+  : > "$FM_TEST_TREEHOUSE_INTERRUPTED"
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
 test_persisted_landing_proof_replays_after_worktree_return() {
   local case_dir head rc=0 receipt
   case_dir=$(make_case terminal-proof-replay)
@@ -2730,6 +2744,46 @@ test_persisted_landing_proof_rejects_replacement_incarnation() {
   assert_grep "not landed in its intended default branch" "$case_dir/retry.stderr" \
     "terminal-proof-mismatch: refusal did not require replacement proof"
   pass "persisted landing proof cannot cross terminal incarnations"
+}
+
+test_persisted_landing_proof_revalidates_existing_worktree() {
+  local case_dir landed_head rc=0 receipt calls
+  case_dir=$(make_case terminal-proof-stale)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "initial landed work"
+  landed_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$landed_head"
+  install_retaining_treehouse_interruption "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+  FM_TEST_TREEHOUSE_CALLS="$case_dir/treehouse.calls" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-stale: interruption should retain the first worktree"
+  assert_present "$case_dir/wt" "terminal-proof-stale: fixture removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-stale: interruption removed metadata"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  [ "$(jq -r .local_head "$receipt")" = "$landed_head" ] \
+    || fail "terminal-proof-stale: initial landing proof was not recorded"
+
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1-followup
+  wt_commit_file "$case_dir" followup.txt later "later pushed work"
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  git -C "$case_dir/wt" push -q fork HEAD:refs/heads/fm/task-x1-followup
+  git -C "$case_dir/project" fetch -q fork
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+  FM_TEST_TREEHOUSE_CALLS="$case_dir/treehouse.calls" \
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-stale: pushed follow-up work must require current landing"
+  assert_present "$case_dir/wt" "terminal-proof-stale: stale proof discarded the current worktree"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-stale: stale proof removed task metadata"
+  assert_grep "not landed in its intended default branch" "$case_dir/retry.stderr" \
+    "terminal-proof-stale: refusal did not require current default landing"
+  calls=$(wc -l < "$case_dir/treehouse.calls" | tr -d ' ')
+  [ "$calls" = 1 ] || fail "terminal-proof-stale: retry reached destructive return with stale proof"
+  pass "persisted landing proof never replaces current worktree validation"
 }
 
 test_local_only_fork_remote_refuses_without_default_landing
@@ -2793,3 +2847,4 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_persisted_landing_proof_replays_after_worktree_return
 test_persisted_landing_proof_rejects_replacement_incarnation
+test_persisted_landing_proof_revalidates_existing_worktree

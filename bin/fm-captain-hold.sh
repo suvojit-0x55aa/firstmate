@@ -303,11 +303,7 @@ origin_open_decisions() {  # <origin-id>
 # A resolution record written by this script or by the retired
 # fm-decision-hold.sh. Both carry the same leader-then-captain-decision shape.
 body_has_resolution_record() {  # <task-body>
-  case "$1" in
-    *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
-    *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
-  esac
-  return 1
+  newest_resolution_header "$1" >/dev/null
 }
 
 terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1>
@@ -320,41 +316,40 @@ terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <ori
   [ -n "$release_receipt" ] && [ -n "$3" ] && [ "$release_receipt" != "$3" ]
 }
 
-# The recorded decision digest of either record format, from the show-escaped
-# body (multi-line bodies print as one quoted line with \n escapes). Records
-# are prepended, so the first match is the newest record.
-recorded_decision_digest() {  # <task-body>
-  local rest=$1
-  case "$rest" in
-    *"Decision digest: "*) rest=${rest#*"Decision digest: "} ;;
-    *) return 1 ;;
-  esac
-  rest=${rest%%\\n*}
-  rest=${rest%%$'\n'*}
-  printf '%s' "$rest"
+newest_resolution_header() {  # <task-body>
+  local decoded
+  decoded=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$decoded" | awk '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ && !found {
+      found = 1
+    }
+    found {
+      print
+      if ($0 == "Captain decision:") {
+        complete = 1
+        exit
+      }
+    }
+    END {
+      if (!complete) exit 1
+    }
+  '
 }
 
-# The newest record's `Resolution mode:` value; empty for a record predating it.
+newest_resolution_field() {  # <task-body> <field>
+  newest_resolution_header "$1" | sed -n "s/^$2: //p" | head -1
+}
+
+recorded_decision_digest() {  # <task-body>
+  newest_resolution_field "$1" 'Decision digest'
+}
+
 recorded_resolution_mode() {  # <task-body>
-  local rest=$1
-  case "$rest" in
-    *"Resolution mode: "*) rest=${rest#*"Resolution mode: "} ;;
-    *) return 1 ;;
-  esac
-  rest=${rest%%\\n*}
-  rest=${rest%%$'\n'*}
-  printf '%s' "$rest"
+  newest_resolution_field "$1" 'Resolution mode'
 }
 
 recorded_release_receipt() {  # <task-body>
-  local rest=$1
-  case "$rest" in
-    *"Terminal receipt: "*) rest=${rest#*"Terminal receipt: "} ;;
-    *) return 1 ;;
-  esac
-  rest=${rest%%\\n*}
-  rest=${rest%%$'\n'*}
-  printf '%s' "$rest"
+  newest_resolution_field "$1" 'Terminal receipt'
 }
 
 terminal_receipt_key() {  # <task-id>
