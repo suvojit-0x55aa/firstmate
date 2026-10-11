@@ -903,7 +903,8 @@ EOF
 }
 
 command_terminal_ready() {
-  local origin=${1:-} receipt='' entry id show state hold_kind body
+  local origin=${1:-} receipt='' entry id resolved seen show state hold_kind body
+  local -a resolved_ids=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -925,9 +926,18 @@ command_terminal_ready() {
       body_has_resolution_record "$body" || return 1
     fi
   fi
+  resolved_ids+=("$origin")
   for entry in "$@"; do
     validate_slug captain-task-id "$entry"
     id=$(resolve_entry "$origin" "$entry") || return 1
+    seen=0
+    for resolved in "${resolved_ids[@]}"; do
+      [ "$resolved" != "$id" ] || seen=1
+    done
+    [ "$seen" = 1 ] || resolved_ids+=("$id")
+  done
+  for id in "${resolved_ids[@]}"; do
+    [ "$id" != "$origin" ] || continue
     show=$(task_show "$id") || return 1
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)

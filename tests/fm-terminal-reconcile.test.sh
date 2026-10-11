@@ -237,6 +237,95 @@ run_transferred_release_resume_case() {
     *) fail "unknown transferred release expectation: $expected" ;;
   esac
 }
+run_terminal_identity_case() {
+  local backend=$1 shape=$2 expected=$3
+  local id="identity-$backend-$shape" call key rc=0 backlog
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown terminal identity backend: $backend" ;;
+  esac
+  make_task "$id"
+  case "$shape" in
+    self-unresolved)
+      tx hold "$id" --reason 'origin captain call pending' --kind captain --json >/dev/null
+      FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+        FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+        complete "$id" "$id" >/dev/null
+      "$owner" merged "$id" https://github.com/o/r/pull/1
+      "$owner" retired "$id" normal
+      rm "$FM_HOME/state/$id.meta"
+      tx 'done' "$id" --no-prune --json >/dev/null
+      ;;
+    self-resumed)
+      tx hold "$id" --reason 'origin captain call pending' --kind captain --json >/dev/null
+      FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+        FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+        complete "$id" "$id" >/dev/null
+      "$owner" custody "$id" https://github.com/o/r/pull/1
+      release_captain_task "$id"
+      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=%s\n' \
+        "$id" "$id" > "$FM_HOME/state/$id.meta"
+      "$owner" merged "$id" https://github.com/o/r/pull/1
+      "$owner" retired "$id" normal
+      rm "$FM_HOME/state/$id.meta"
+      ;;
+    legacy-alias)
+      call="$id-decision-choice"
+      make_task "$call"
+      tx hold "$call" --reason 'legacy captain call pending' --kind captain --json >/dev/null
+      FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+        FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+        complete "$id" "$call" choice >/dev/null
+      answer_captain_task "$call"
+      "$owner" merged "$id" https://github.com/o/r/pull/1
+      "$owner" retired "$id" normal
+      rm "$FM_HOME/state/$id.meta"
+      ;;
+    *) fail "unknown terminal identity shape: $shape" ;;
+  esac
+  key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$backend" = manual ]; then
+    [ "$shape" = self-unresolved ] || tx 'done' "$id" --no-prune --json >/dev/null
+    set +e
+    "$owner" manual-complete "$key"
+    rc=$?
+    set -e
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  backlog=$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")
+  case "$expected" in
+    blocked)
+      [ "$backlog" = false ] || fail "$backend/$shape advanced an unresolved origin"
+      [ "$backend" != manual ] || [ "$rc" -ne 0 ] \
+        || fail "$backend/$shape reported manual completion"
+      if [ "$backend" = manual ]; then
+        "$owner" manual-complete "$key" && fail "$backend/$shape replay advanced an unresolved origin"
+      else
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = false ] \
+        || fail "$backend/$shape replay advanced an unresolved origin"
+      ;;
+    progressed)
+      [ "$backlog" = true ] || fail "$backend/$shape did not advance terminal backlog"
+      [ "$backend" != manual ] || [ "$rc" -eq 0 ] \
+        || fail "$backend/$shape refused manual completion"
+      if [ "$backend" = manual ]; then
+        "$owner" manual-complete "$key"
+      else
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
+        || fail "$backend/$shape replay lost terminal progress"
+      ;;
+    *) fail "unknown terminal identity expectation: $expected" ;;
+  esac
+}
 make_task article
 "$owner" observe article 'done' https://github.com/o/r/pull/1
 "$owner" reconcile
@@ -383,6 +472,18 @@ manual unrelated blocked
 manual new-success progressed
 EOF
 pass 'transferred releases require their own later verified terminal incarnation'
+while read -r identity_backend identity_shape identity_expected; do
+  [ -n "$identity_backend" ] || continue
+  run_terminal_identity_case "$identity_backend" "$identity_shape" "$identity_expected"
+done <<'EOF'
+auto self-unresolved blocked
+auto self-resumed progressed
+auto legacy-alias progressed
+manual self-unresolved blocked
+manual self-resumed progressed
+manual legacy-alias progressed
+EOF
+pass 'terminal inventory normalizes origin identity and legacy aliases'
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"
