@@ -9,6 +9,7 @@
 #        fm-terminal-reconcile.sh retired <id> <normal|discard>
 #        fm-terminal-reconcile.sh landing-proven <id>
 #        fm-terminal-reconcile.sh completed-after <id> <receipt-key>
+#        fm-terminal-reconcile.sh receipt-key <id>
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
 #        fm-terminal-reconcile.sh captain-review-state <id> <receipt-key>
@@ -295,10 +296,22 @@ reconcile_record() {
 }
 mode=${1:-report}
 case "$mode" in -h|--help) sed -n '2,29{s/^# \{0,1\}//;p;}' "$0"; exit 0;; esac
-if [ "$mode" = completed-after ]; then
-  [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
-  [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
-  terminal_completed_after "$2" "$3"
+if [ "$mode" = completed-after ] || [ "$mode" = receipt-key ]; then
+  if [ "$mode" = completed-after ]; then
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
+    [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
+    terminal_completed_after "$2" "$3"
+  else
+    [ "$#" -eq 2 ] && valid "$2" || exit 2
+    [ ! -L "$STATE/$2.meta" ] || exit 1
+    [ -e "$STATE/$2.meta" ] || exit 3
+    select_record_path "$2" || exit 1
+    [ -e "$DIR" ] || exit 3
+    [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
+    [ -e "$RECORD" ] || exit 3
+    receipt_path_authenticated "$RECORD" || exit 1
+    printf '%s\n' "$KEY"
+  fi
   exit
 fi
 mkdir -p "$DIR" || exit 1

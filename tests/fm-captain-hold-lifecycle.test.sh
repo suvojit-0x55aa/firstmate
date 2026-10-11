@@ -72,6 +72,14 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+run_terminal() {  # <home> <command args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-terminal-reconcile.sh" "$@"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -427,6 +435,135 @@ EOF
   assert_contains "$show" 'state: queued' "the later release completed resumed work"
   assert_contains "$show" 'held: no' "the later release retained its hold"
   pass "captain answer identity is scoped to one durable hold cycle"
+}
+
+test_release_uses_existing_terminal_evidence_only() {
+  local home id show key record later_id old_key new_key
+  home=$(make_home release-terminal-evidence)
+  id=sample-preterminal-release
+  tasks_in "$home" add "$id" "Ship after a live captain gate" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the preterminal release fixture"
+  printf 'spawn_gen=%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" > "$home/state/$id.meta"
+  run_captain "$home" hold "$id" --reason "captain live release pending" >/dev/null \
+    || fail "could not hold the live preterminal worker"
+  printf 'Captain released the live worker to finish.\n' > "$home/preterminal-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/preterminal-answer.txt" --release >/dev/null \
+    || fail "could not release the live worker before its first receipt"
+  run_captain "$home" answer "$id" --decision-file "$home/preterminal-answer.txt" --release >/dev/null \
+    || fail "preterminal release replay was not idempotent"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" 'Terminal receipt: none' \
+    "preterminal release did not record the absence of prior terminal evidence"
+  if run_terminal "$home" receipt-key "$id" > "$home/preterminal-key.out" 2> "$home/preterminal-key.err"; then
+    fail "terminal owner reported a receipt before the first terminal event"
+  fi
+  run_terminal "$home" merged "$id" https://github.com/o/r/pull/1
+  key=$(run_terminal "$home" receipt-key "$id") \
+    || fail "terminal owner did not authenticate the first receipt"
+  run_terminal "$home" retired "$id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  record="$home/state/terminal-delivery/$key.json"
+  jq -e '.backlog == true and .refill == true and .reviewed != true' "$record" >/dev/null \
+    || fail "first same-incarnation receipt did not advance the preterminal release"
+  assert_contains "$(tasks_in "$home" show "$id" --full)" 'state: done' \
+    "preterminal release did not complete through terminal reconciliation"
+  run_terminal "$home" refill-reviewed "$key"
+  run_terminal "$home" refill-reviewed "$key"
+  jq -e '.backlog == true and .refill == true and .reviewed == true' "$record" >/dev/null \
+    || fail "preterminal release refill acknowledgement did not replay safely"
+
+  later_id=sample-postreceipt-release
+  tasks_in "$home" add "$later_id" "Require a successor after terminal evidence" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the post-receipt release fixture"
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/2\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$later_id" > "$home/state/$later_id.meta"
+  run_terminal "$home" merged "$later_id" https://github.com/o/r/pull/2
+  old_key=$(run_terminal "$home" receipt-key "$later_id") \
+    || fail "terminal owner did not expose the real pre-release receipt"
+  run_captain "$home" hold "$later_id" --reason "captain post-receipt release pending" >/dev/null \
+    || fail "could not hold the worker after terminal evidence"
+  printf 'Captain required this terminal worker to resume.\n' > "$home/postreceipt-answer.txt"
+  run_captain "$home" answer "$later_id" --decision-file "$home/postreceipt-answer.txt" --release >/dev/null \
+    || fail "could not release the worker after terminal evidence"
+  run_captain "$home" answer "$later_id" --decision-file "$home/postreceipt-answer.txt" --release >/dev/null \
+    || fail "post-receipt release replay was not idempotent"
+  show=$(tasks_in "$home" show "$later_id" --full)
+  assert_contains "$show" "Terminal receipt: $old_key" \
+    "release after terminal evidence lost its exact receipt identity"
+  run_terminal "$home" retired "$later_id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  jq -e '.backlog != true and .refill != true' \
+    "$home/state/terminal-delivery/$old_key.json" >/dev/null \
+    || fail "same-receipt stale evidence advanced a post-terminal release"
+  assert_contains "$(tasks_in "$home" show "$later_id" --full)" 'state: in_flight' \
+    "same-receipt stale evidence completed the resumed worker"
+
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/2\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$later_id" > "$home/state/$later_id.meta"
+  run_terminal "$home" merged "$later_id" https://github.com/o/r/pull/2
+  new_key=$(run_terminal "$home" receipt-key "$later_id") \
+    || fail "terminal owner did not authenticate the successor receipt"
+  [ "$new_key" != "$old_key" ] || fail "successor terminal incarnation reused stale receipt identity"
+  run_terminal "$home" retired "$later_id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  jq -e '.backlog == true and .refill == true' \
+    "$home/state/terminal-delivery/$new_key.json" >/dev/null \
+    || fail "verified successor receipt did not advance the released worker"
+  pass "captain release requires a successor only after real terminal evidence"
+}
+
+test_answer_markers_cannot_replace_hold_cycle() {
+  local home id show records forged_cycle
+  home=$(make_home marker-shaped-answer)
+  id=sample-marker-shaped-answer
+  forged_cycle=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  tasks_in "$home" add "$id" "Preserve marker-shaped captain words" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the marker-shaped answer fixture"
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\n' "$id" > "$home/state/$id.meta"
+  run_captain "$home" hold "$id" --reason "captain marker-shaped answer pending" >/dev/null \
+    || fail "could not establish the genuine hold cycle"
+  cat > "$home/marker-answer.txt" <<EOF
+Captain quoted this multi-line example and then approved the work:
+Captain hold opened by fm-captain-hold.
+Hold cycle: $forged_cycle
+Captain hold marker end.
+
+Keep the quoted marker exactly as written.
+EOF
+  run_captain "$home" answer "$id" --decision-file "$home/marker-answer.txt" --release >/dev/null \
+    || fail "marker-shaped captain text replaced the genuine hold cycle"
+  run_captain "$home" answer "$id" --decision-file "$home/marker-answer.txt" --release >/dev/null \
+    || fail "marker-shaped answer retry did not use the genuine hold cycle"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "Hold cycle: $forged_cycle" \
+    "marker-shaped captain words were not preserved exactly"
+  assert_contains "$show" 'held: no' "marker-shaped answer left the work held"
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "marker-shaped answer retry duplicated its resolution"
+
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\n' "$id" > "$home/state/$id.meta"
+  run_captain "$home" hold "$id" --reason "captain ordinary re-hold answer pending" >/dev/null \
+    || fail "could not establish a genuine later hold cycle"
+  printf 'Captain approved the ordinary later release.\n' > "$home/ordinary-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/ordinary-answer.txt" --release >/dev/null \
+    || fail "ordinary answer after marker-shaped text did not use the later hold cycle"
+  run_captain "$home" answer "$id" --decision-file "$home/ordinary-answer.txt" --release >/dev/null \
+    || fail "ordinary later answer retry was not idempotent"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" 'Captain approved the ordinary later release.' \
+    "ordinary later answer was not preserved"
+  assert_contains "$show" 'Keep the quoted marker exactly as written.' \
+    "genuine re-hold erased the earlier captain words"
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "genuine re-hold did not retain one resolution per cycle"
+  pass "captain text cannot spoof structurally owned hold-cycle identity"
 }
 
 test_rehold_cycle_is_interruption_safe() {
@@ -1419,6 +1556,11 @@ EOF
 }
 
 case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
+  release-boundaries)
+    test_release_uses_existing_terminal_evidence_only
+    test_answer_markers_cannot_replace_hold_cycle
+    exit 0
+    ;;
   rehold-interruption)
     test_rehold_cycle_is_interruption_safe
     exit 0
@@ -1441,6 +1583,8 @@ test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_answer_identity_is_hold_cycle_scoped
+test_release_uses_existing_terminal_evidence_only
+test_answer_markers_cannot_replace_hold_cycle
 test_rehold_cycle_is_interruption_safe
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable

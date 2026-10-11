@@ -358,7 +358,7 @@ current_hold_cycle() {  # <task-body>
   local decoded
   decoded=$(decode_shown_value "$1") || return 1
   printf '%s\n' "$decoded" | awk '
-    /^Captain hold opened by fm-captain-hold\.$/ {
+    NR == 1 && /^Captain hold opened by fm-captain-hold\.$/ {
       if ((getline cycle) <= 0 || index(cycle, "Hold cycle: ") != 1) next
       token = substr(cycle, 13)
       if (length(token) != 64 || token ~ /[^0-9a-f]/) next
@@ -366,6 +366,14 @@ current_hold_cycle() {  # <task-body>
       print token
       exit
     }
+    NR == 1 && /^Resolution recorded by fm-(captain|decision)-hold\.$/ {
+      while ((getline line) > 0 && line != "Captain decision:") {
+        if (index(line, "Hold cycle: ") == 1) token = substr(line, 13)
+      }
+      if (length(token) == 64 && token !~ /[^0-9a-f]/) print token
+      exit
+    }
+    NR == 1 { exit }
   '
 }
 
@@ -381,12 +389,21 @@ body_has_current_resolution() {  # <task-body>
 }
 
 release_resolution_matches_current() {  # <task-id> <task-body>
-  local current receipt
+  local current receipt receipt_rc
   body_has_current_resolution "$2" || return 1
-  current=$(terminal_receipt_key "$1" || true)
-  [ -z "$current" ] && return 0
+  if current=$(terminal_receipt_key "$1"); then
+    :
+  else
+    receipt_rc=$?
+    [ "$receipt_rc" = 3 ] || return 1
+    current=''
+  fi
   receipt=$(recorded_release_receipt "$2" || true)
-  [ -n "$receipt" ] && [ "$receipt" = "$current" ]
+  if [ -z "$current" ]; then
+    [ "$receipt" = none ]
+  else
+    [ "$receipt" = "$current" ]
+  fi
 }
 
 terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1> <task-id>
@@ -402,6 +419,9 @@ terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <ori
   [ "$2" != captain ] || return 1
   release_receipt=$(recorded_release_receipt "$1" || true)
   [ -n "$release_receipt" ] || return 1
+  [ "$release_receipt" != none ] || return 0
+  [ "${#release_receipt}" -eq 64 ] || return 1
+  case "$release_receipt" in *[!0-9a-f]*) return 1 ;; esac
   if [ "$4" = 1 ]; then
     [ -n "$3" ] && [ "$release_receipt" != "$3" ]
     return
@@ -415,9 +435,10 @@ newest_resolution_header() {  # <task-body>
   local decoded
   decoded=$(decode_shown_value "$1") || return 1
   printf '%s\n' "$decoded" | awk '
-    /^Resolution recorded by fm-(captain|decision)-hold\.$/ && !found {
+    NR == 1 && /^Resolution recorded by fm-(captain|decision)-hold\.$/ {
       found = 1
     }
+    NR == 1 && !found { exit 1 }
     found {
       print
       if ($0 == "Captain decision:") {
@@ -448,11 +469,9 @@ recorded_release_receipt() {  # <task-body>
 }
 
 terminal_receipt_key() {  # <task-id>
-  local id=$1 meta="$STATE/$1.meta" incarnation
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  incarnation=$(meta_value "$meta" spawn_gen)
-  [ -n "$incarnation" ] || incarnation="$(meta_value "$meta" tasktmp)|$(meta_value "$meta" worktree)|$(meta_value "$meta" window)"
-  printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}'
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+    receipt-key "$1"
 }
 
 resolution_block() {  # <mode> <terminal-receipt> <hold-cycle>
@@ -617,9 +636,18 @@ write_hold_cycle_record() {  # <task-id> <shown-body>
 }
 
 write_resolution_record() {  # <task-id> <mode> <shown-body> <hold-cycle>
-  local id=$1 mode=$2 body=$3 cycle=$4 receipt='' record
+  local id=$1 mode=$2 body=$3 cycle=$4 receipt='' receipt_rc record
   [ -n "$cycle" ] || fail "cannot record a captain answer without a hold cycle"
-  [ "$mode" != released ] || receipt=$(terminal_receipt_key "$id" || true)
+  if [ "$mode" = released ]; then
+    if receipt=$(terminal_receipt_key "$id"); then
+      :
+    else
+      receipt_rc=$?
+      [ "$receipt_rc" = 3 ] \
+        || fail "cannot authenticate terminal receipt state for captain-held task $id"
+      receipt=none
+    fi
+  fi
   record=$(resolution_block "$mode" "$receipt" "$cycle")
   prepend_body_record "$id" "$body" "$record"
 }
