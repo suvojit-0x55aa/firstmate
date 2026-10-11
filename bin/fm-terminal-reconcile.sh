@@ -111,7 +111,7 @@ select_record_path() {
 supersede_prior_records() {
   local id=$1 current=$RECORD candidate
   for candidate in "$DIR"/*.json; do
-    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    receipt_path_authenticated "$candidate" || continue
     [ "$candidate" != "$current" ] || continue
     jq -e --arg id "$id" \
       '.id == $id and .discarded != true and .backlog != true and .reviewed != true and ((.superseded_by // "") == "")' \
@@ -123,7 +123,7 @@ supersede_prior_records() {
 }
 select_existing_record() {
   select_record_path "$1" || return $?
-  [ -f "$RECORD" ]
+  receipt_path_authenticated "$RECORD"
 }
 receipt_path_authenticated() {
   local candidate=$1 name key id incarnation expected
@@ -175,7 +175,8 @@ select_captain_review_receipt() {
 select_record() {
   local id=$1 meta="$STATE/$1.meta" tmp captain_keys origin_captain_cycle decisions_reviewed=false
   select_record_path "$id" || return $?
-  if [ -f "$RECORD" ]; then
+  if [ -e "$RECORD" ] || [ -L "$RECORD" ]; then
+    receipt_path_authenticated "$RECORD" || return 1
     supersede_prior_records "$id"
     return $?
   fi
@@ -196,7 +197,7 @@ select_retired_record() {
   local id=$1 pr=$2 candidate found=
   valid "$id" || return 2
   for candidate in "$DIR"/*.json; do
-    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    receipt_path_authenticated "$candidate" || continue
     jq -e --arg id "$id" --arg pr "$pr" \
       '.id == $id and .retired == true and .reviewed != true and ((.superseded_by // "") == "") and (.pr == $pr or .pr == "")' \
       "$candidate" >/dev/null || continue
@@ -272,17 +273,15 @@ delivery_proven() {
 terminal_completed_after() {
   local id=$1 current=$2 next depth=0
   while [ "$depth" -lt 64 ]; do
-    RECORD="$DIR/$current.json"
-    [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 1
+    select_authenticated_receipt_key "$current" || return 1
     jq -e --arg id "$id" --arg key "$current" \
-      '.schema == "fm-terminal-delivery.v1" and .id == $id and .key == $key and .discarded != true' \
+      '.id == $id and .key == $key and .discarded != true' \
       "$RECORD" >/dev/null || return 1
     next=$(jq -r '.superseded_by // ""' "$RECORD") || return 1
     [ -n "$next" ] && valid "$next" && [ "$next" != "$current" ] || return 1
-    RECORD="$DIR/$next.json"
-    [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 1
+    select_authenticated_receipt_key "$next" || return 1
     jq -e --arg id "$id" --arg key "$next" \
-      '.schema == "fm-terminal-delivery.v1" and .id == $id and .key == $key and .discarded != true' \
+      '.id == $id and .key == $key and .discarded != true' \
       "$RECORD" >/dev/null || return 1
     if jq -e '.retired == true and .backlog == true and ((.superseded_by // "") == "")' \
       "$RECORD" >/dev/null && delivery_proven; then
@@ -545,8 +544,7 @@ case "$mode" in
   manual-complete)
     [ "$#" -eq 2 ] && valid "$2" || exit 2
     fm_backlog_backend_manual "$CONFIG" || exit 1
-    RECORD="$DIR/$2.json"
-    [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || exit 1
+    select_authenticated_receipt_key "$2" || exit 1
     [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || exit 1
     record_matches_current_incarnation || exit 1
     jq -e '.retired and (.discarded != true)' "$RECORD" >/dev/null || exit 1
@@ -599,8 +597,7 @@ case "$mode" in
     put '.reviewed=true' ;;
   refill-reviewed)
     [ "$#" -eq 2 ] && valid "$2" || exit 2
-    RECORD="$DIR/$2.json"
-    [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || exit 1
+    select_authenticated_receipt_key "$2" || exit 1
     [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || exit 1
     jq -e '.backlog and .refill' "$RECORD" >/dev/null || exit 1
     put '.reviewed=true' ;;

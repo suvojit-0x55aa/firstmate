@@ -587,6 +587,15 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
+run_terminal_owner() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" "$@"
+}
+
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
 make_path_without_lsof() {  # <case-dir>
@@ -2906,6 +2915,58 @@ test_persisted_landing_proof_replays_after_worktree_return() {
   pass "same-incarnation landing proof survives worktree-return interruption and replay"
 }
 
+test_unauthenticated_landing_receipts_refuse_replay() {
+  local variant case_dir head pr key receipt original forged before rc
+  pr=https://github.com/o/r/pull/404
+  for variant in cross-copied-local-head malformed-merged-pr; do
+    case_dir=$(make_case "terminal-proof-$variant")
+    tasks-axi add task-x1 task-x1 --start --file "$case_dir/data/backlog.md" --json >/dev/null
+    if [ "$variant" = cross-copied-local-head ]; then
+      write_meta "$case_dir" local-only ship
+      wt_commit "$case_dir" "authenticated local landing"
+      head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      run_terminal_owner "$case_dir" local-landed task-x1 "$head"
+    else
+      write_meta "$case_dir" no-mistakes ship
+      printf 'pr=%s\n' "$pr" >> "$case_dir/state/task-x1.meta"
+      run_terminal_owner "$case_dir" merged task-x1 "$pr"
+    fi
+    run_terminal_owner "$case_dir" landing-proven task-x1 \
+      || fail "$variant: genuine authenticated receipt did not prove landing"
+    original=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+    assert_present "$original" "$variant: fixture did not create a genuine receipt"
+    git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+
+    if [ "$variant" = cross-copied-local-head ]; then
+      printf 'spawn_gen=replacement-incarnation\n' >> "$case_dir/state/task-x1.meta"
+      key=$(run_terminal_owner "$case_dir" current-incarnation task-x1)
+      forged="$case_dir/state/terminal-delivery/$key.json"
+      cp "$original" "$forged"
+    else
+      key=${original##*/}
+      key=${key%.json}
+      forged=$original
+      printf '{"schema":"wrong","key":"%s","id":"task-x1","incarnation":"","kind":"ship","mode":"no-mistakes","state":"done","pr":"%s","merged":true,"retired":false,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":""}\n' \
+        "$key" "$pr" > "$forged"
+    fi
+    before=$(shasum -a 256 "$forged" | awk '{print $1}')
+    if run_terminal_owner "$case_dir" landing-proven task-x1; then
+      fail "$variant: unauthenticated receipt authorized landing"
+    fi
+    [ "$(shasum -a 256 "$forged" | awk '{print $1}')" = "$before" ] \
+      || fail "$variant: landing proof lookup changed unauthenticated evidence"
+
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+    expect_code 1 "$rc" "$variant: missing-worktree replay accepted unauthenticated proof"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "$variant: refused replay retired recovery metadata"
+    [ "$(shasum -a 256 "$forged" | awk '{print $1}')" = "$before" ] \
+      || fail "$variant: refused replay changed unauthenticated evidence"
+  done
+  pass "unauthenticated landing receipts cannot authorize teardown replay"
+}
+
 test_persisted_landing_proof_rejects_replacement_incarnation() {
   local case_dir head rc=0
   case_dir=$(make_case terminal-proof-mismatch)
@@ -3148,6 +3209,10 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
   current-landing-removal)
     test_term_pushed_followup_requires_current_landing
     test_local_only_merged_to_local_main_allows
+    exit
+    ;;
+  receipt-authentication)
+    test_unauthenticated_landing_receipts_refuse_replay
     exit
     ;;
   *) fail "unknown focused teardown test: $FM_TEARDOWN_FOCUSED_TEST" ;;
