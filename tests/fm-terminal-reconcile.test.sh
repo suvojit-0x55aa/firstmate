@@ -427,7 +427,7 @@ run_cycle_answer_case() {
     || fail "$backend/$shape replay lost cycle-aware terminal progress"
 }
 run_attestation_case() {
-  local backend=$1 id="attestation-$1" call key rc=0 report
+  local backend=$1 terminal=$2 id="attestation-$1-$2" call key rc=0 report
   call="$id-call"
   case "$backend" in
     auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
@@ -439,7 +439,16 @@ run_attestation_case() {
   tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
   printf '%s\n' \
     'needs-decision [key=delivery]: choose delivery treatment' \
-    'done: implementation complete' > "$FM_HOME/state/$id.status"
+    "$terminal: implementation terminal" > "$FM_HOME/state/$id.status"
+  set +e
+  FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+    FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+    complete "$id" --none > "$FM_HOME/$id-none.out" 2> "$FM_HOME/$id-none.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$backend/$terminal terminal status authorized an empty captain inventory"
+  [ "$(sed -n 's/^decisions_reviewed=//p' "$FM_HOME/state/$id.meta" | tail -1)" != 1 ] \
+    || fail "$backend/$terminal refused empty inventory still recorded an attestation"
   "$owner" merged "$id" https://github.com/o/r/pull/1
   "$owner" retired "$id" normal
   key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
@@ -447,6 +456,7 @@ run_attestation_case() {
   [ "$(jq -r '.decisions_reviewed // false' "$FM_HOME/state/terminal-delivery/$key.json")" = false ] \
     || fail "$backend missing inventory produced a reviewed receipt"
   if [ "$backend" = manual ]; then
+    rc=0
     set +e
     "$owner" manual-complete "$key"
     rc=$?
@@ -483,7 +493,42 @@ run_attestation_case() {
     "$owner" reconcile
   fi
   [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
-    || fail "$backend reviewed inventory did not survive metadata deletion and replay"
+    || fail "$backend/$terminal reviewed inventory did not survive metadata deletion and replay"
+}
+
+test_discard_review_acknowledgement() {
+  local id=discarded key record report forged=forged-discard
+  make_task "$id"
+  "$owner" retired "$id" discard
+  "$owner" reconcile
+  assert_contains "$(tx show "$id")" 'state: in_flight' 'discard masqueraded as delivery'
+  key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  jq -e '.discarded and (.reviewed != true) and (.backlog != true) and (.refill != true)' \
+    "$record" >/dev/null || fail 'discard receipt did not remain presentation-actionable only'
+  report=$("$owner" report)
+  assert_contains "$report" "discard-reviewed $key" \
+    'discard report omitted its explicit presentation acknowledgement'
+
+  jq --arg key "$forged" '.key=$key | .reviewed=false' "$record" \
+    > "$FM_HOME/state/terminal-delivery/$forged.json"
+  if "$owner" discard-reviewed "$forged"; then
+    fail 'discard acknowledgement accepted an unauthenticated receipt key'
+  fi
+  [ "$(jq -r .reviewed "$FM_HOME/state/terminal-delivery/$forged.json")" = false ] \
+    || fail 'rejected unauthenticated discard receipt was mutated'
+  rm "$FM_HOME/state/terminal-delivery/$forged.json"
+
+  "$owner" discard-reviewed "$key"
+  "$owner" discard-reviewed "$key"
+  jq -e '.discarded and .reviewed and (.backlog != true) and (.refill != true)' \
+    "$record" >/dev/null || fail 'discard acknowledgement inferred delivery or lost replay safety'
+  assert_not_contains "$("$owner" report)" "TERMINAL DELIVERY: $id " \
+    'acknowledged discard remained a presentation alert'
+  assert_contains "$(tx show "$id")" 'state: in_flight' \
+    'discard acknowledgement completed the backlog item'
+  pass 'authenticated discard acknowledgement retires presentation only'
 }
 
 test_report_batches_receipts_at_scale() {
@@ -544,9 +589,20 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
     for attestation_backend in auto manual; do
-      run_attestation_case "$attestation_backend"
+      for attestation_terminal in done failed; do
+        run_attestation_case "$attestation_backend" "$attestation_terminal"
+      done
     done
     test_report_batches_receipts_at_scale
+    exit
+    ;;
+  review-contracts)
+    for attestation_backend in auto manual; do
+      for attestation_terminal in done failed; do
+        run_attestation_case "$attestation_backend" "$attestation_terminal"
+      done
+    done
+    test_discard_review_acknowledgement
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
@@ -580,11 +636,7 @@ tx hold held --reason 'captain answer pending' --kind captain --json >/dev/null
 "$owner" reconcile
 assert_contains "$(tx show held)" 'held: yes' 'terminal reconciliation cleared captain hold'
 assert_contains "$(tx show held)" 'state: in_flight' 'held task was silently completed'
-make_task discarded
-"$owner" retired discarded discard
-"$owner" reconcile
-assert_contains "$(tx show discarded)" 'state: in_flight' 'discard masqueraded as delivery'
-pass 'captain holds and explicit discard remain unresolved delivery obligations'
+test_discard_review_acknowledgement
 make_task replaced
 "$owner" merged replaced https://github.com/o/r/pull/1
 "$owner" retired replaced normal
@@ -725,7 +777,9 @@ manual legacy
 EOF
 pass 'terminal reconciliation binds repeated answers to the current hold cycle'
 for attestation_backend in auto manual; do
-  run_attestation_case "$attestation_backend"
+  for attestation_terminal in done failed; do
+    run_attestation_case "$attestation_backend" "$attestation_terminal"
+  done
 done
 pass 'terminal completion requires durable captain-call inventory attestation'
 test_report_batches_receipts_at_scale

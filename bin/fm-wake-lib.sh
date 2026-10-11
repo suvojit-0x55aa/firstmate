@@ -263,9 +263,13 @@ fm_codex_stop_record_write() {  # <state> <session-pid> <identity> <phase> <succ
 
 fm_codex_stop_successor_begin() {  # <state> <session-pid> <identity>
   local state=$1 session_pid=$2 identity=$3 record="$1/.codex-stop-health"
-  local schema recorded_pid recorded_identity phase successors expires cycle
+  local schema recorded_pid recorded_identity phase successors expires cycle now
+  FM_CODEX_STOP_SUCCESSOR_ERROR=
   if [ -e "$record" ]; then
-    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    if [ ! -f "$record" ] || [ -L "$record" ]; then
+      FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision found an invalid Stop health record; reconcile the session generation before continuing.'
+      return 1
+    fi
     schema=$(fm_codex_stop_record_value "$record" schema || true)
     recorded_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
     recorded_identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
@@ -277,12 +281,29 @@ fm_codex_stop_successor_begin() {  # <state> <session-pid> <identity>
       expires=$(fm_codex_stop_record_value "$record" expires_epoch || true)
       cycle=$(fm_codex_stop_record_value "$record" cycle || true)
       if [ "$phase" = handling ]; then
-        [ "$successors" = 0 ] || return 1
+        if [ "$successors" != 0 ]; then
+          FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision rejected a duplicate or invalid Stop successor: duplicate successor evidence; reconcile the session generation before continuing.'
+          return 1
+        fi
+        case "$expires" in
+          ''|*[!0-9]*)
+            FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision found an invalid handling deadline; reconcile the session generation before continuing.'
+            return 1
+            ;;
+        esac
+        now=$(date +%s)
+        if [ "$expires" -le "$now" ]; then
+          FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision handling window expired before its required Stop successor; start a replacement Codex session generation before continuing.'
+          return 1
+        fi
         fm_codex_stop_record_write "$state" "$session_pid" "$identity" \
           watching 1 "${expires:-0}" "$cycle"
         return
       fi
-      [ "$phase" = watching ] || return 1
+      if [ "$phase" != watching ]; then
+        FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision found an invalid Stop phase; reconcile the session generation before continuing.'
+        return 1
+      fi
     fi
   fi
   fm_codex_stop_record_write "$state" "$session_pid" "$identity" watching 0 0

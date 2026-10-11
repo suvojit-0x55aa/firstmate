@@ -118,7 +118,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
 if ! fm_codex_stop_successor_begin "$STATE" "$OWNER" "$OWNER_IDENTITY"; then
-  printf 'Codex supervision rejected a duplicate or invalid Stop successor; reconcile the session generation before continuing.\n' >&2
+  printf '%s\n' "${FM_CODEX_STOP_SUCCESSOR_ERROR:-Codex supervision rejected a duplicate or invalid Stop successor; reconcile the session generation before continuing.}" >&2
   exit 2
 fi
 STOP_RECORD_OWNED=1

@@ -716,35 +716,55 @@ EOF
   pass "resolved findings and decision-like prose do not create captain-held tasks"
 }
 
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
-  local home id open secondmate
-  home=$(make_home stale-terminal-decision)
-  id=sample-terminal-review
+test_terminal_status_requires_explicit_resolution_or_transfer() {
+  local home id before after resolved
+  home=$(make_home terminal-decision-attestation)
+  id=sample-terminal-transfer-review
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$home" "$id"
+  run_captain "$home" hold sample-prior-call --title "Choose the prior route" \
+    --reason "prior captain route pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" sample-prior-call >/dev/null \
+    || fail "could not establish the prior reviewed inventory"
   printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
     > "$home/state/$id.status"
-  printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
-  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  assert_contains "$open" "default" "fixture must retain the raw stale status decision"
-  run_captain "$home" complete "$id" --none >/dev/null \
-    || fail "terminal single-owner stale status decision blocked empty inventory completion"
-  run_captain "$home" verify "$id" >/dev/null \
-    || fail "terminal single-owner stale status decision blocked inventory verification"
-  run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
-    || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
-
-  secondmate=sample-secondmate
-  write_origin_meta "$home" "$secondmate" secondmate
-  printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
-    > "$home/state/$secondmate.status"
-  if run_captain "$home" complete "$secondmate" --none \
-    > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
-    fail "secondmate terminal status decision was incorrectly cleared"
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  if run_captain "$home" complete "$id" --none \
+    > "$home/done-none.out" 2> "$home/done-none.err"; then
+    fail "a terminal done line authorized an incomplete historical inventory"
   fi
-  pass "terminal single-owner stale status decisions do not block empty inventory"
+  after=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "refused terminal attestation mutated the prior inventory"
+  if run_captain "$home" verify "$id" > "$home/done-verify.out" 2> "$home/done-verify.err"; then
+    fail "verification ignored the raw unresolved decision after done"
+  fi
+  run_captain "$home" hold sample-current-call --title "Choose the current route" \
+    --reason "current captain route pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" sample-current-call >/dev/null \
+    || fail "terminal done decision could not transfer to current reviewed inventory"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "transferred terminal done decision did not verify"
+  assert_grep 'decision_keys=sample-current-call,sample-prior-call' "$home/state/$id.meta" \
+    "current terminal transfer replaced the prior inventory"
+
+  resolved=sample-terminal-resolved-review
+  mkdir -p "$home/data/$resolved"
+  tasks_in "$home" add "$resolved" "Review a resolved terminal finding" \
+    --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$resolved"
+  printf 'needs-decision [key=route]: choose route A or route B\nfailed: review stopped\n' \
+    > "$home/state/$resolved.status"
+  if run_captain "$home" complete "$resolved" --none \
+    > "$home/failed-none.out" 2> "$home/failed-none.err"; then
+    fail "a terminal failed line authorized an unresolved empty inventory"
+  fi
+  printf 'resolved [key=route]: captain chose route A\n' >> "$home/state/$resolved.status"
+  run_captain "$home" complete "$resolved" --none >/dev/null \
+    || fail "an explicit keyed resolution did not authorize empty inventory"
+  run_captain "$home" verify "$resolved" >/dev/null \
+    || fail "explicitly resolved terminal failed decision did not verify"
+  pass "terminal status cannot fabricate an empty or incomplete captain attestation"
 }
 
 test_secondmate_hold_stays_in_authoritative_home() {
@@ -1358,6 +1378,10 @@ case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
     test_rehold_cycle_is_interruption_safe
     exit 0
     ;;
+  terminal-status-attestation)
+    test_terminal_status_requires_explicit_resolution_or_transfer
+    exit 0
+    ;;
   '') ;;
   *) fail "unknown focused captain-hold test: $FM_CAPTAIN_HOLD_FOCUSED_TEST" ;;
 esac
@@ -1372,7 +1396,7 @@ test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_terminal_status_requires_explicit_resolution_or_transfer
 test_secondmate_hold_stays_in_authoritative_home
 test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold

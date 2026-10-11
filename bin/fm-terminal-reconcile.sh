@@ -11,6 +11,7 @@
 #        fm-terminal-reconcile.sh completed-after <id> <receipt-key>
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
+#        fm-terminal-reconcile.sh discard-reviewed <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
 #
 # observe is called by inactive recovery; merged only by the verified merge
@@ -92,6 +93,20 @@ supersede_prior_records() {
 select_existing_record() {
   select_record_path "$1" || return $?
   [ -f "$RECORD" ]
+}
+select_authenticated_receipt_key() {
+  local key=$1 id incarnation expected
+  valid "$key" || return 2
+  RECORD="$DIR/$key.json"
+  [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 1
+  jq -e --arg key "$key" \
+    '.schema == "fm-terminal-delivery.v1" and .key == $key and (.id | type == "string" and length > 0) and (.incarnation | type == "string" and length > 0)' \
+    "$RECORD" >/dev/null || return 1
+  id=$(jq -r .id "$RECORD")
+  incarnation=$(jq -r .incarnation "$RECORD")
+  valid "$id" || return 1
+  expected=$(printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}')
+  [ "$expected" = "$key" ]
 }
 select_record() {
   local id=$1 meta="$STATE/$1.meta" tmp captain_keys decisions_reviewed=false
@@ -336,6 +351,8 @@ case "$mode" in
       "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded) captain_reviewed=\(.decisions_reviewed // false)" +
       (if .refill then
         "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending")
+      elif .discarded == true then
+        "\nReview the authenticated discard, then run bin/fm-terminal-reconcile.sh discard-reviewed \(.key). This retires presentation without marking delivery or backlog complete."
       elif (.decisions_reviewed // false) != true then
         "\nCaptain-call inventory is not attested. Review every captain call, run bin/fm-captain-hold.sh complete \(.id) (--none | <task-id>...), then retry guarded teardown."
       elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then
@@ -356,6 +373,13 @@ case "$mode" in
     captain_calls_resolved || exit 1
     put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
       '.backlog=true | .refill=true | .ready=$ready' ;;
+  discard-reviewed)
+    [ "$#" -eq 2 ] || exit 2
+    select_authenticated_receipt_key "$2" || exit 1
+    [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || exit 1
+    jq -e '.retired and .discarded and (.backlog != true) and (.refill != true)' \
+      "$RECORD" >/dev/null || exit 1
+    put '.reviewed=true' ;;
   refill-reviewed)
     [ "$#" -eq 2 ] && valid "$2" || exit 2
     RECORD="$DIR/$2.json"

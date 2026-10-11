@@ -316,23 +316,6 @@ meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-origin_open_decisions() {  # <origin-id>
-  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
-  open=$(status_open_decisions "$status_file")
-  [ -n "$open" ] || return 0
-  [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
-  kind=$(meta_value "$meta" kind)
-  [ -n "$kind" ] || kind=ship
-  if [ "$kind" != secondmate ]; then
-    last=$(last_status_line "$status_file")
-    verb=$(status_line_verb "$last")
-    case "$verb" in
-      done|failed) return 0 ;;
-    esac
-  fi
-  printf '%s' "$open"
-}
-
 # A resolution record written by this script or by the retired
 # fm-decision-hold.sh. Both carry the same leader-then-captain-decision shape.
 body_has_resolution_record() {  # <task-body>
@@ -926,7 +909,7 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -965,9 +948,8 @@ EOF
 
   status_file="$STATE/$origin.status"
   raw_open=$(status_open_decisions "$status_file")
-  open=$(origin_open_decisions "$origin")
-  if [ -n "$open" ] && [ -z "$keys" ]; then
-    fail "origin $origin still has open captain decisions in its status stream; hold a captain task for what remains, or answer them, before attesting --none"
+  if [ -n "$raw_open" ] && [ -z "$supplied" ]; then
+    fail "origin $origin still has open captain decisions in its status stream; supply the reviewed captain-held inventory, or answer them, before completing"
   fi
 
   if [ "$has_meta" = 1 ]; then
@@ -1016,7 +998,7 @@ command_verify() {
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
   fi
-  open=$(origin_open_decisions "$origin")
+  open=$(status_open_decisions "$STATE/$origin.status")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
     fail "open captain decision $origin/$key is not transferred to the captain-held inventory; re-run complete"
@@ -1039,7 +1021,7 @@ command_terminal_ready() {
     shift 2
   fi
   require_task_reader
-  [ -z "$(origin_open_decisions "$origin")" ] || return 1
+  [ -z "$(status_open_decisions "$STATE/$origin.status")" ] || return 1
   if show=$(task_show "$origin"); then
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)

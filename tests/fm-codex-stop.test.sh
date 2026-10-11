@@ -65,6 +65,53 @@ await_lock() {
   fail 'Stop never acquired healthy identity-matched watcher ownership'
 }
 
+test_expired_successor_requires_replacement_generation() {
+  local dir identity rc=0 guard old_pid replacement_pid
+  dir=$(make_home expired-successor)
+  old_pid=$$
+  identity=$(FM_HOME="$dir" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' \
+    _ "$ROOT" "$old_pid")
+  FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$(date +%s)" expired' \
+    _ "$ROOT" "$dir" "$old_pid" "$identity"
+  run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'expired successor must be rejected at the public Stop boundary'
+  assert_contains "$(cat "$dir/out")" \
+    'handling window expired before its required Stop successor' \
+    'expired successor refusal omitted its actionable diagnosis'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'expired successor evidence was silently consumed'
+  assert_grep 'successor_count=0' "$dir/state/.codex-stop-health" \
+    'expired successor evidence changed its required successor count'
+  assert_absent "$dir/state/.watch.lock/pid" 'expired successor refusal started a watcher'
+  guard=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$old_pid \
+    FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_GUARD_GRACE=999 \
+    FM_SUPERVISION_MODEL=stop-managed "$ROOT/bin/fm-guard.sh" 2>&1)
+  assert_contains "$guard" 'WATCHER DOWN - SUPERVISION IS OFF' \
+    'public guard accepted an expired Stop handling window'
+
+  rc=0
+  TEST_BUDGET=1 run_stop_generation "$dir" > "$dir/replacement" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'replacement generation did not establish its own successor'
+  replacement_pid=$(sed -n 's/^generation_pid=//p' "$dir/state/.codex-stop-health")
+  [ -n "$replacement_pid" ] && [ "$replacement_pid" != "$old_pid" ] \
+    || fail 'replacement generation reused expired predecessor identity'
+  assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+    'replacement generation did not open a handling window'
+  assert_grep 'successor_count=0' "$dir/state/.codex-stop-health" \
+    'replacement generation did not require exactly one successor'
+  pass 'expired Stop successor fails closed until a replacement generation'
+}
+
+case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
+  expired-successor)
+    test_expired_successor_requires_replacement_generation
+    exit 0
+    ;;
+  '') ;;
+  *) fail "unknown focused Codex Stop test: $FM_CODEX_STOP_FOCUSED_TEST" ;;
+esac
+
 dir=$(make_home quiet)
 rc=0
 run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
@@ -173,3 +220,4 @@ assert_contains "$(cat "$dir/out")" 'rejected a duplicate or invalid Stop succes
   'duplicate successor refusal omitted its public diagnosis'
 assert_absent "$dir/state/.watch.lock/pid" 'duplicate successor refusal started a watcher'
 pass 'public Stop rejects duplicate successor evidence before arming'
+test_expired_successor_requires_replacement_generation
