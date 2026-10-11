@@ -947,29 +947,35 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   pass "fm-teardown.sh backend=orca: retires an authoritatively absent worktree"
 }
 
-test_teardown_preserves_metadata_when_orca_remove_error_json() {
-  local proj wt data state config id out rc neutral
-  id="orcaremoveerrz2"
-  proj="$TMP_ROOT/remove-error-project"
-  wt="$TMP_ROOT/remove-error-wt"
-  data="$TMP_ROOT/remove-error-data"
-  state="$TMP_ROOT/remove-error-state"
-  config="$TMP_ROOT/remove-error-config"
+run_orca_remove_failure_retry_case() {
+  local variant=$1 proj wt data state config id out rc neutral
+  id="orcrm${variant}z2"
+  proj="$TMP_ROOT/remove-$variant-project"
+  wt="$TMP_ROOT/remove-$variant-wt"
+  data="$TMP_ROOT/remove-$variant-data"
+  state="$TMP_ROOT/remove-$variant-state"
+  config="$TMP_ROOT/remove-$variant-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data/$id" "$state" "$config"
+  printf '# Backlog\n\n## In flight\n\n- [ ] %s - Removal retry fixture (repo: firstmate) (kind: scout)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
   printf 'report\n' > "$data/$id/report.md"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
-    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-remove-error" "worktree=$wt" "project=$proj" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-remove-$variant" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
-    "backend=orca" "orca_worktree_id=wt-remove-error" \
+    "backend=orca" "orca_worktree_id=wt-remove-$variant" \
     "decisions_reviewed=1" "decision_keys="
-  orca_case remove-error-teardown
-  for response in 1 2 3 5; do
-    printf '{"ok":true,"result":{"worktree":{"id":"wt-remove-error","path":"%s"}}}\n' "$wt" > "$RESP/$response.out"
-  done
-  printf '{"ok":true,"result":{}}\n' > "$RESP/4.out"
-  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/6.out"
+  orca_case "remove-$variant-teardown"
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-remove-%s","path":"%s"}}}\n' \
+    "$variant" "$wt" > "$RESP/worktree.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
+  if [ "$variant" = structured ]; then
+    printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/2.out"
+  else
+    printf '75\n' > "$RESP/2.exit"
+  fi
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -977,10 +983,229 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
     "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] || fail "Orca teardown should fail when worktree removal returns ok:false JSON"
-  assert_contains "$out" "worktree not removed" "teardown should surface the Orca removal error"
-  assert_present "$state/$id.meta" "failed Orca removal should preserve task metadata"
-  pass "fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON"
+  [ "$rc" -ne 0 ] || fail "Orca $variant removal failure should refuse teardown"
+  assert_contains "$out" "Orca worktree removal failed" \
+    "Orca $variant removal failure should explain that custody was retained"
+  if [ "$variant" = structured ]; then
+    assert_contains "$out" "worktree not removed" "teardown should surface the structured Orca removal error"
+  fi
+  assert_not_contains "$out" "teardown $id complete" \
+    "Orca $variant removal failure reported false teardown success"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "Orca $variant removal failure fixture did not reach worktree removal"
+  assert_present "$state/$id.meta" "failed Orca $variant removal should preserve task metadata"
+  assert_present "$wt" "failed Orca $variant removal should preserve the worktree"
+
+  orca_case "remove-$variant-retry"
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-remove-%s","path":"%s"}}}\n' \
+    "$variant" "$wt" > "$RESP/worktree.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "Orca $variant removal retry should succeed"$'\n'"$out"
+  assert_contains "$out" "teardown $id complete" \
+    "Orca $variant removal retry did not report success"
+  assert_absent "$state/$id.meta" "successful Orca $variant removal retry retained task metadata"
+}
+
+test_teardown_retries_after_orca_remove_failures() {
+  run_orca_remove_failure_retry_case structured
+  run_orca_remove_failure_retry_case transient
+  pass "fm-teardown.sh backend=orca: removal failures preserve custody for safe retry"
+}
+
+run_orca_cleanup_refusal_case() {
+  local phase=$1 proj wt data state config id out rc neutral head status
+  id="orcaclean${phase}z4"
+  proj="$TMP_ROOT/cleanup-$phase-project"
+  wt="$TMP_ROOT/cleanup-$phase-wt"
+  data="$TMP_ROOT/cleanup-$phase-data"
+  state="$TMP_ROOT/cleanup-$phase-state"
+  config="$TMP_ROOT/cleanup-$phase-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf '# Backlog\n\n## In flight\n\n- [ ] %s - Cleanup refusal fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-cleanup-$phase" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-cleanup-$phase" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case "cleanup-$phase-refusal"
+  add_teardown_side_effect_fakes "$FB"
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-cleanup-%s","path":"%s"}}}\n' \
+    "$phase" "$wt" > "$RESP/worktree.out"
+  status=
+  if [ "$phase" = run ]; then
+    head=$(git -C "$wt" rev-parse HEAD)
+    status=$(cat <<EOF
+run:
+  id: "01RUN"
+  branch: fm/$id
+  status: awaiting_approval
+  head: "$head"
+  pr: ""
+steps[0]:
+EOF
+)
+    cat > "$FB/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'side-effect:no-mistakes:%s\n' "$*" >> "${FM_ORCA_LOG:?}"
+case " $* " in
+  *" axi status "*) printf '%s\n' "${FM_ORCA_TEST_NM_STATUS:?}" ;;
+esac
+exit 0
+SH
+    chmod +x "$FB/no-mistakes"
+  else
+    cat > "$FB/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'side-effect:lsof:%s\n' "$*" >> "${FM_ORCA_LOG:?}"
+exit 1
+SH
+    chmod +x "$FB/lsof"
+  fi
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_TEST_NM_STATUS="$status" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca $phase cleanup refusal should stop teardown"
+  assert_not_contains "$out" "teardown $id complete" \
+    "Orca $phase cleanup refusal reported false teardown success"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "Orca $phase cleanup refusal closed the endpoint"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "Orca $phase cleanup refusal removed the worktree"
+  assert_present "$state/$id.meta" "Orca $phase cleanup refusal removed task metadata"
+  assert_present "$wt" "Orca $phase cleanup refusal removed the worktree path"
+  if [ "$phase" = run ]; then
+    assert_contains "$(cat "$LOG")" 'side-effect:no-mistakes:' \
+      "Orca run-conclusion refusal fixture never reached no-mistakes: $out"
+    assert_contains "$out" "is still parked after axi abort" \
+      "Orca run-conclusion refusal did not preserve the parked run"
+    assert_not_contains "$(cat "$LOG")" 'side-effect:lsof:' \
+      "Orca run-conclusion refusal continued into process enumeration"
+  else
+    assert_contains "$(cat "$LOG")" 'side-effect:lsof:' \
+      "Orca process refusal fixture never reached process enumeration"
+    assert_contains "$out" "cannot determine leaked processes" \
+      "Orca process refusal did not explain the failed safety scan"
+  fi
+}
+
+test_orca_cleanup_refusals_precede_destructive_teardown() {
+  run_orca_cleanup_refusal_case run
+  run_orca_cleanup_refusal_case process
+  pass "fm-teardown.sh backend=orca: cleanup refusals preserve endpoint and custody"
+}
+
+run_orca_term_mutation_case() {
+  local mutation=$1 proj wt scan_wt data state config id out rc neutral marker ready pid i
+  id="orcaterm${mutation}z6"
+  proj="$TMP_ROOT/term-$mutation-project"
+  wt="$TMP_ROOT/term-$mutation-wt"
+  data="$TMP_ROOT/term-$mutation-data"
+  state="$TMP_ROOT/term-$mutation-state"
+  config="$TMP_ROOT/term-$mutation-config"
+  marker="$TMP_ROOT/term-$mutation-finished"
+  ready="$TMP_ROOT/term-$mutation-ready"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  scan_wt=$(cd "$wt" && pwd -P)
+  mkdir -p "$data/$id" "$state" "$config"
+  printf '# Backlog\n\n## In flight\n\n- [ ] %s - TERM mutation fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+    "$id" > "$data/backlog.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-mutation-$mutation" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-term-$mutation" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case "term-$mutation"
+  add_teardown_side_effect_fakes "$FB"
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-term-%s","path":"%s"}}}\n' \
+    "$mutation" "$wt" > "$RESP/worktree.out"
+  cat > "$CASE_DIR/term-worker" <<'SH'
+#!/usr/bin/env bash
+set -u
+cd "${FM_ORCA_TERM_WT:?}"
+on_term() {
+  if [ "${FM_ORCA_TERM_MUTATION:?}" = commit ]; then
+    printf 'committed after TERM\n' > term-commit.txt
+    git add term-commit.txt
+    git -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'commit after TERM'
+  else
+    printf 'dirty after TERM\n' > term-dirty.txt
+  fi
+  : > "${FM_ORCA_TERM_MARKER:?}"
+  exit 0
+}
+trap on_term TERM
+: > "${FM_ORCA_TERM_READY:?}"
+while :; do sleep 0.1; done
+SH
+  chmod +x "$CASE_DIR/term-worker"
+  FM_ORCA_TERM_WT="$wt" FM_ORCA_TERM_MUTATION="$mutation" \
+    FM_ORCA_TERM_MARKER="$marker" FM_ORCA_TERM_READY="$ready" \
+    "$CASE_DIR/term-worker" &
+  pid=$!
+  i=0
+  while [ ! -f "$ready" ] && [ "$i" -lt 50 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "Orca TERM $mutation worker did not become ready"
+  cat > "$FB/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'side-effect:lsof:%s\n' "$*" >> "${FM_ORCA_LOG:?}"
+if [ ! -f "${FM_ORCA_TERM_MARKER:?}" ]; then
+  printf 'p%s\nfcwd\nn%s\n' "${FM_ORCA_TERM_PID:?}" "${FM_ORCA_TERM_SCAN_WT:?}"
+fi
+exit 0
+SH
+  chmod +x "$FB/lsof"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_TERM_PID="$pid" FM_ORCA_TERM_WT="$wt" FM_ORCA_TERM_SCAN_WT="$scan_wt" FM_ORCA_TERM_MARKER="$marker" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+  [ -f "$marker" ] || fail "Orca TERM $mutation fixture did not mutate the worktree: $out; log: $(cat "$LOG")"
+  [ "$rc" -ne 0 ] || fail "Orca teardown removed work after a process $mutation on TERM"
+  assert_contains "$out" "REFUSED:" \
+    "Orca TERM $mutation teardown did not report the renewed safety refusal"
+  assert_not_contains "$out" "teardown $id complete" \
+    "Orca TERM $mutation teardown reported false success"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "Orca TERM $mutation teardown closed the endpoint after safety changed"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+    "Orca TERM $mutation teardown removed the changed worktree"
+  assert_present "$state/$id.meta" "Orca TERM $mutation teardown removed task metadata"
+  assert_present "$wt" "Orca TERM $mutation teardown removed the changed worktree path"
+}
+
+test_orca_rechecks_safety_after_process_cleanup() {
+  run_orca_term_mutation_case dirty
+  run_orca_term_mutation_case commit
+  pass "fm-teardown.sh backend=orca: post-TERM mutations stop destructive teardown"
 }
 
 test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
@@ -1726,6 +1951,12 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     test_secondmate_child_identity_is_revalidated_at_each_boundary
     exit
     ;;
+  teardown-cleanup-failures)
+    test_orca_cleanup_refusals_precede_destructive_teardown
+    test_teardown_retries_after_orca_remove_failures
+    test_orca_rechecks_safety_after_process_cleanup
+    exit
+    ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;
 esac
 
@@ -1769,7 +2000,9 @@ test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
-test_teardown_preserves_metadata_when_orca_remove_error_json
+test_teardown_retries_after_orca_remove_failures
+test_orca_cleanup_refusals_precede_destructive_teardown
+test_orca_rechecks_safety_after_process_cleanup
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_replays_exact_orca_landing_proof

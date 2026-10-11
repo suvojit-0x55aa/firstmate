@@ -2757,11 +2757,11 @@ if [ "$KIND" != secondmate ]; then
   if [ "$BACKEND" = orca ]; then
     revalidate_orca_teardown_identity || exit 1
   fi
-  conclude_task_no_mistakes_run "$WT"
+  conclude_task_no_mistakes_run "$WT" || exit 1
   if [ "$BACKEND" = orca ]; then
     revalidate_orca_teardown_identity || exit 1
   fi
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP" || exit 1
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
@@ -2790,6 +2790,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
+  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
+    validate_worktree_teardown_safety || exit 1
+  fi
   revalidate_orca_teardown_identity || exit 1
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -2810,8 +2813,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fi
   if [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" != 1 ]; then
+    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ]; then
+      validate_worktree_teardown_safety || exit 1
+    fi
     revalidate_orca_teardown_identity || exit 1
-    fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+    fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" || {
+      echo "error: Orca worktree removal failed for $ORCA_WORKTREE_ID; preserving task $ID metadata for retry" >&2
+      exit 1
+    }
   fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
