@@ -2,7 +2,7 @@
 # fm-fleet-snapshot.sh - read-only structured fleet snapshot.
 #
 # Output contract: `--json` prints one object with schema
-# `fm-fleet-snapshot.v1`.
+# `fm-fleet-snapshot.v1`; `--backlog-json` prints its canonical backlog object.
 # The command is read-only: it does not acquire the session lock, drain wakes,
 # arm watchers, mutate backlog state, or write reports.
 #
@@ -164,10 +164,14 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
+       fm-fleet-snapshot.sh --backlog-json
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a read-only structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract.
+
+--backlog-json emits only the read-only canonical Markdown backlog parse used
+by the full snapshot, without sampling task or secondmate runtime state.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -194,6 +198,7 @@ EOF
 OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
+  --backlog-json) OUTPUT_MODE=backlog-json ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
@@ -1397,6 +1402,10 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+if [ "$OUTPUT_MODE" = backlog-json ]; then
+  printf '%s\n' "$BACKLOG_JSON"
+  exit 0
+fi
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then

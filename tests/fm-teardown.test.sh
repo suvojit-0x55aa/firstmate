@@ -736,6 +736,73 @@ test_ship_teardown_requires_captain_inventory_attestation() {
   pass "ordinary ship teardown requires and preserves captain-call inventory attestation"
 }
 
+test_manual_backend_attestation_without_tasks_axi() {
+  local variant case_dir rc wt_head receipt key manual_path
+  for variant in absent incompatible; do
+    case_dir=$(make_case "manual-attestation-$variant")
+    write_meta "$case_dir" local-only ship
+    printf '%s\n' manual > "$case_dir/config/backlog-backend"
+    cat > "$case_dir/data/backlog.md" <<'EOF'
+## In flight
+
+- [ ] task-x1 - Manual ship (repo: firstmate)
+
+## Queued
+
+## Done
+EOF
+    if [ "$variant" = incompatible ]; then
+      cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_TASKS_LOG"
+case "${1:-}" in --version) printf '%s\n' '0.1.0' ;; *) exit 97 ;; esac
+SH
+      chmod +x "$case_dir/fakebin/tasks-axi"
+      : > "$case_dir/tasks.log"
+    fi
+    printf '%s\n' 'needs-decision [key=manual-choice]: captain answer pending' \
+      > "$case_dir/state/task-x1.status"
+    wt_commit "$case_dir" "manual reviewed ship"
+    wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+    manual_path=/usr/bin:/bin:/usr/sbin:/sbin
+
+    rc=0
+    FM_TEARDOWN_TEST_PATH="$manual_path" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      run_teardown "$case_dir" > "$case_dir/unresolved.stdout" 2> "$case_dir/unresolved.stderr" || rc=$?
+    expect_code 1 "$rc" "manual-$variant: unresolved captain call must refuse teardown"
+    assert_present "$case_dir/state/task-x1.meta" "manual-$variant: refusal removed metadata"
+    printf '%s\n' 'working: captain-call inventory reviewed' > "$case_dir/state/task-x1.status"
+
+    FM_TEARDOWN_TEST_PATH="$manual_path" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      run_teardown "$case_dir" > "$case_dir/reviewed.stdout" 2> "$case_dir/reviewed.stderr" \
+      || fail "manual-$variant: reviewed teardown failed: $(cat "$case_dir/reviewed.stderr")"
+    receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+    key=$(jq -r .key "$receipt")
+    cat > "$case_dir/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+
+- [x] task-x1 - Manual ship (repo: firstmate) (done 2026-10-11)
+EOF
+    PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      "$ROOT/bin/fm-terminal-reconcile.sh" manual-complete "$key" \
+      || fail "manual-$variant: manual completion still required tasks-axi"
+    [ "$(jq -r .backlog "$receipt")" = true ] \
+      || fail "manual-$variant: manual completion did not advance its receipt"
+    if [ "$variant" = incompatible ]; then
+      ! grep -Ev '^--version$' "$case_dir/tasks.log" | grep -q . \
+        || fail "manual-incompatible: readiness invoked unsupported tasks-axi commands"
+    fi
+  done
+  pass "manual backlog captain readiness survives absent and incompatible tasks-axi"
+}
+
 test_no_mistakes_remote_custody_without_observer_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -2829,6 +2896,7 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
   '') ;;
   ship-captain-attestation)
     test_ship_teardown_requires_captain_inventory_attestation
+    test_manual_backend_attestation_without_tasks_axi
     exit
     ;;
   *) fail "unknown focused teardown test: $FM_TEARDOWN_FOCUSED_TEST" ;;
@@ -2840,6 +2908,7 @@ test_manual_backend_open_pr_poll_blocks_teardown_until_landing
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_ship_teardown_requires_captain_inventory_attestation
+test_manual_backend_attestation_without_tasks_axi
 test_no_mistakes_remote_custody_without_observer_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

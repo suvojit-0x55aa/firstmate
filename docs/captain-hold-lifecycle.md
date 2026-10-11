@@ -7,7 +7,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 
 A decision is not a separate thing in this system: it is an ordinary backlog task held for the captain, and the task id is the identity every surface and channel uses.
 `bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
-The command runs tasks-axi in the active `FM_HOME`, so the existing backlog remains the only durable work database and a secondmate-owned captain call stays in the secondmate home.
+Mutations run tasks-axi in the active `FM_HOME`, while read-only manual-backend verification uses the canonical fleet-snapshot parser, so the existing backlog remains the only durable work database and a secondmate-owned captain call stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand places an existing task under an active captain hold, or creates the task when nothing exists to hold, then verifies the hold through `tasks-axi hold <id> --reason <reason> --kind captain`.
@@ -23,11 +23,12 @@ A hold whose `--until` date has passed keeps those annotations while tasks-axi r
 
 The `complete` subcommand unions the reviewed captain-held task ids into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
-It accepts `--none` as an explicit semantic inventory result, refused while the origin still has a lifecycle-open keyed status decision, and verifies every listed task against tasks-axi before recording completion.
+It accepts `--none` as an explicit semantic inventory result, refused while the origin still has a lifecycle-open keyed status decision, and verifies every listed task against the configured backlog's canonical task model before recording completion.
 With a non-empty inventory it appends a `captain-held [key=<key>]: tracked by <inventory>` transfer event for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
 Every non-forced ship and scout teardown calls the read-only `verify` subcommand as a preflight and again after endpoint retirement immediately before journaling and removing source state, with scouts first requiring their report.
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
+When the configured manual backend has no compatible tasks-axi, the same owner reads the canonical Markdown task model through `fm-fleet-snapshot.sh --backlog-json`, so verification and terminal readiness remain available without weakening captain-call checks or mutating the backlog.
 Retirement copies the reviewed flag and complete normalized inventory into the exact-incarnation terminal receipt, and both automatic and manual backlog transitions consult `terminal-ready` only after that durable attestation is present.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
@@ -94,7 +95,7 @@ Verification date: 2026-10-11.
 The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
 It proves: the reconstructed silent-divergence case is signalled - a status resolution over a still-open captain-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike, while the backlog task, its hold, and the status log all survive the report unchanged and the printed hint names both reconciliation directions; the false-signal boundary holds - a captain call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent; a report-only unresolved captain call refuses `--none` completion before teardown can erase the source; non-forced scout teardown requires durable inventory verification; the recorded-answer guard (a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call); answer-time closure through a bound channel with task-id keys, including the `release` close mode, same-cycle interrupted retry idempotence, later-cycle identical answers receiving distinct records, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys; the chat channel reaching the same intake; deferral through `--until` leaving `captain_actionable` false until due; and every legacy path (composed identities through the shim, pre-collapse `decision_keys=` metadata, cycle-aware recovery of old records, routed-resolution replay, and a concrete-origin binding).
 
-`tests/fm-terminal-reconcile.test.sh` and the focused ship case in `tests/fm-teardown.test.sh` prove that automatic and manual transitions require the journaled attestation, that ordinary ship teardown refuses before it and rechecks it at retirement, and that metadata deletion and repeated recovery preserve the exact normalized inventory.
+`tests/fm-terminal-reconcile.test.sh` and the focused ship cases in `tests/fm-teardown.test.sh` prove that automatic and manual transitions require the journaled attestation, that ordinary ship teardown refuses before it and rechecks it at retirement, that manual readiness works with absent or incompatible tasks-axi without bypassing an unresolved call, and that metadata deletion and repeated recovery preserve the exact normalized inventory.
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 

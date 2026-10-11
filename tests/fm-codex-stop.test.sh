@@ -71,6 +71,8 @@ run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
 expect_code 2 "$rc" 'quiet expiry must request native continuation'
 assert_contains "$(cat "$dir/out")" 'checkpoint: quiet' 'quiet interval was silently abandoned'
 assert_absent "$dir/state/.watch.lock/pid" 'quiet Stop left an owned watcher behind'
+assert_grep 'phase=handling' "$dir/state/.codex-stop-health" 'quiet Stop omitted its handling successor record'
+assert_grep 'successor_count=0' "$dir/state/.codex-stop-health" 'quiet Stop did not require exactly one successor'
 pass 'quiet expiry requests the next Codex turn rather than silently ending supervision'
 
 dir=$(make_home signal)
@@ -158,3 +160,16 @@ STOP_PID=
 assert_not_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' 'replaced session emitted a continuation'
 assert_absent "$dir/state/.watch.lock/pid" 'replaced session retained watcher ownership'
 pass 'session replacement stands down without touching the successor session'
+
+dir=$(make_home duplicate-successor)
+identity=$(FM_HOME="$dir" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" $$)
+FM_HOME="$dir" bash -c \
+  '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 2 "$(( $(date +%s) + 300 ))" duplicate' \
+  _ "$ROOT" "$dir" $$ "$identity"
+rc=0
+run_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+expect_code 2 "$rc" 'duplicate successor evidence must be rejected'
+assert_contains "$(cat "$dir/out")" 'rejected a duplicate or invalid Stop successor' \
+  'duplicate successor refusal omitted its public diagnosis'
+assert_absent "$dir/state/.watch.lock/pid" 'duplicate successor refusal started a watcher'
+pass 'public Stop rejects duplicate successor evidence before arming'

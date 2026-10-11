@@ -231,6 +231,103 @@ fm_pi_extension_owns_supervision() {
   fm_pid_alive "$session_pid"
 }
 
+fm_codex_stop_record_value() {  # <record> <key>
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  sed -n "s/^$2=//p" "$1" | head -1
+}
+
+fm_codex_stop_record_write() {  # <state> <session-pid> <identity> <phase> <successors> <expires> [cycle]
+  local state=$1 session_pid=$2 identity=$3 phase=$4 successors=$5 expires=$6
+  local cycle=${7:-} record="$1/.codex-stop-health" tmp
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$phase" in watching|handling) ;; *) return 1 ;; esac
+  case "$successors" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expires" in ''|*[!0-9]*) return 1 ;; esac
+  case "$identity" in ''|*$'\n'*|*$'\r'*) return 1 ;; esac
+  [ ! -L "$record" ] || return 1
+  tmp=$(mktemp "$state/.codex-stop-health.XXXXXX") || return 1
+  [ -n "$cycle" ] || cycle=${tmp##*.}
+  case "$cycle" in ''|*[!A-Za-z0-9._-]*) rm -f "$tmp"; return 1 ;; esac
+  {
+    printf 'schema=fm-codex-stop-health.v1\n'
+    printf 'generation_pid=%s\n' "$session_pid"
+    printf 'generation_identity=%s\n' "$identity"
+    printf 'cycle=%s\n' "$cycle"
+    printf 'phase=%s\n' "$phase"
+    printf 'successor_count=%s\n' "$successors"
+    printf 'expires_epoch=%s\n' "$expires"
+  } > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$record" && return 0
+  rm -f "$tmp"
+  return 1
+}
+
+fm_codex_stop_successor_begin() {  # <state> <session-pid> <identity>
+  local state=$1 session_pid=$2 identity=$3 record="$1/.codex-stop-health"
+  local schema recorded_pid recorded_identity phase successors expires cycle
+  if [ -e "$record" ]; then
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    schema=$(fm_codex_stop_record_value "$record" schema || true)
+    recorded_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+    recorded_identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+    if [ "$schema" = fm-codex-stop-health.v1 ] \
+      && [ "$recorded_pid" = "$session_pid" ] \
+      && [ "$recorded_identity" = "$identity" ]; then
+      phase=$(fm_codex_stop_record_value "$record" phase || true)
+      successors=$(fm_codex_stop_record_value "$record" successor_count || true)
+      expires=$(fm_codex_stop_record_value "$record" expires_epoch || true)
+      cycle=$(fm_codex_stop_record_value "$record" cycle || true)
+      if [ "$phase" = handling ]; then
+        [ "$successors" = 0 ] || return 1
+        fm_codex_stop_record_write "$state" "$session_pid" "$identity" \
+          watching 1 "${expires:-0}" "$cycle"
+        return
+      fi
+      [ "$phase" = watching ] || return 1
+    fi
+  fi
+  fm_codex_stop_record_write "$state" "$session_pid" "$identity" watching 0 0
+}
+
+fm_codex_stop_handling_open() {  # <state> <session-pid> <identity> <seconds>
+  local seconds=$4
+  case "$seconds" in ''|*[!0-9]*|0) return 1 ;; esac
+  fm_codex_stop_record_write "$1" "$2" "$3" handling 0 \
+    "$(( $(date +%s) + seconds ))"
+}
+
+fm_codex_stop_record_clear() {  # <state> <session-pid> <identity>
+  local record="$1/.codex-stop-health" recorded_pid recorded_identity
+  [ -e "$record" ] || return 0
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  recorded_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+  recorded_identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+  [ "$recorded_pid" = "$2" ] && [ "$recorded_identity" = "$3" ] || return 0
+  rm -f "$record"
+}
+
+fm_codex_stop_handling_healthy() {  # <state>
+  local state=$1 record="$1/.codex-stop-health" lock="$1/.lock"
+  local schema session_pid identity cycle phase successors expires current_identity now
+  [ -f "$record" ] && [ ! -L "$record" ] && [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  schema=$(fm_codex_stop_record_value "$record" schema || true)
+  session_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+  identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+  cycle=$(fm_codex_stop_record_value "$record" cycle || true)
+  phase=$(fm_codex_stop_record_value "$record" phase || true)
+  successors=$(fm_codex_stop_record_value "$record" successor_count || true)
+  expires=$(fm_codex_stop_record_value "$record" expires_epoch || true)
+  [ "$schema" = fm-codex-stop-health.v1 ] && [ "$phase" = handling ] \
+    && [ "$successors" = 0 ] || return 1
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expires" in ''|*[!0-9]*) return 1 ;; esac
+  case "$cycle" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "$(cat "$lock" 2>/dev/null)" = "$session_pid" ] || return 1
+  current_identity=$(fm_pid_identity "$session_pid") || return 1
+  [ "$current_identity" = "$identity" ] || return 1
+  now=$(date +%s)
+  [ "$expires" -gt "$now" ]
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
@@ -243,9 +340,9 @@ fm_pi_extension_owns_supervision() {
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
-# stop-managed: a fresh beacon within grace is healthy while Codex handles the
-# native continuation after its synchronous Stop owner removes the completed
-# watcher; only a stale beacon is a lapse.
+# stop-managed: a live watcher is healthy while Stop is parked; after Stop
+# removes it, a fresh beacon is healthy only with a bounded handling record
+# bound to the live session generation and awaiting exactly one successor.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
 # session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
@@ -274,7 +371,7 @@ fm_watcher_supervision_verdict() {
   esac
   model=$(fm_supervision_model)
   case "$model" in
-    autoarm|stop-managed)
+    autoarm)
       [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
       return 0
       ;;
@@ -283,7 +380,10 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
+    if [ "$model" = stop-managed ] && fm_codex_stop_handling_healthy "$state"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_OK=true
+    elif [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
       && fm_pi_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true

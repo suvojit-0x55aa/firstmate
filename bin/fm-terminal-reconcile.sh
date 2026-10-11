@@ -37,6 +37,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DIR="$STATE/terminal-delivery"
+RECONCILE_CANDIDATES=
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
@@ -238,7 +239,11 @@ fi
 mkdir -p "$DIR" || exit 1
 [ ! -L "$DIR" ] || exit 1
 fm_lock_acquire_wait "$DIR/.lock" || exit 1
-trap 'fm_lock_release "$DIR/.lock"' EXIT
+terminal_reconcile_cleanup() {
+  [ -z "$RECONCILE_CANDIDATES" ] || rm -f "$RECONCILE_CANDIDATES"
+  fm_lock_release "$DIR/.lock"
+}
+trap terminal_reconcile_cleanup EXIT
 case "$mode" in
   landing-proven)
     [ "$#" -eq 2 ] || exit 2
@@ -287,8 +292,19 @@ case "$mode" in
   reconcile)
     deadline=$((SECONDS+8))
     cursor=$(cat "$DIR/.cursor" 2>/dev/null || true)
+    reconcile_records=()
+    for RECORD in "$DIR"/*.json; do
+      [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
+      reconcile_records+=("$RECORD")
+    done
+    [ "${#reconcile_records[@]}" -gt 0 ] || exit 0
+    RECONCILE_CANDIDATES=$(mktemp "$DIR/.candidates.XXXXXX") || exit 1
+    jq -r '
+      select(.reviewed != true and ((.superseded_by // "") == "") and .discarded != true)
+      | input_filename
+    ' "${reconcile_records[@]}" > "$RECONCILE_CANDIDATES" || exit 1
     for range in after through; do
-      for RECORD in "$DIR"/*.json; do
+      while IFS= read -r RECORD || [ -n "$RECORD" ]; do
         [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
         name=${RECORD##*/}
         if [ "$range" = after ]; then [[ "$name" > "$cursor" ]] || continue
@@ -299,7 +315,7 @@ case "$mode" in
         cursor_tmp=$(mktemp "$DIR/.cursor.XXXXXX") || exit 1
         printf '%s\n' "$name" > "$cursor_tmp" && mv "$cursor_tmp" "$DIR/.cursor" || exit 1
         reconcile_record || exit 1
-      done
+      done < "$RECONCILE_CANDIDATES"
     done ;;
   report)
     manual=false

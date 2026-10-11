@@ -487,7 +487,7 @@ run_attestation_case() {
 }
 
 test_report_batches_receipts_at_scale() {
-  local home="$TMP_ROOT/report-scale" dir fakebin real_jq out count i old_key=scale-release-old new_key=scale-release-new
+  local home="$TMP_ROOT/report-scale" dir fakebin real_jq out count reconcile_count i old_key=scale-release-old new_key=scale-release-new
   mkdir -p "$home/state/terminal-delivery" "$home/config" "$home/data" "$home/fakebin"
   dir="$home/state/terminal-delivery"
   printf '%s\n' manual > "$home/config/backlog-backend"
@@ -527,7 +527,18 @@ EOF
   assert_not_contains "$out" 'TERMINAL DELIVERY: reviewed-' 'scale report resurfaced permanently reviewed receipts'
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$owner" completed-after scale-release "$old_key" \
     || fail 'batched report discarded reviewed receipt history needed by successor proof'
-  pass 'terminal report batches parser work while preserving actionable output and proof history'
+  : > "$home/jq.count"
+  PATH="$fakebin:$PATH" FM_REAL_JQ="$real_jq" FM_JQ_COUNT="$home/jq.count" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_RECONCILE_BUDGET_SECS=10 \
+    "$ROOT/bin/fm-inactive-reconcile.sh" scan --startup >/dev/null
+  reconcile_count=$(cat "$home/jq.count")
+  [ "$reconcile_count" -le 24 ] \
+    || fail "startup inactive reconciliation launched jq $reconcile_count times for reviewed history"
+  assert_contains "$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$owner" report)" \
+    'TERMINAL DELIVERY: active-missing ' \
+    'startup reconciliation changed the actionable receipt set'
+  pass 'terminal report and startup reconciliation batch parser work while preserving proof history'
 }
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;

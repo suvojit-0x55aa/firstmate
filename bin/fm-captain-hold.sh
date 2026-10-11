@@ -230,7 +230,36 @@ require_tasks_axi() {
 }
 
 task_show() {  # <id>
+  if fm_backlog_backend_manual "$CONFIG" && ! fm_tasks_axi_compatible; then
+    manual_task_show "$1"
+    return
+  fi
   tasks_axi show "$1" --full 2>/dev/null
+}
+
+manual_task_show() {  # <id>
+  local snapshot
+  snapshot=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --backlog-json 2>/dev/null) \
+    || return 1
+  printf '%s\n' "$snapshot" | jq -er --arg id "$1" '
+    [.records[] | select(.structured == true and .id == $id)]
+    | if length != 1 then empty else .[0] end
+    | "  id: \(.id)\n  state: \(.state)\n  hold_kind: \(.hold_kind // \"-\")\n  body: \((.body_lines | join(\"\\n\")) | @json)"
+  '
+}
+
+require_task_reader() {
+  if fm_tasks_axi_compatible; then
+    require_tasks_axi
+    return
+  fi
+  fm_backlog_backend_manual "$CONFIG" \
+    || fail "compatible tasks-axi is required"
+  command -v jq >/dev/null 2>&1 \
+    || fail "jq is required to verify the manual backlog"
+  [ -f "$DATA/backlog.md" ] && [ ! -L "$DATA/backlog.md" ] \
+    || fail "manual backlog is absent or unsafe: $DATA/backlog.md"
 }
 
 show_field() {  # <show-output> <field>
@@ -906,7 +935,7 @@ command_complete() {
     CAPTAIN_META_LOCK_HELD=1
     [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
   fi
-  require_tasks_axi
+  require_task_reader
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
   if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
     supplied=''
@@ -972,7 +1001,7 @@ command_verify() {
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
-  require_tasks_axi
+  require_task_reader
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
@@ -1006,7 +1035,7 @@ command_terminal_ready() {
     validate_slug receipt-key "$receipt"
     shift 2
   fi
-  require_tasks_axi
+  require_task_reader
   [ -z "$(origin_open_decisions "$origin")" ] || return 1
   if show=$(task_show "$origin"); then
     state=$(show_field "$show" state)

@@ -82,6 +82,8 @@ if ! fm_lock_try_acquire "$LOCK"; then
 fi
 ARM_PID=
 ARM_IDENTITY=
+STOP_RECORD_OWNED=0
+CONTINUATION_READY=0
 # shellcheck disable=SC2329 # Called by the EXIT cleanup handler.
 arm_alive() {
   [ -n "$ARM_PID" ] && [ -n "$ARM_IDENTITY" ] \
@@ -101,12 +103,25 @@ cleanup() {
     done
     if arm_alive; then kill -KILL "$ARM_PID" 2>/dev/null || true; fi
     wait "$ARM_PID" 2>/dev/null || true
+    attempt=0
+    while [ -e "$STATE/.watch.lock/pid" ] && [ "$attempt" -lt 50 ]; do
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+  fi
+  if [ "$STOP_RECORD_OWNED" = 1 ] && [ "$CONTINUATION_READY" != 1 ]; then
+    fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true
   fi
   [ -z "$OUT" ] || rm -f "$OUT"
   fm_lock_release "$LOCK"
 }
 trap cleanup EXIT
 trap 'exit 0' HUP INT TERM
+if ! fm_codex_stop_successor_begin "$STATE" "$OWNER" "$OWNER_IDENTITY"; then
+  printf 'Codex supervision rejected a duplicate or invalid Stop successor; reconcile the session generation before continuing.\n' >&2
+  exit 2
+fi
+STOP_RECORD_OWNED=1
 still_ours() {
   session_generation_current
 }
@@ -128,6 +143,10 @@ while kill -0 "$ARM_PID" 2>/dev/null; do
 done
 still_ours || exit 0
 fm_supervision_needed "$STATE" "$GRACE" || exit 0
+if ! fm_codex_stop_handling_open "$STATE" "$OWNER" "$OWNER_IDENTITY" "$GRACE"; then
+  printf 'Codex supervision could not persist its generation-bound handling successor.\n' >&2
+  exit 2
+fi
 if grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT"; then
   grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" | head -8 >&2
 elif kill -0 "$ARM_PID" 2>/dev/null; then
@@ -137,4 +156,5 @@ else
   tail -6 "$OUT" >&2
 fi
 printf 'Run bin/fm-wake-drain.sh, handle its work, and acknowledge only after handling. Keep quiet intervals silent. The next Stop owns the successor; do not launch a background watcher or finish assuming a yielded tool will wake you.\n' >&2
+CONTINUATION_READY=1
 exit 2

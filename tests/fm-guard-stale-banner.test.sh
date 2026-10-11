@@ -86,6 +86,18 @@ run_guard_case_stop_managed() {
     "$ROOT/bin/fm-guard.sh" 2>&1
 }
 
+record_stop_handling() {
+  local dir=$1 pid=${2:-$$} seconds=${3:-999} home identity
+  home=$(case_home "$dir")
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$pid") || return 1
+  FM_STATE_OVERRIDE="$home/state" bash -c \
+    '. "$1"; fm_codex_stop_handling_open "$2" "$3" "$4" "$5"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$pid" "$identity" "$seconds"
+  touch "$home/state/.last-watcher-beat"
+}
+
 # The Pi extension model: .pi/extensions/fm-primary-pi-watch.ts tears the watcher
 # down on every actionable wake and spawns the replacement itself, so the lock is
 # legitimately unheld during a hand-off.
@@ -395,14 +407,43 @@ test_autoarm_stale_episode_is_stable() {
   pass "fm-guard stale banner: auto-arm stale episode stays one episode across calls"
 }
 
-test_stop_managed_fresh_beacon_without_watcher_is_healthy() {
+test_stop_managed_current_handling_generation_is_healthy() {
   local dir out
   dir=$(make_guard_case stop-managed-fresh)
-  touch "$(case_home "$dir")/state/.last-watcher-beat"
+  record_stop_handling "$dir"
   out=$(run_guard_case_stop_managed "$dir")
   [ -z "$out" ] \
-    || fail "Stop-managed model with a fresh beacon and no live watcher must stay silent, got: $out"
-  pass "fm-guard stale banner: Stop-managed handling stays healthy after watcher cleanup"
+    || fail "Stop-managed current handling generation must stay silent, got: $out"
+  pass "fm-guard stale banner: Stop-managed handling requires the current session generation"
+}
+
+test_stop_managed_missing_expired_replaced_and_duplicate_successors_alarm() {
+  local case_name dir home out
+  for case_name in missing expired replaced duplicate; do
+    dir=$(make_guard_case "stop-managed-$case_name")
+    home=$(case_home "$dir")
+    case "$case_name" in
+      missing) touch "$home/state/.last-watcher-beat" ;;
+      expired)
+        record_stop_handling "$dir"
+        sed -i.bak 's/^expires_epoch=.*/expires_epoch=1/' "$home/state/.codex-stop-health"
+        rm -f "$home/state/.codex-stop-health.bak"
+        ;;
+      replaced)
+        record_stop_handling "$dir"
+        printf '999999\n' > "$home/state/.lock"
+        ;;
+      duplicate)
+        record_stop_handling "$dir"
+        sed -i.bak 's/^successor_count=.*/successor_count=2/' "$home/state/.codex-stop-health"
+        rm -f "$home/state/.codex-stop-health.bak"
+        ;;
+    esac
+    out=$(run_guard_case_stop_managed "$dir")
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "Stop-managed $case_name successor state did not alarm: $out"
+  done
+  pass "fm-guard stale banner: Stop-managed missing, expired, replaced, and duplicate successors alarm"
 }
 
 test_stop_managed_stale_beacon_alarms_with_correct_reason() {
@@ -728,7 +769,8 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
-test_stop_managed_fresh_beacon_without_watcher_is_healthy
+test_stop_managed_current_handling_generation_is_healthy
+test_stop_managed_missing_expired_replaced_and_duplicate_successors_alarm
 test_stop_managed_stale_beacon_alarms_with_correct_reason
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
