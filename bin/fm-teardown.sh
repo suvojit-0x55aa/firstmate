@@ -2663,16 +2663,19 @@ if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
 fi
 
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ] \
-  && [ ! -e "$WT" ] && [ ! -L "$WT" ]; then
-  require_orca_worktree_absent "$ORCA_WORKTREE_ID" || exit 1
-  ORCA_WORKTREE_CONFIRMED_ABSENT=1
+if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+  if [ ! -e "$WT" ] && [ ! -L "$WT" ]; then
+    require_orca_worktree_absent "$ORCA_WORKTREE_ID" || exit 1
+    ORCA_WORKTREE_CONFIRMED_ABSENT=1
+  else
+    require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
+    ORCA_PATH_MATCH_VERIFIED=1
+  fi
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   if inspectable_git_worktree "$WT"; then
-    require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
+    [ "$ORCA_PATH_MATCH_VERIFIED" = 1 ] || exit 1
   elif [ "$ORCA_WORKTREE_CONFIRMED_ABSENT" = 1 ] \
     && [ -d "$STATE/terminal-delivery" ] \
     && "$SCRIPT_DIR/fm-terminal-reconcile.sh" landing-proven "$ID"; then

@@ -75,6 +75,21 @@ SH
   chmod +x "$fb/tmux"
 }
 
+add_teardown_side_effect_fakes() {
+  local fb=$1
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'side-effect:no-mistakes:%s\n' "$*" >> "${FM_ORCA_LOG:?}"
+exit 0
+SH
+  cat > "$fb/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'side-effect:lsof:%s\n' "$*" >> "${FM_ORCA_LOG:?}"
+exit 0
+SH
+  chmod +x "$fb/no-mistakes" "$fb/lsof"
+}
+
 test_capture_reads_terminal_tail_json() {
   local out
   orca_case capture-tail
@@ -1229,6 +1244,91 @@ test_ship_teardown_refuses_orca_id_path_mismatch() {
   pass "fm-teardown.sh backend=orca: ship teardown refuses id/path mismatches"
 }
 
+run_orca_preflight_order_case() {
+  local kind=$1 force_mode=$2 identity=$3 suffix id proj wt other_wt data state config neutral out rc=0
+  suffix="${kind}${force_mode}${identity}"
+  id="orcapreflight${suffix}z2"
+  proj="$TMP_ROOT/preflight-$suffix-project"
+  wt="$TMP_ROOT/preflight-$suffix-wt"
+  other_wt="$TMP_ROOT/preflight-$suffix-other-wt"
+  data="$TMP_ROOT/preflight-$suffix-data"
+  state="$TMP_ROOT/preflight-$suffix-state"
+  config="$TMP_ROOT/preflight-$suffix-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  touch "$state/.last-watcher-beat"
+  if [ "$kind" = scout ]; then
+    printf 'report\n' > "$data/$id/report.md"
+  fi
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-$suffix" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=$kind" "mode=local-only" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-$suffix" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case "preflight-$suffix"
+  add_teardown_side_effect_fakes "$FB"
+  if [ "$identity" = mismatch ]; then
+    git -C "$proj" worktree add --quiet -b "fm/$id-other" "$other_wt"
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+      "$suffix" "$other_wt" > "$RESP/1.out"
+  else
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-%s","path":"%s"}}}\n' \
+      "$suffix" "$wt" > "$RESP/1.out"
+  fi
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  if [ "$force_mode" = forced ]; then
+    out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+      "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  else
+    out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+      "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  fi
+  rc=$?
+  set -e
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''show' \
+    "Orca $suffix teardown did not resolve the recorded worktree id"
+  if [ "$identity" = mismatch ]; then
+    [ "$rc" -ne 0 ] || fail "Orca $suffix teardown accepted a mismatched worktree identity"
+    assert_contains "$out" "not inspected worktree" \
+      "Orca $suffix teardown did not report the identity mismatch"
+    assert_not_contains "$(cat "$LOG")" 'side-effect:' \
+      "Orca $suffix teardown reached run or process cleanup before refusing"
+    assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+      "Orca $suffix teardown closed an endpoint before refusing"
+    assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+      "Orca $suffix teardown removed a worktree before refusing"
+    assert_present "$state/$id.meta" "Orca $suffix refusal removed task metadata"
+    assert_present "$wt" "Orca $suffix refusal removed the recorded worktree"
+    assert_present "$other_wt" "Orca $suffix refusal removed the unrelated worktree"
+  else
+    expect_code 0 "$rc" "Orca $suffix teardown should accept an exact worktree identity"$'\n'"$out"
+    assert_contains "$(cat "$LOG")" 'side-effect:lsof:' \
+      "Orca $suffix exact-match teardown did not reach process cleanup"
+    if [ "$kind" = ship ]; then
+      assert_contains "$(cat "$LOG")" 'side-effect:no-mistakes:' \
+        "Orca $suffix exact-match teardown did not reach run conclusion"
+    fi
+    assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+      "Orca $suffix exact-match teardown did not close its endpoint"
+    assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' \
+      "Orca $suffix exact-match teardown did not remove its worktree"
+    assert_absent "$state/$id.meta" "Orca $suffix exact-match teardown retained task metadata"
+  fi
+}
+
+test_orca_identity_precedes_all_teardown_side_effects() {
+  run_orca_preflight_order_case scout ordinary mismatch
+  run_orca_preflight_order_case scout ordinary exact
+  run_orca_preflight_order_case ship ordinary mismatch
+  run_orca_preflight_order_case ship ordinary exact
+  run_orca_preflight_order_case ship forced mismatch
+  run_orca_preflight_order_case ship forced exact
+  pass "fm-teardown.sh backend=orca: identity preflight precedes every cleanup path"
+}
+
 test_teardown_refuses_orca_missing_worktree_id() {
   local proj wt data state config id out rc neutral
   id="orcamissingidz5"
@@ -1438,6 +1538,10 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     test_ship_teardown_removes_orca_worktree_when_id_path_matches
     exit
     ;;
+  teardown-identity-order)
+    test_orca_identity_precedes_all_teardown_side_effects
+    exit
+    ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;
 esac
 
@@ -1492,6 +1596,7 @@ test_ship_teardown_rejects_unavailable_orca_landing_replay
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
 test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
+test_orca_identity_precedes_all_teardown_side_effects
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
