@@ -49,8 +49,10 @@
 #
 # Usage: fm-startup-network.sh start --locked <0|1> --harvest-pid <pid>
 #          Launch the detached worker and return immediately. Single-flight: a
-#          worker already running for the same lock owner is left alone. A new
-#          owner gets a distinct generation. --locked 1 asks
+#          worker already running for the same lock owner is reused when its
+#          scheduled phases cover the request. A stronger request is handed to
+#          that worker durably and runs after its read-only probe. A new owner
+#          gets a distinct generation. --locked 1 asks
 #          for the mutating sweeps as well as the read-only probe; --locked 0
 #          asks for the probe only. --harvest-pid names the session-start process
 #          that will try to print the result inline, so the worker can tell
@@ -84,6 +86,10 @@
 #   .startup-network.claim    the generation and pid of a session start that
 #                             intends to print the result inline; a matching live
 #                             claimant gives harvest a bounded chance to finish.
+#   .startup-network.request  a versioned stronger-phase request for the current
+#                             generation and lock owner. It is written atomically,
+#                             claimed between the probe and publication, and
+#                             removed only after the worker records the upgrade.
 #   .startup-network.delivered
 #                             a durable acknowledgement that harvest printed the
 #                             current finished result; only this suppresses its
@@ -115,6 +121,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 STATUS_FILE="$STATE/.startup-network.status"
 REPORT_FILE="$STATE/.startup-network.report"
 CLAIM_FILE="$STATE/.startup-network.claim"
+REQUEST_FILE="$STATE/.startup-network.request"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
@@ -200,10 +207,34 @@ phase_label() {  # <phases>
   esac
 }
 
+queue_stronger_request() {  # <generation> <lock-pid>
+  local generation=$1 lock_pid=$2
+  write_atomic "$REQUEST_FILE" <<EOF
+version=1
+generation=$generation
+locked=1
+lock_pid=$lock_pid
+EOF
+}
+
+stronger_request_is_current() {  # <generation> <lock-pid>
+  local generation=$1 lock_pid=$2 record expected
+  [ -f "$REQUEST_FILE" ] && [ ! -L "$REQUEST_FILE" ] || return 2
+  record=$(cat "$REQUEST_FILE" 2>/dev/null) || return 2
+  expected=$(cat <<EOF
+version=1
+generation=$generation
+locked=1
+lock_pid=$lock_pid
+EOF
+)
+  [ "$record" = "$expected" ] || return 2
+}
+
 # --- start -------------------------------------------------------------------
 
 cmd_start() {  # <locked> <harvest-pid>
-  local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started
+  local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started current_locked
   mkdir -p "$STATE" 2>/dev/null || return 1
   # Captured HERE, at the moment the caller still holds the lock, and carried to
   # the worker: re-reading the lock later would only prove that SOME session
@@ -220,6 +251,13 @@ cmd_start() {  # <locked> <harvest-pid>
     # one would run the same mutating sweeps concurrently, so leave it alone and
     # let the harvest report its real state.
     generation=$(status_get generation)
+    current_locked=$(status_get locked)
+    if [ "$locked" = 1 ] && [ "$current_locked" != 1 ]; then
+      if ! queue_stronger_request "$generation" "$lock_pid"; then
+        fm_lock_release "$PUBLISH_LOCK"
+        return 1
+      fi
+    fi
     printf '%s\t%s\n' "$generation" "$harvest_pid" > "$CLAIM_FILE" 2>/dev/null || true
     fm_lock_release "$PUBLISH_LOCK"
     return 0
@@ -229,6 +267,10 @@ cmd_start() {  # <locked> <harvest-pid>
   started=$(now)
   phases=probe
   [ "$locked" != 1 ] || phases=probe,sweeps
+  if ! rm -f "$REQUEST_FILE" 2>/dev/null; then
+    fm_lock_release "$PUBLISH_LOCK"
+    return 1
+  fi
   if ! write_atomic "$STATUS_FILE" <<EOF
 state=running
 pid=0
@@ -373,13 +415,55 @@ EOF
   fm_lock_release "$PUBLISH_LOCK"
 }
 
-publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-file> <timing-file>
-  local generation=$1 state=$2 phases=$3 locked=$4 started=$5 rc=$6 out=$7 timings=${8:-} report_published=1
+publish() {  # <generation> <phases> <locked> <started> <rc> <output-file> <timing-file> <stage-started> <allow-upgrade>
+  local generation=$1 phases=$2 locked=$3 started=$4 rc=$5 out=$6 timings=${7:-} stage_started=${8:-} allow_upgrade=${9:-0}
+  local report_published=1 state request_rc=0 lock_pid
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get generation)" != "$generation" ]; then
     fm_lock_release "$PUBLISH_LOCK"
     return 0
   fi
+  if [ "$allow_upgrade" -eq 1 ] && { [ -e "$REQUEST_FILE" ] || [ -L "$REQUEST_FILE" ]; }; then
+    lock_pid=$(status_get lock_pid)
+    stronger_request_is_current "$generation" "$lock_pid"
+    request_rc=$?
+    if [ "$request_rc" -ne 0 ]; then
+      printf 'NETWORK_CHECKS: the queued stronger startup request was unreadable, so mutating sweeps and stale Herdr cleanup were not authorized; rerun %s/bin/fm-startup-network.sh start --locked 1 --harvest-pid <pid>\n' "$FM_ROOT" >> "$out"
+      rc=1
+    fi
+    if [ "$request_rc" -eq 0 ]; then
+      if write_atomic "$STATUS_FILE" <<EOF
+state=running
+pid=$$
+started=$started
+locked=1
+phases=probe,sweeps
+generation=$generation
+lock_pid=$lock_pid
+EOF
+      then
+        rm -f "$REQUEST_FILE" 2>/dev/null || true
+        fm_lock_release "$PUBLISH_LOCK"
+        return 10
+      fi
+      printf 'NETWORK_CHECKS: the stronger startup request could not be claimed durably, so mutating sweeps and stale Herdr cleanup were not run; rerun %s/bin/fm-startup-network.sh start --locked 1 --harvest-pid <pid>\n' "$FM_ROOT" >> "$out"
+      rc=1
+    fi
+  fi
+  case "$rc" in
+    0) state=done ;;
+    124)
+      state=timeout
+      printf 'NETWORK_CHECKS: hit the %ss bound before finishing, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
+        "$(stage_budget)" "$(phase_label "$phases")" "$FM_ROOT" "$locked" >> "$out"
+      ;;
+    *)
+      state=failed
+      printf 'NETWORK_CHECKS: the deferred check worker exited %s, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
+        "$rc" "$(phase_label "$phases")" "$FM_ROOT" "$locked" >> "$out"
+      ;;
+  esac
+  fm_timing_record stage network-checks "$stage_started" "$phases"
   # Timings are published for EVERY outcome, including timeout and failure: a run
   # that hit the bound is exactly the run whose per-step record is worth having,
   # and whatever the killed sweeps managed to append is a real partial answer.
@@ -412,6 +496,7 @@ EOF
 
 cmd_run() {  # <locked> <lock-pid> <generation>
   local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
+  local allow_upgrade=0 publish_rc=0 first_rc=0 remaining upgrade_rc=0
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
@@ -436,6 +521,9 @@ cmd_run() {  # <locked> <lock-pid> <generation>
     else
       downgraded=1
     fi
+  fi
+  if [ "$internal" -eq 1 ] && [ "$sweep_locked" -eq 0 ] && [ "$downgraded" -eq 0 ]; then
+    allow_upgrade=1
   fi
 
   if [ "$internal" -eq 0 ]; then
@@ -490,26 +578,49 @@ EOF
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
   fi
   [ "$lease_held" -eq 0 ] || fm_lock_release "$STATE/.lock.acquire"
-  # The bounded run as a whole, so the per-phase records can be read against the
-  # total even when the bound cut some of them off.
-  fm_timing_record stage network-checks "$stage_started" "$phases"
-
   if [ "$downgraded" -eq 1 ]; then
     printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested these, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"
   fi
-  case "$rc" in
-    0) publish "$generation" 'done' "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" ;;
-    124)
-      printf 'NETWORK_CHECKS: hit the %ss bound before finishing, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
-        "$budget" "$(phase_label "$phases")" "$FM_ROOT" "$sweep_locked" >> "$out"
-      publish "$generation" timeout "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings"
-      ;;
-    *)
-      printf 'NETWORK_CHECKS: the deferred check worker exited %s, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \
-        "$rc" "$(phase_label "$phases")" "$FM_ROOT" "$sweep_locked" >> "$out"
-      publish "$generation" failed "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings"
-      ;;
-  esac
+  publish "$generation" "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" "$stage_started" "$allow_upgrade" || publish_rc=$?
+  if [ "$publish_rc" -eq 10 ]; then
+    first_rc=$rc
+    phases=probe,sweeps
+    sweep_locked=1
+    fm_lock_acquire_wait "$STATE/.lock.acquire"
+    lease_held=1
+    if ! lock_unchanged "$lock_pid"; then
+      sweep_locked=0
+      phases=probe
+      downgraded=1
+      printf 'NETWORK_CHECKS: the fleet lock was no longer held by the session that requested the stronger startup phase, so mutating sweeps and stale Herdr cleanup were skipped; they belong to whichever session holds the lock now\n' >> "$out"
+    else
+      remaining=$(( budget - ($(now) - started) ))
+      if [ "$remaining" -le 0 ]; then
+        upgrade_rc=124
+      else
+        # shellcheck disable=SC2016 # The bounded child expands its arguments.
+        fm_run_timed "$remaining" env FM_BOOTSTRAP_NETWORK=only \
+          FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
+          bash -c '
+            "$1/fm-bootstrap.sh" || exit $?
+            printf "BOOTSTRAP_INFO: deferred Herdr cleanup started at elapsed=%ss\n" "$SECONDS"
+            "$1/fm-herdr-session-cleanup.sh"
+          ' _ "$SCRIPT_DIR" >>"$out" 2>&1 || upgrade_rc=$?
+      fi
+    fi
+    [ "$lease_held" -eq 0 ] || fm_lock_release "$STATE/.lock.acquire"
+    lease_held=0
+    if [ "$first_rc" -ne 0 ]; then
+      rc=$first_rc
+    else
+      rc=$upgrade_rc
+    fi
+    publish "$generation" "$phases" "$sweep_locked" "$started" "$rc" "$out" "$timings" "$stage_started" 0
+  elif [ "$publish_rc" -ne 0 ]; then
+    rm -f "$out" 2>/dev/null || true
+    [ -z "$timings" ] || rm -f "$timings" 2>/dev/null || true
+    return "$publish_rc"
+  fi
   rm -f "$out" 2>/dev/null || true
   [ -z "$timings" ] || rm -f "$timings" 2>/dev/null || true
   return 0
