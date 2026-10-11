@@ -626,6 +626,83 @@ EOF
   pass "$backend retired captain attestation recovers exact receipts and rejects ambiguity"
 }
 
+run_preserved_key_recovery_case() {
+  local backend=$1 id="preserved-review-$1" call_a call_b key record before rc=0
+  call_a="$id-call-a"
+  call_b="$id-call-b"
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown preserved-key recovery backend: $backend" ;;
+  esac
+  make_unreviewed_task "$id"
+  tx add "$call_a" "$call_a" --json >/dev/null
+  tx add "$call_b" "$call_b" --json >/dev/null
+  tx hold "$call_a" --reason 'first preserved captain call pending' --kind captain --json >/dev/null
+  tx hold "$call_b" --reason 'second preserved captain call pending' --kind captain --json >/dev/null
+  printf 'decision_keys=%s,%s\n' "$call_a" "$call_b" >> "$FM_HOME/state/$id.meta"
+  printf '%s\n' 'done: implementation terminal' > "$FM_HOME/state/$id.status"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  rm "$FM_HOME/state/$id.meta"
+  [ "$backend" != manual ] || tx done "$id" --no-prune --json >/dev/null
+  before=$(jq -cS . "$record")
+  if captain complete "$id" --receipt "$key" "$call_a" \
+    > "$FM_HOME/$id-omitted.out" 2> "$FM_HOME/$id-omitted.err"; then
+    fail "$backend retired attestation recovery dropped a preserved captain task"
+  fi
+  if captain complete "$id" --receipt "$key" --none \
+    > "$FM_HOME/$id-none.out" 2> "$FM_HOME/$id-none.err"; then
+    fail "$backend retired attestation recovery erased its preserved inventory"
+  fi
+  [ "$(jq -cS . "$record")" = "$before" ] \
+    || fail "$backend rejected incomplete recovery mutated the terminal receipt"
+
+  answer_captain_task "$call_a"
+  assert_contains "$(tx show "$call_b" --full)" 'hold_kind: captain' \
+    "$backend answering one preserved call released the other"
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$key" >/dev/null 2>&1 && rc=0 || rc=$?
+    [ "$rc" -ne 0 ] || fail "$backend incomplete attestation advanced manual backlog completion"
+  else
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$record")" = false ] \
+    || fail "$backend answered subset advanced the preserved receipt"
+
+  captain complete "$id" --receipt "$key" "$call_a" "$call_b" >/dev/null \
+    || fail "$backend complete preserved inventory was rejected"
+  captain complete "$id" --receipt "$key" "$call_a" "$call_b" >/dev/null \
+    || fail "$backend preserved inventory replay was not idempotent"
+  jq -e --arg a "$call_a" --arg b "$call_b" \
+    '.decisions_reviewed == true and .captain_keys == ([$a,$b] | sort | join(","))' \
+    "$record" >/dev/null || fail "$backend recovery did not retain every preserved captain task"
+  if [ "$backend" = manual ]; then
+    rc=0
+    "$owner" manual-complete "$key" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] || fail "$backend held preserved call advanced manual backlog completion"
+  else
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$record")" = false ] \
+    || fail "$backend held preserved call advanced the terminal receipt"
+
+  answer_captain_task "$call_b"
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$key"
+    "$owner" manual-complete "$key"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$record")" = true ] \
+    || fail "$backend genuine answers did not unblock the complete preserved inventory"
+  pass "$backend retired attestation recovery preserves and verifies every existing key"
+}
+
 test_discard_review_acknowledgement() {
   local id=discarded key record report forged=forged-discard
   make_task "$id"
@@ -738,6 +815,12 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   retired-attestation-recovery)
     for attestation_backend in auto manual; do
       run_retired_attestation_recovery_case "$attestation_backend"
+    done
+    exit
+    ;;
+  preserved-key-recovery)
+    for attestation_backend in auto manual; do
+      run_preserved_key_recovery_case "$attestation_backend"
     done
     exit
     ;;
@@ -920,6 +1003,7 @@ done
 pass 'terminal completion requires durable captain-call inventory attestation'
 for attestation_backend in auto manual; do
   run_retired_attestation_recovery_case "$attestation_backend"
+  run_preserved_key_recovery_case "$attestation_backend"
 done
 test_report_batches_receipts_at_scale
 for identityless_backend in auto manual; do

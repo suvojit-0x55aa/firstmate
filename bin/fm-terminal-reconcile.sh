@@ -11,6 +11,7 @@
 #        fm-terminal-reconcile.sh completed-after <id> <receipt-key>
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
+#        fm-terminal-reconcile.sh captain-review-state <id> <receipt-key>
 #        fm-terminal-reconcile.sh captain-reviewed <id> <receipt-key> <captain-task-ids>
 #        fm-terminal-reconcile.sh discard-reviewed <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
@@ -403,13 +404,19 @@ case "$mode" in
     captain_calls_resolved || exit 1
     put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
       '.backlog=true | .refill=true | .ready=$ready' ;;
+  captain-review-state)
+    [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
+    select_captain_review_receipt "$2" "$3" || exit 1
+    jq -c '{captain_keys:(.captain_keys // ""),decisions_reviewed:(.decisions_reviewed == true)}' \
+      "$RECORD" ;;
   captain-reviewed)
     [ "$#" -eq 4 ] && valid "$2" && valid "$3" || exit 2
     captain_keys=$(normalize_captain_keys "$4") || exit 1
     select_captain_review_receipt "$2" "$3" || exit 1
+    previous_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
+    combined_keys=$(normalize_captain_keys "$previous_keys,$captain_keys") || exit 1
+    [ "$combined_keys" = "$captain_keys" ] || exit 1
     if [ "$(jq -r '.decisions_reviewed // false' "$RECORD")" = true ]; then
-      previous_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
-      captain_keys=$(normalize_captain_keys "$previous_keys,$captain_keys") || exit 1
       put --arg keys "$captain_keys" '.captain_keys=$keys'
       exit
     fi

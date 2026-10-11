@@ -313,6 +313,25 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
   } | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
 }
 
+inventory_includes_previous() {  # <origin> <preserved-comma-list> <supplied-space-list>
+  local origin=$1 preserved=$2 supplied=$3 entry required candidate resolved found
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    required=$(resolve_entry "$origin" "$entry") || return 1
+    found=0
+    for candidate in $supplied; do
+      resolved=$(resolve_entry "$origin" "$candidate") || return 1
+      if [ "$resolved" = "$required" ]; then
+        found=1
+        break
+      fi
+    done
+    [ "$found" = 1 ] || return 1
+  done <<EOF
+$(printf '%s\n' "$preserved" | tr ',' '\n')
+EOF
+}
+
 meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
@@ -914,7 +933,8 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta receipt='' previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta receipt='' receipt_state='' receipt_previous='' receipt_reviewed=false
+  local previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -950,6 +970,21 @@ command_complete() {
   fi
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
+  fi
+  if [ -n "$receipt" ]; then
+    receipt_state=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+      captain-review-state "$origin" "$receipt") \
+      || fail "cannot authenticate terminal receipt $receipt for captain-call review"
+    receipt_previous=$(printf '%s\n' "$receipt_state" | jq -r '.captain_keys') \
+      || fail "cannot read preserved captain-call inventory from terminal receipt $receipt"
+    receipt_reviewed=$(printf '%s\n' "$receipt_state" | jq -r '.decisions_reviewed') \
+      || fail "cannot read captain-call review state from terminal receipt $receipt"
+    if [ "$receipt_reviewed" != true ] \
+      && ! inventory_includes_previous "$origin" "$receipt_previous" "$supplied"; then
+      fail "reviewed inventory must include every captain task preserved by terminal receipt $receipt"
+    fi
+    previous=$(sorted_key_union "$previous" "$receipt_previous")
   fi
   keys=$(sorted_key_union "$previous" "$supplied")
   if [ -n "$keys" ]; then
