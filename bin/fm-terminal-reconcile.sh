@@ -47,6 +47,17 @@ DIR="$STATE/terminal-delivery"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 valid() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1;; esac; }
 field() { sed -n "s/^$2=//p" "$1" | tail -1; }
+normalize_captain_keys() {
+  local input=$1 key normalized=''
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    valid "$key" || return 1
+    normalized="${normalized}${normalized:+ }$key"
+  done <<EOF
+$(printf '%s\n' "$input" | tr ',' '\n')
+EOF
+  printf '%s\n' "$normalized" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
+}
 put() {
   local tmp
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
@@ -82,17 +93,19 @@ select_existing_record() {
   [ -f "$RECORD" ]
 }
 select_record() {
-  local id=$1 meta="$STATE/$1.meta" tmp
+  local id=$1 meta="$STATE/$1.meta" tmp captain_keys decisions_reviewed=false
   select_record_path "$id" || return $?
   if [ -f "$RECORD" ]; then
     supersede_prior_records "$id"
     return $?
   fi
+  captain_keys=$(normalize_captain_keys "$(field "$meta" decision_keys)") || return 1
+  [ "$(field "$meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
   jq -n --arg id "$id" --arg key "$KEY" --arg incarnation "$INCARNATION" \
     --arg kind "$(field "$meta" kind)" --arg mode "$(field "$meta" mode)" --arg pr "$(field "$meta" pr)" \
-    --arg captain_keys "$(field "$meta" decision_keys)" \
-    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,superseded_by:"",captain_keys:$captain_keys}' > "$tmp" \
+    --arg captain_keys "$captain_keys" --argjson decisions_reviewed "$decisions_reviewed" \
+    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,superseded_by:"",captain_keys:$captain_keys,decisions_reviewed:$decisions_reviewed}' > "$tmp" \
     && mv "$tmp" "$RECORD" \
     && supersede_prior_records "$id"
 }
@@ -154,6 +167,7 @@ terminal_completed_after() {
 }
 captain_calls_resolved() {
   local id receipt captain_keys captain_key
+  jq -e '.decisions_reviewed == true' "$RECORD" >/dev/null || return 1
   id=$(jq -r .id "$RECORD") || return 1
   receipt=$(jq -r .key "$RECORD") || return 1
   set -- "$id"
@@ -257,10 +271,14 @@ case "$mode" in
           put --arg head "$3" '.default_head=$head' || exit 1
         fi ;;
       retired)
-        captain_keys=$(field "$STATE/$2.meta" decision_keys)
+        captain_keys=$(normalize_captain_keys "$(field "$STATE/$2.meta" decision_keys)") || exit 1
+        decisions_reviewed=false
+        [ "$(field "$STATE/$2.meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
         case "$3" in
-          normal) put --arg keys "$captain_keys" '.retired=true | .captain_keys=$keys' ;;
-          discard) put --arg keys "$captain_keys" '.retired=true | .discarded=true | .captain_keys=$keys' ;;
+          normal) put --arg keys "$captain_keys" --argjson reviewed "$decisions_reviewed" \
+            '.retired=true | .captain_keys=$keys | .decisions_reviewed=$reviewed' ;;
+          discard) put --arg keys "$captain_keys" --argjson reviewed "$decisions_reviewed" \
+            '.retired=true | .discarded=true | .captain_keys=$keys | .decisions_reviewed=$reviewed' ;;
           *) exit 2 ;;
         esac || exit 1 ;;
     esac
@@ -286,10 +304,30 @@ case "$mode" in
   report)
     manual=false
     fm_backlog_backend_manual "$CONFIG" && manual=true
+    report_records=()
     for RECORD in "$DIR"/*.json; do
       [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
-      jq -r --argjson manual "$manual" 'select(.reviewed!=true and ((.superseded_by // "") == "")) | "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded)" + (if .refill then "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending") elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key)." else "\nPreserve captain holds; reconcile PR custody/merge proof and guarded teardown before closing backlog, then dispatch only work whose blockers are gone and date is due." end)' "$RECORD" || exit 1
-    done ;;
+      report_records+=("$RECORD")
+    done
+    [ "${#report_records[@]}" -eq 0 ] || {
+      for RECORD in "${report_records[@]}"; do
+        while IFS= read -r receipt_line || [ -n "$receipt_line" ]; do
+          printf '%s\n' "$receipt_line"
+        done < "$RECORD"
+      done
+    } | jq -r --argjson manual "$manual" '
+      select(.reviewed!=true and ((.superseded_by // "") == "")) |
+      "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded) captain_reviewed=\(.decisions_reviewed // false)" +
+      (if .refill then
+        "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending")
+      elif (.decisions_reviewed // false) != true then
+        "\nCaptain-call inventory is not attested. Review every captain call, run bin/fm-captain-hold.sh complete \(.id) (--none | <task-id>...), then retry guarded teardown."
+      elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then
+        "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key)."
+      else
+        "\nPreserve captain holds; reconcile PR custody/merge proof and guarded teardown before closing backlog, then dispatch only work whose blockers are gone and date is due."
+      end)
+    ' || exit 1 ;;
   manual-complete)
     [ "$#" -eq 2 ] && valid "$2" || exit 2
     fm_backlog_backend_manual "$CONFIG" || exit 1

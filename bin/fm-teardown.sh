@@ -2588,19 +2588,26 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
-if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
-  REPORT="$DATA/$ID/report.md"
-  if [ ! -f "$REPORT" ]; then
-    echo "REFUSED: scout task $ID has no report at $REPORT." >&2
-    echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
-    exit 1
-  fi
-  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+verify_captain_call_completion() {
+  if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" verify "$ID" >/dev/null; then
-    echo "REFUSED: scout task $ID has not passed the captain-call completion gate." >&2
-    echo "Inventory its report and any visual review through bin/fm-captain-hold.sh before teardown." >&2
-    exit 1
+    return 0
   fi
+  echo "REFUSED: task $ID has not passed the captain-call completion gate." >&2
+  echo "Review every captain call, run bin/fm-captain-hold.sh complete $ID (--none | <task-id>...), then retry teardown." >&2
+  return 1
+}
+
+if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
+  if [ "$KIND" = scout ]; then
+    REPORT="$DATA/$ID/report.md"
+    if [ ! -f "$REPORT" ]; then
+      echo "REFUSED: scout task $ID has no report at $REPORT." >&2
+      echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
+      exit 1
+    fi
+  fi
+  verify_captain_call_completion || exit 1
 fi
 
 # A public commitment is not kept until its final reply lands in the ORIGINAL
@@ -2836,6 +2843,7 @@ fi
 if [ "$KIND" != secondmate ]; then
   terminal_retirement=normal
   [ "$FORCE" != --force ] || terminal_retirement=discard
+  [ "$FORCE" = --force ] || verify_captain_call_completion || exit 1
   "$SCRIPT_DIR/fm-terminal-reconcile.sh" retired "$ID" "$terminal_retirement" || exit 1
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1

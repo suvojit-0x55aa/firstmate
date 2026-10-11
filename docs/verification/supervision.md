@@ -427,12 +427,13 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper, and one interactive turn honored Stop payloads `false,true,true` under two consecutive exit-2 continuations. |
+| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | Historical predecessor evidence: the one-second foreground checkpoint returned without switching to the arm wrapper, and one interactive turn honored Stop payloads `false,true,true` under two consecutive exit-2 continuations. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
-Codex strict successor continuity was refreshed on 2026-10-10 with the tracked opt-in guard.
+The following Codex foreground-checkpoint measurement is historical predecessor evidence retained for the Stop transport and continuation payload observations; ordinary continuity is now owned by the synchronous Stop cycle.
+Codex strict successor continuity was measured on 2026-10-10 with the tracked opt-in guard.
 The fixture used an isolated project and home, accepted the fresh directory-trust dialog, ran the real one-second foreground checkpoint, and captured three real Stop payloads from one `turn_id`.
 
 ```sh

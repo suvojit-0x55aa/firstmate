@@ -10,7 +10,7 @@
 #
 # FM_CODEX_WATCH_CHECKPOINT selects 1..180 seconds (default 180), below the
 # tracked Stop hook's 240-second timeout so output and cleanup have headroom.
-# The arm's delivery ledger recovers an attached foreground checkpoint's wake.
+# The arm's delivery ledger recovers the attached synchronous Stop watcher's wake.
 # Only the owning primary's ancestry may park; session replacement, away mode,
 # loss of supervision need, and hook cancellation stand down without a rewake.
 # Signals reap only this invocation's tracked arm child. Deliberate interruption

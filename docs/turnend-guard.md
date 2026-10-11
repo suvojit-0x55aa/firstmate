@@ -168,7 +168,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 ## Regression coverage
 
 `tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, Codex synchronous Stop continuation, the cooperative `--claude` open-generation claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, generation and legacy claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
-`tests/fm-watch-checkpoint.test.sh` drives two consecutive actionable watcher exits, durable drain acknowledgements, Codex turn-end refusal, successor checkpoint ownership, and duplicate-owner refusal through the public scripts.
+`tests/fm-watch-checkpoint.test.sh` preserves the bounded diagnostic foreground-wait contract, while `tests/fm-codex-stop.test.sh` owns ordinary Codex Stop continuation and duplicate-owner refusal.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm and Stop-managed models' healthy fresh-beacon-without-a-watcher cases and stale-beacon alarms, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-codex-stop.test.sh` covers the synchronous Stop owner over real watcher processes and proves the public wake drain stays silent after an actionable Stop cleanup while the beacon remains fresh.
@@ -177,5 +177,5 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
-`FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` is the opt-in installed-Codex guard for repeated Stop continuation and foreground checkpoint behavior.
+`FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` is the opt-in installed-Codex guard for repeated synchronous Stop continuation behavior.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.

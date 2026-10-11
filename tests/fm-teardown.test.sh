@@ -207,7 +207,9 @@ write_meta() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
-    "mode=$mode"
+    "mode=$mode" \
+    "decisions_reviewed=1" \
+    "decision_keys="
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -695,6 +697,43 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+test_ship_teardown_requires_captain_inventory_attestation() {
+  local case_dir rc wt_head receipt
+  case_dir=$(make_case ship-captain-attestation)
+  write_meta "$case_dir" local-only ship
+  rm -f "$case_dir/fakebin/tasks-axi"
+  tasks-axi add task-x1 'Ship captain attestation' --start --json \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  sed -i.bak '/^decisions_reviewed=/d; /^decision_keys=/d' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  wt_commit "$case_dir" "reviewed ship work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/unreviewed.stdout" 2> "$case_dir/unreviewed.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ship-attestation: teardown must refuse an unreviewed captain-call inventory"
+  assert_present "$case_dir/state/task-x1.meta" "ship-attestation: refusal removed recoverable metadata"
+  assert_present "$case_dir/wt" "ship-attestation: refusal removed the reviewed worktree"
+  assert_grep "fm-captain-hold.sh complete task-x1" "$case_dir/unreviewed.stderr" \
+    "ship-attestation: refusal omitted the recovery owner"
+
+  PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-x1 --none >/dev/null \
+    || fail "ship-attestation: explicit empty inventory could not be recorded"
+  run_teardown "$case_dir" > "$case_dir/reviewed.stdout" 2> "$case_dir/reviewed.stderr" \
+    || fail "ship-attestation: reviewed teardown failed: $(cat "$case_dir/reviewed.stderr")"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  assert_present "$receipt" "ship-attestation: reviewed teardown omitted its terminal receipt"
+  [ "$(jq -r '.decisions_reviewed and .captain_keys == ""' "$receipt")" = true ] \
+    || fail "ship-attestation: terminal receipt lost the reviewed empty inventory"
+  pass "ordinary ship teardown requires and preserves captain-call inventory attestation"
 }
 
 test_no_mistakes_remote_custody_without_observer_refuses() {
@@ -2786,11 +2825,21 @@ test_persisted_landing_proof_revalidates_existing_worktree() {
   pass "persisted landing proof never replaces current worktree validation"
 }
 
+case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
+  '') ;;
+  ship-captain-attestation)
+    test_ship_teardown_requires_captain_inventory_attestation
+    exit
+    ;;
+  *) fail "unknown focused teardown test: $FM_TEARDOWN_FOCUSED_TEST" ;;
+esac
+
 test_local_only_fork_remote_refuses_without_default_landing
 test_open_pr_poll_blocks_teardown_until_landing
 test_manual_backend_open_pr_poll_blocks_teardown_until_landing
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_ship_teardown_requires_captain_inventory_attestation
 test_no_mistakes_remote_custody_without_observer_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

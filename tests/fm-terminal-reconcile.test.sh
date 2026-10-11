@@ -13,6 +13,10 @@ owner="$ROOT/bin/fm-terminal-reconcile.sh"
 tx() { tasks-axi "$@" --file "$FM_HOME/data/backlog.md"; }
 make_task() {
   tx add "$1" "$1" --start --json >/dev/null
+  printf 'spawn_gen=%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' "$1" > "$FM_HOME/state/$1.meta"
+}
+make_unreviewed_task() {
+  tx add "$1" "$1" --start --json >/dev/null
   printf 'spawn_gen=%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' "$1" > "$FM_HOME/state/$1.meta"
 }
 answer_captain_task() {
@@ -164,7 +168,7 @@ run_transferred_release_resume_case() {
     pre-resume) ;;
     stale-done) tx 'done' "$call" --no-prune --json >/dev/null ;;
     missing-proof)
-      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' \
+      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
         "$call" > "$FM_HOME/state/$call.meta"
       "$owner" custody "$call" https://github.com/o/r/pull/1
       "$owner" retired "$call" normal
@@ -172,7 +176,7 @@ run_transferred_release_resume_case() {
       tx 'done' "$call" --no-prune --json >/dev/null
       ;;
     new-success|unrelated)
-      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' \
+      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
         "$call" > "$FM_HOME/state/$call.meta"
       "$owner" merged "$call" https://github.com/o/r/pull/1
       "$owner" retired "$call" normal
@@ -422,6 +426,120 @@ run_cycle_answer_case() {
   [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" = true ] \
     || fail "$backend/$shape replay lost cycle-aware terminal progress"
 }
+run_attestation_case() {
+  local backend=$1 id="attestation-$1" call key rc=0 report
+  call="$id-call"
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown attestation backend: $backend" ;;
+  esac
+  make_unreviewed_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+  printf '%s\n' \
+    'needs-decision [key=delivery]: choose delivery treatment' \
+    'done: implementation complete' > "$FM_HOME/state/$id.status"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  [ "$(jq -r '.decisions_reviewed // false' "$FM_HOME/state/terminal-delivery/$key.json")" = false ] \
+    || fail "$backend missing inventory produced a reviewed receipt"
+  if [ "$backend" = manual ]; then
+    set +e
+    "$owner" manual-complete "$key"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "$backend missing inventory advanced manual completion"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = false ] \
+    || fail "$backend missing inventory advanced backlog completion"
+  report=$("$owner" report)
+  assert_contains "$report" 'Captain-call inventory is not attested' \
+    "$backend missing inventory was not visible"
+  assert_contains "$report" "fm-captain-hold.sh complete $id" \
+    "$backend missing inventory omitted its recovery owner"
+
+  FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+    FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+    complete "$id" "$call" >/dev/null
+  "$owner" retired "$id" normal
+  [ "$(jq -r '.decisions_reviewed and .captain_keys == $call' --arg call "$call" \
+    "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
+    || fail "$backend receipt did not preserve the reviewed normalized inventory"
+  answer_captain_task "$call"
+  rm "$FM_HOME/state/$id.meta" "$FM_HOME/state/$id.status"
+  if [ "$backend" = manual ]; then
+    tx 'done' "$id" --no-prune --json >/dev/null
+    "$owner" manual-complete "$key"
+    "$owner" manual-complete "$key"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
+    || fail "$backend reviewed inventory did not survive metadata deletion and replay"
+}
+
+test_report_batches_receipts_at_scale() {
+  local home="$TMP_ROOT/report-scale" dir fakebin real_jq out count i old_key=scale-release-old new_key=scale-release-new
+  mkdir -p "$home/state/terminal-delivery" "$home/config" "$home/data" "$home/fakebin"
+  dir="$home/state/terminal-delivery"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  for i in $(seq 1 108); do
+    printf '{"schema":"fm-terminal-delivery.v1","key":"reviewed-%03d","id":"reviewed-%03d","incarnation":"reviewed-%03d","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/1","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","decisions_reviewed":true}\n' \
+      "$i" "$i" "$i" > "$dir/reviewed-$(printf '%03d' "$i").json"
+  done
+  printf '%s\n' \
+    '{"schema":"fm-terminal-delivery.v1","key":"active-missing","id":"active-missing","incarnation":"active-missing","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/2","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":"","captain_keys":"","decisions_reviewed":false}' \
+    > "$dir/active-missing.json"
+  printf '%s\n' \
+    '{"schema":"fm-terminal-delivery.v1","key":"active-ready","id":"active-ready","incarnation":"active-ready","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/3","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":"","captain_keys":"","decisions_reviewed":true}' \
+    > "$dir/active-ready.json"
+  printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"scale-release","incarnation":"old","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/4","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":true,"superseded_by":"%s","captain_keys":"","decisions_reviewed":true}\n' \
+    "$old_key" "$new_key" > "$dir/$old_key.json"
+  printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"scale-release","incarnation":"new","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/4","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","decisions_reviewed":true}\n' \
+    "$new_key" > "$dir/$new_key.json"
+
+  real_jq=$(command -v jq)
+  fakebin="$home/fakebin"
+  cat > "$fakebin/jq" <<'EOF'
+#!/usr/bin/env bash
+count=$(cat "$FM_JQ_COUNT" 2>/dev/null || printf 0)
+printf '%s\n' "$((count + 1))" > "$FM_JQ_COUNT"
+exec "$FM_REAL_JQ" "$@"
+EOF
+  chmod +x "$fakebin/jq"
+  : > "$home/jq.count"
+  out=$(PATH="$fakebin:$PATH" FM_REAL_JQ="$real_jq" FM_JQ_COUNT="$home/jq.count" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$owner" report)
+  count=$(cat "$home/jq.count")
+  [ "$count" = 1 ] || fail "scale report launched jq $count times"
+  [ "$(printf '%s\n' "$out" | grep -c '^TERMINAL DELIVERY:' || true)" -eq 2 ] \
+    || fail "scale report changed actionable receipt selection: $out"
+  assert_contains "$out" 'TERMINAL DELIVERY: active-missing ' 'scale report lost missing-attestation receipt'
+  assert_contains "$out" 'TERMINAL DELIVERY: active-ready ' 'scale report lost manual-ready receipt'
+  assert_not_contains "$out" 'TERMINAL DELIVERY: reviewed-' 'scale report resurfaced permanently reviewed receipts'
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$owner" completed-after scale-release "$old_key" \
+    || fail 'batched report discarded reviewed receipt history needed by successor proof'
+  pass 'terminal report batches parser work while preserving actionable output and proof history'
+}
+case "${FM_TERMINAL_FOCUSED_TEST:-}" in
+  '') ;;
+  captain-attestation-report)
+    for attestation_backend in auto manual; do
+      run_attestation_case "$attestation_backend"
+    done
+    test_report_batches_receipts_at_scale
+    exit
+    ;;
+  *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
+esac
 make_task article
 "$owner" observe article 'done' https://github.com/o/r/pull/1
 "$owner" reconcile
@@ -484,7 +602,8 @@ assert_contains "$(tx show replay)" 'state: done' 'fixture failed before durable
 assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: replay')" 'backlog_done=true' 'replay did not converge after interrupted publication'
 pass 'backend success followed by lost receipt safely replays without losing refill'
 make_task localproof
-printf 'spawn_gen=localproof\nkind=ship\nmode=local-only\n' > "$FM_HOME/state/localproof.meta"
+printf 'spawn_gen=localproof\nkind=ship\nmode=local-only\ndecisions_reviewed=1\ndecision_keys=\n' \
+  > "$FM_HOME/state/localproof.meta"
 "$owner" retired localproof normal
 "$owner" reconcile
 assert_contains "$(tx show localproof)" 'state: in_flight' 'custody teardown falsely proved local landing'
@@ -594,6 +713,11 @@ manual transferred
 manual legacy
 EOF
 pass 'terminal reconciliation binds repeated answers to the current hold cycle'
+for attestation_backend in auto manual; do
+  run_attestation_case "$attestation_backend"
+done
+pass 'terminal completion requires durable captain-call inventory attestation'
+test_report_batches_receipts_at_scale
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"
