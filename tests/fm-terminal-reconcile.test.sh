@@ -1005,6 +1005,90 @@ EOF
   export FM_HOME
   pass 'terminal report and reconciliation stream history beyond the argv limit'
 }
+
+test_reconcile_cursor_orders_streamed_candidates() {
+  local original_home=$FM_HOME home="$TMP_ROOT/reconcile-cursor-order" dir fakebin
+  local history_key history_record history_digest real_find real_tasks keys key_a key_b key_c
+  local id_a id_b id_c record_a record_b record_c run
+  FM_HOME=$home
+  export FM_HOME
+  mkdir -p "$home"/{state/terminal-delivery,config,data,fakebin}
+  dir="$home/state/terminal-delivery"
+  fakebin="$home/fakebin"
+  printf '%s\n' tasks-axi > "$home/config/backlog-backend"
+
+  make_task cursor-history
+  "$owner" merged cursor-history https://github.com/o/r/pull/1
+  "$owner" retired cursor-history normal
+  "$owner" reconcile
+  "$owner" reconcile
+  history_key=$(jq -r 'select(.id=="cursor-history")|.key' "$dir/"*.json)
+  "$owner" refill-reviewed "$history_key"
+  history_record="$dir/$history_key.json"
+  history_digest=$(shasum -a 256 "$history_record" | awk '{print $1}')
+
+  for id in cursor-one cursor-two cursor-three; do
+    make_task "$id"
+    "$owner" merged "$id" https://github.com/o/r/pull/1
+    "$owner" retired "$id" normal
+  done
+  keys=$(jq -r 'select(.id | startswith("cursor-") and . != "cursor-history")|.key' "$dir/"*.json | LC_ALL=C sort)
+  key_a=$(printf '%s\n' "$keys" | sed -n '1p')
+  key_b=$(printf '%s\n' "$keys" | sed -n '2p')
+  key_c=$(printf '%s\n' "$keys" | sed -n '3p')
+  [ -n "$key_a" ] && [ -n "$key_b" ] && [ -n "$key_c" ] \
+    || fail 'cursor-order fixture did not create three authenticated candidates'
+  record_a="$dir/$key_a.json"
+  record_b="$dir/$key_b.json"
+  record_c="$dir/$key_c.json"
+  id_a=$(jq -r .id "$record_a")
+  id_b=$(jq -r .id "$record_b")
+  id_c=$(jq -r .id "$record_c")
+  printf '%s\n' "$key_b.json" > "$dir/.cursor"
+
+  real_find=$(command -v find)
+  real_tasks=$(command -v tasks-axi)
+  cat > "$fakebin/find" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "$FM_TEST_RECEIPT_DIR" ]; then
+  cat "$FM_TEST_RECORD_B" "$FM_TEST_RECORD_A" "$FM_TEST_RECORD_C"
+  exit 0
+fi
+exec "$FM_REAL_FIND" "$@"
+EOF
+  cat > "$fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "$FM_TEST_FAIL_ID" ]; then
+  exit 1
+fi
+exec "$FM_REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$fakebin/find" "$fakebin/tasks-axi"
+
+  for run in 1 2; do
+    if PATH="$fakebin:$PATH" FM_REAL_FIND="$real_find" FM_REAL_TASKS_AXI="$real_tasks" \
+      FM_TEST_RECEIPT_DIR="$dir" FM_TEST_RECORD_A="$record_a" \
+      FM_TEST_RECORD_B="$record_b" FM_TEST_RECORD_C="$record_c" FM_TEST_FAIL_ID="$id_b" \
+      "$owner" reconcile; then
+      fail "cursor-order reconcile $run did not surface the persistent middle failure"
+    fi
+    [ "$(jq -r .backlog "$record_a")" = true ] \
+      || fail "cursor-order reconcile $run starved the candidate before the cursor"
+    [ "$(jq -r .backlog "$record_c")" = true ] \
+      || fail "cursor-order reconcile $run starved the candidate after the cursor"
+    [ "$(jq -r .backlog "$record_b")" = false ] \
+      || fail "cursor-order reconcile $run advanced the deliberately failing candidate"
+    [ "$(shasum -a 256 "$history_record" | awk '{print $1}')" = "$history_digest" ] \
+      || fail "cursor-order reconcile $run changed retained reviewed history"
+    [ "$(cat "$dir/.cursor")" = "$key_b.json" ] \
+      || fail "cursor-order reconcile $run did not return fairly to the failing candidate"
+  done
+  assert_contains "$(tx show "$id_a")" 'state: done' 'cursor-order reconcile did not complete the lower candidate'
+  assert_contains "$(tx show "$id_c")" 'state: done' 'cursor-order reconcile did not complete the upper candidate'
+  FM_HOME=$original_home
+  export FM_HOME
+  pass 'terminal reconciliation orders streamed candidates before cursor traversal'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -1043,6 +1127,10 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
       run_normalized_inventory_case "$attestation_backend"
       run_completed_inventory_replay_case "$attestation_backend"
     done
+    exit
+    ;;
+  cursor-order)
+    test_reconcile_cursor_orders_streamed_candidates
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
@@ -1230,6 +1318,7 @@ for attestation_backend in auto manual; do
 done
 test_report_batches_receipts_at_scale
 test_reconcile_streams_history_past_argv_limit
+test_reconcile_cursor_orders_streamed_candidates
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"

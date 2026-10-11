@@ -326,6 +326,21 @@ fm_codex_stop_record_clear() {  # <state> <session-pid> <identity>
   rm -f "$record"
 }
 
+fm_codex_stop_handling_owned_by_session() {  # <state>
+  local record="$1/.codex-stop-health" lock="$1/.lock"
+  local schema session_pid identity phase current_identity
+  [ -f "$record" ] && [ ! -L "$record" ] && [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  schema=$(fm_codex_stop_record_value "$record" schema || true)
+  session_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+  identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+  phase=$(fm_codex_stop_record_value "$record" phase || true)
+  [ "$schema" = fm-codex-stop-health.v1 ] && [ "$phase" = handling ] || return 1
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(cat "$lock" 2>/dev/null)" = "$session_pid" ] || return 1
+  current_identity=$(fm_pid_identity "$session_pid") || return 1
+  [ "$current_identity" = "$identity" ]
+}
+
 fm_codex_stop_handling_healthy() {  # <state>
   local state=$1 record="$1/.codex-stop-health" lock="$1/.lock"
   local schema session_pid identity cycle phase successors expires current_identity now

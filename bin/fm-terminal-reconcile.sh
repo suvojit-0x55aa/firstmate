@@ -362,7 +362,7 @@ case "$mode" in
       select(.reviewed != true and ((.superseded_by // "") == "") and .discarded != true)
       | .key
       | select(type == "string")
-    ' > "$RECONCILE_CANDIDATES" || exit 1
+    ' | LC_ALL=C sort -u > "$RECONCILE_CANDIDATES" || exit 1
     for range in after through; do
       while IFS= read -r KEY || [ -n "$KEY" ]; do
         valid "$KEY" || continue

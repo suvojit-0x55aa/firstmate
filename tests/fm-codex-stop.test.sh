@@ -95,6 +95,7 @@ run_configured_stop() {
     export FM_CHECK_INTERVAL=999999
     export FM_ARM_CONFIRM_TIMEOUT=3
     export FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}"
+    export FM_GUARD_GRACE="${TEST_GRACE:-300}"
     printf '{"stop_hook_active":false,"turn_id":"configured-stop"}' | bash -c "$command"
   )
 }
@@ -560,7 +561,8 @@ test_final_source_wake_retains_continuation() {
 }
 
 test_public_stop_dispatches_pending_queue() {
-  local dir release rc drain ack_through recovery_generation stop_owner replacement_pid
+  local dir release rc drain ack_through recovery_generation old_expiry now
+  local stop_owner replacement_pid identity
 
   dir=$(make_home public-final-source-before-stop)
   rm "$dir/state/work.meta"
@@ -574,7 +576,7 @@ test_public_stop_dispatches_pending_queue() {
   assert_grep 'procevent terminal-test final-source 1' "$dir/state/.wake-queue" \
     'terminal source did not leave its durable wake before the configured Stop hook'
   rc=0
-  TEST_BUDGET=12 run_configured_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  TEST_BUDGET=12 TEST_GRACE=8 run_configured_stop "$dir" > "$dir/out" 2>&1 || rc=$?
   expect_code 2 "$rc" 'configured Stop hook stranded a final-source wake'
   assert_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
     'configured Stop hook omitted the final-source continuation'
@@ -582,6 +584,7 @@ test_public_stop_dispatches_pending_queue() {
     'configured Stop hook consumed the final-source wake before handling'
   assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
     'configured Stop hook omitted its exactly-one successor state'
+  old_expiry=$(sed -n 's/^expires_epoch=//p' "$dir/state/.codex-stop-health")
   drain=$(env -u CLAUDECODE -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GROK_AGENT -u FM_SUPERVISION_MODEL \
     PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
     FM_PROCEVENT_CLAIM_ROOT="$dir/claims" "$dir/bin/fm-wake-drain.sh" 2>&1)
@@ -598,10 +601,20 @@ test_public_stop_dispatches_pending_queue() {
     FM_PROCEVENT_CLAIM_ROOT="$dir/claims" "$dir/bin/fm-wake-drain.sh" \
       --ack-through "$ack_through" --recovery-generation "$recovery_generation" >/dev/null
   rc=0
-  TEST_BUDGET=1 run_configured_stop "$dir" > "$dir/after-ack" 2>&1 || rc=$?
+  TEST_BUDGET=1 TEST_GRACE=8 run_configured_stop "$dir" > "$dir/after-ack" 2>&1 || rc=$?
   expect_code 0 "$rc" 'configured Stop hook continued after final-source acknowledgement'
   assert_not_contains "$(cat "$dir/after-ack")" 'Run bin/fm-wake-drain.sh' \
     'configured Stop hook duplicated an acknowledged continuation'
+  assert_absent "$dir/state/.codex-stop-health" \
+    'configured empty successor left its handling claim pending'
+  now=$(date +%s)
+  if [ "$now" -le "$old_expiry" ]; then sleep "$((old_expiry - now + 1))"; fi
+  : > "$dir/state/later-work.meta"
+  rc=0
+  TEST_BUDGET=1 TEST_GRACE=3 run_configured_stop "$dir" > "$dir/later-work" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'later work did not establish supervision after the old handling deadline'
+  assert_not_contains "$(cat "$dir/later-work")" 'handling window expired' \
+    'later work inherited the fulfilled handling deadline'
 
   dir=$(make_home public-pending-queue-only)
   rm "$dir/state/work.meta"
@@ -623,6 +636,20 @@ test_public_stop_dispatches_pending_queue() {
   expect_code 0 "$rc" 'configured Stop hook continued from truly empty state'
   assert_not_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' \
     'configured Stop hook emitted a continuation without work or sources'
+
+  dir=$(make_home public-expired-empty-successor)
+  rm "$dir/state/work.meta"
+  freeze_configured_stop_runtime "$dir"
+  identity=$(PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$dir" $$)
+  PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$(date +%s)" expired-public' \
+      _ "$dir" "$dir" $$ "$identity"
+  rc=0
+  TEST_BUDGET=1 run_configured_stop "$dir" > "$dir/out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'configured Stop hook ignored an expired missing successor'
+  assert_contains "$(cat "$dir/out")" 'handling window expired before its required Stop successor' \
+    'configured Stop hook hid the expired successor diagnosis'
 
   dir=$(make_home public-live-source)
   rm "$dir/state/work.meta"
