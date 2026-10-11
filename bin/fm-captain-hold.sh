@@ -26,7 +26,7 @@
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
-#   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
+#   fm-captain-hold.sh complete <origin-id> [--receipt <receipt-key>] (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [<captain-task-id>...]
 #   fm-captain-hold.sh diverged
@@ -107,8 +107,9 @@
 # the inventory is unioned idempotently into the metadata, and every still-open
 # keyed status decision is transferred to its durable owner with a
 # `captain-held [key=...]` status close naming the inventory. Later review
-# passes may add ids. A post-teardown visual review can complete against the
-# surviving report and tasks without recreating task state.
+# passes may add ids. After metadata retirement, `--receipt` binds recovery to
+# the exact authenticated terminal incarnation and persists the reviewed
+# inventory there without recreating task state or advancing delivery.
 # `verify` is read-only and is called by every non-forced ship and scout
 # teardown, so teardown cannot erase a source before this gate has succeeded:
 # every recorded inventory entry must still be durable and no keyed status
@@ -358,8 +359,12 @@ release_resolution_matches_current() {  # <task-id> <task-body>
 }
 
 terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1> <task-id>
-  local mode release_receipt
-  body_has_resolution_record "$1" || return 0
+  local mode release_receipt cycle
+  if ! body_has_resolution_record "$1"; then
+    cycle=$(current_hold_cycle "$1" || true)
+    [ -z "$cycle" ]
+    return
+  fi
   body_has_current_resolution "$1" || return 1
   mode=$(recorded_resolution_mode "$1" || true)
   [ "$mode" = released ] || return 0
@@ -909,10 +914,17 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta receipt='' previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
+  if [ "${1:-}" = --receipt ]; then
+    [ "$#" -ge 3 ] || { usage >&2; exit 2; }
+    receipt=${2:-}
+    validate_slug receipt-key "$receipt"
+    shift 2
+  fi
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] && has_meta=1
   if [ "$has_meta" = 1 ]; then
@@ -923,6 +935,9 @@ command_complete() {
   fi
   require_task_reader
   origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  if [ "$has_meta" != 1 ]; then
+    [ -n "$receipt" ] || fail "retired origin $origin requires its exact terminal receipt for completion recovery"
+  fi
   if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
     supplied=''
   else
@@ -958,24 +973,31 @@ EOF
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
+  fi
 
-    # Transfer every still-open status decision to the durable captain-held
-    # inventory so the live status fold does not duplicate the same Captain's
-    # Call item. The transfer line is this home's own bookkeeping close,
-    # written by the turn that just reviewed the inventory, so it uses the
-    # guarded self-announced append (bin/fm-wake-lib.sh) and does not wake this
-    # same session; an append failure still fails this command loudly.
-    if [ -n "$keys" ]; then
-      while IFS=$'\t' read -r key _verb _summary; do
-        [ -n "$key" ] || continue
-        transfer_rc=0
-        fm_wake_status_append_self_announced "$STATE" "$status_file" \
-          "captain-held [key=$key]: tracked by $keys" || transfer_rc=$?
-        [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
-      done <<EOF
+  if [ -n "$receipt" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+      captain-reviewed "$origin" "$receipt" "$keys" >/dev/null \
+      || fail "cannot persist the reviewed captain-call inventory to terminal receipt $receipt"
+  fi
+
+  # Transfer every still-open status decision to the durable captain-held
+  # inventory so the live status fold does not duplicate the same Captain's
+  # Call item. The transfer line is this home's own bookkeeping close,
+  # written by the turn that just reviewed the inventory, so it uses the
+  # guarded self-announced append (bin/fm-wake-lib.sh) and does not wake this
+  # same session; an append failure still fails this command loudly.
+  if [ -n "$keys" ]; then
+    while IFS=$'\t' read -r key _verb _summary; do
+      [ -n "$key" ] || continue
+      transfer_rc=0
+      fm_wake_status_append_self_announced "$STATE" "$status_file" \
+        "captain-held [key=$key]: tracked by $keys" || transfer_rc=$?
+      [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
+    done <<EOF
 $raw_open
 EOF
-    fi
   fi
   printf 'complete: %s captain-call inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
 }

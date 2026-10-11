@@ -11,6 +11,10 @@ export FM_HOME="$TMP_ROOT/home" FM_ROOT_OVERRIDE="$ROOT"
 mkdir -p "$FM_HOME"/{state,config,data}
 owner="$ROOT/bin/fm-terminal-reconcile.sh"
 tx() { tasks-axi "$@" --file "$FM_HOME/data/backlog.md"; }
+captain() {
+  FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+    FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
+}
 make_task() {
   tx add "$1" "$1" --start --json >/dev/null
   printf 'spawn_gen=%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' "$1" > "$FM_HOME/state/$1.meta"
@@ -496,6 +500,132 @@ run_attestation_case() {
     || fail "$backend/$terminal reviewed inventory did not survive metadata deletion and replay"
 }
 
+run_retired_attestation_recovery_case() {
+  local backend=$1 id="retired-review-$1" call key record report rc before after
+  local forged=forged-recovery missing_key ambiguous="reused-review-$1" first_key second_key
+  local fakebin="$FM_HOME/$id-fakebin"
+  call="$id-call"
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown retired attestation backend: $backend" ;;
+  esac
+  make_unreviewed_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  tx hold "$call" --reason 'retired captain review pending' --kind captain --json >/dev/null
+  printf '%s\n' \
+    'needs-decision [key=delivery]: choose retired delivery treatment' \
+    'done: implementation terminal' > "$FM_HOME/state/$id.status"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  rm "$FM_HOME/state/$id.meta"
+  report=$("$owner" report)
+  assert_contains "$report" "complete $id --receipt $key" \
+    "$backend retired missing attestation omitted its exact recovery command"
+  if captain complete "$id" "$call" > "$FM_HOME/$id-no-receipt.out" 2> "$FM_HOME/$id-no-receipt.err"; then
+    fail "$backend retired attestation recovery accepted a missing receipt identity"
+  fi
+  if captain complete "$id" --receipt "$key" --none \
+    > "$FM_HOME/$id-none.out" 2> "$FM_HOME/$id-none.err"; then
+    fail "$backend retired attestation recovery erased an unresolved keyed call"
+  fi
+  if captain complete "$id" --receipt "$key" "$id-missing-call" \
+    > "$FM_HOME/$id-missing-task.out" 2> "$FM_HOME/$id-missing-task.err"; then
+    fail "$backend retired attestation recovery accepted missing captain-task evidence"
+  fi
+
+  jq --arg key "$forged" '.key=$key' "$record" \
+    > "$FM_HOME/state/terminal-delivery/$forged.json"
+  if captain complete "$id" --receipt "$forged" "$call" \
+    > "$FM_HOME/$id-forged.out" 2> "$FM_HOME/$id-forged.err"; then
+    fail "$backend retired attestation recovery accepted an unauthenticated receipt"
+  fi
+  rm "$FM_HOME/state/terminal-delivery/$forged.json"
+
+  missing_key=$(printf '%s' "$id|||" | shasum -a 256 | awk '{print $1}')
+  jq --arg key "$missing_key" '.key=$key | .incarnation="||"' "$record" \
+    > "$FM_HOME/state/terminal-delivery/$missing_key.json"
+  if captain complete "$id" --receipt "$missing_key" "$call" \
+    > "$FM_HOME/$id-missing-identity.out" 2> "$FM_HOME/$id-missing-identity.err"; then
+    fail "$backend retired attestation recovery accepted a receipt without incarnation identity"
+  fi
+  rm "$FM_HOME/state/terminal-delivery/$missing_key.json"
+
+  before=$(jq -cS 'del(.captain_keys,.decisions_reviewed)' "$record")
+  mkdir -p "$fakebin"
+  cat > "$fakebin/mv" <<'EOF'
+#!/usr/bin/env bash
+target=
+for arg in "$@"; do target=$arg; done
+if [ -f "$FM_FAIL_MV_ONCE" ] && [ "$target" = "$FM_FAIL_MV_TARGET" ]; then
+  rm "$FM_FAIL_MV_ONCE"
+  /bin/mv "$@" || exit $?
+  exit 42
+fi
+exec /bin/mv "$@"
+EOF
+  chmod +x "$fakebin/mv"
+  : > "$FM_HOME/$id-fail-mv.once"
+  rc=0
+  PATH="$fakebin:$PATH" FM_FAIL_MV_ONCE="$FM_HOME/$id-fail-mv.once" \
+    FM_FAIL_MV_TARGET="$record" captain complete "$id" --receipt "$key" "$call" \
+    > "$FM_HOME/$id-interrupted.out" 2> "$FM_HOME/$id-interrupted.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "$backend retired attestation interruption did not surface"
+  jq -e --arg call "$call" '.decisions_reviewed == true and .captain_keys == $call' \
+    "$record" >/dev/null || fail "$backend interrupted attestation did not leave one durable receipt transition"
+  grep -F 'captain-held [key=delivery]' "$FM_HOME/state/$id.status" >/dev/null 2>&1 \
+    && fail "$backend interrupted attestation transferred status after reporting persistence failure"
+  [ ! -e "$FM_HOME/state/$id.meta" ] \
+    || fail "$backend retired attestation recovery recreated live metadata"
+  after=$(jq -cS 'del(.captain_keys,.decisions_reviewed)' "$record")
+  [ "$before" = "$after" ] \
+    || fail "$backend retired attestation recovery changed delivery, backlog, or refill state"
+
+  captain complete "$id" --receipt "$key" "$call" >/dev/null \
+    || fail "$backend interrupted retired attestation did not replay"
+  captain complete "$id" --receipt "$key" "$call" >/dev/null \
+    || fail "$backend retired attestation replay was not idempotent"
+  grep -F 'captain-held [key=delivery]: tracked by' "$FM_HOME/state/$id.status" >/dev/null \
+    || fail "$backend retired attestation replay did not transfer the keyed call"
+  answer_captain_task "$call"
+  rm "$FM_HOME/state/$id.status"
+  if [ "$backend" = manual ]; then
+    tx done "$id" --no-prune --json >/dev/null
+    "$owner" manual-complete "$key"
+    "$owner" manual-complete "$key"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$record")" = true ] \
+    || fail "$backend exact retired attestation did not unblock reconciliation"
+
+  make_unreviewed_task "$ambiguous"
+  "$owner" merged "$ambiguous" https://github.com/o/r/pull/1
+  "$owner" retired "$ambiguous" normal
+  first_key=$(jq -r --arg id "$ambiguous" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' \
+    "$ambiguous" > "$FM_HOME/state/$ambiguous.meta"
+  "$owner" merged "$ambiguous" https://github.com/o/r/pull/1
+  "$owner" retired "$ambiguous" normal
+  second_key=$(jq -r --arg id "$ambiguous" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  [ "$first_key" != "$second_key" ] || fail "$backend reused-id fixture did not create a second incarnation"
+  rm "$FM_HOME/state/$ambiguous.meta"
+  if captain complete "$ambiguous" --receipt "$second_key" --none \
+    > "$FM_HOME/$ambiguous.out" 2> "$FM_HOME/$ambiguous.err"; then
+    fail "$backend metadata-free recovery accepted an ambiguous reused task id"
+  fi
+  pass "$backend retired captain attestation recovers exact receipts and rejects ambiguity"
+}
+
 test_discard_review_acknowledgement() {
   local id=discarded key record report forged=forged-discard
   make_task "$id"
@@ -603,6 +733,12 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
       done
     done
     test_discard_review_acknowledgement
+    exit
+    ;;
+  retired-attestation-recovery)
+    for attestation_backend in auto manual; do
+      run_retired_attestation_recovery_case "$attestation_backend"
+    done
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
@@ -782,6 +918,9 @@ for attestation_backend in auto manual; do
   done
 done
 pass 'terminal completion requires durable captain-call inventory attestation'
+for attestation_backend in auto manual; do
+  run_retired_attestation_recovery_case "$attestation_backend"
+done
 test_report_batches_receipts_at_scale
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \

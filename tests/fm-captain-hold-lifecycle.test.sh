@@ -431,6 +431,7 @@ EOF
 
 test_rehold_cycle_is_interruption_safe() {
   local home show initial_cycle interrupted_cycle active_cycle replay_cycle records rc
+  local first_show first_cycle first_replay first_records
   home=$(make_home rehold-interruption)
   tasks_in "$home" add sample-interrupted-work "Ship interruption-safe work" \
     --kind ship --repo sample --body 'Interruption-safe work body.' >/dev/null \
@@ -466,6 +467,47 @@ exec "$REAL_TASKS_AXI" "$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
   : > "$home/tasks-axi.log"
+
+  tasks_in "$home" add sample-first-interrupted-work "Ship first-cycle interruption-safe work" \
+    --kind ship --repo sample --body 'First-cycle work body.' >/dev/null \
+    || fail "could not create the first-cycle interruption fixture"
+  printf 'spawn_gen=first-interruption\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-first-interrupted-work.meta"
+  : > "$home/fail-update-after.once"
+  rc=0
+  run_captain "$home" hold sample-first-interrupted-work --reason "captain first-cycle answer pending" \
+    > "$home/first-update-interruption.out" 2> "$home/first-update-interruption.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the first hold-cycle persistence interruption did not stop the hold command"
+  first_show=$(tasks_in "$home" show sample-first-interrupted-work --full)
+  assert_contains "$first_show" 'held: no' "the first-cycle interruption applied an unconfirmed hold"
+  first_cycle=$(printf '%s\n' "$first_show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$first_cycle" ] || fail "the first-cycle interruption did not preserve its intent"
+  if run_captain "$home" terminal-ready sample-first-interrupted-work \
+    --receipt first-interrupted > "$home/first-ready.out" 2> "$home/first-ready.err"; then
+    fail "an unmatched first hold-cycle intent authorized terminal readiness"
+  fi
+  run_captain "$home" hold sample-first-interrupted-work --reason "captain first-cycle answer pending" >/dev/null \
+    || fail "the interrupted first hold-cycle did not retry safely"
+  first_show=$(tasks_in "$home" show sample-first-interrupted-work --full)
+  first_replay=$(printf '%s\n' "$first_show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$first_replay" ] && [ "$first_replay" != "$first_cycle" ] \
+    || fail "the inactive first hold retry reused its unmatched cycle intent"
+  first_records=$(printf '%s\n' "$first_show" | grep -o 'Captain hold opened by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$first_records" = 2 ] || fail "the first hold retry did not preserve distinct interruption history"
+  printf 'Captain approved the first interrupted task.\n' > "$home/first-answer.txt"
+  run_captain "$home" answer sample-first-interrupted-work \
+    --decision-file "$home/first-answer.txt" >/dev/null \
+    || fail "the genuine first-cycle answer was not accepted"
+  run_captain "$home" terminal-ready sample-first-interrupted-work \
+    --receipt first-answered >/dev/null \
+    || fail "the genuine first-cycle answer did not authorize readiness"
+  run_captain "$home" answer sample-first-interrupted-work \
+    --decision-file "$home/first-answer.txt" >/dev/null \
+    || fail "the genuine first-cycle answer replay failed"
+  first_show=$(tasks_in "$home" show sample-first-interrupted-work --full)
+  [ "$(printf '%s\n' "$first_show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the genuine first-cycle answer replay duplicated its resolution"
+
   printf 'spawn_gen=interruption-two\nkind=ship\nmode=no-mistakes\n' \
     > "$home/state/sample-interrupted-work.meta"
   : > "$home/fail-update-after.once"
@@ -662,7 +704,7 @@ test_out_of_band_close_is_recordable() {
 # A post-teardown visual review completes against the surviving report and
 # durable tasks, with no volatile task metadata and no second decision database.
 test_visual_review_uses_shared_completion_owner() {
-  local home id json
+  local home id json receipt
   home=$(make_home visual-review)
   id=sample-board-review
   mkdir -p "$home/data/$id"
@@ -675,13 +717,16 @@ test_visual_review_uses_shared_completion_owner() {
   run_teardown "$home" "$id" >/dev/null 2> "$home/visual-teardown.err" \
     || fail "completed investigation teardown failed: $(cat "$home/visual-teardown.err")"
   tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null
+  receipt=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == "")) | .key' \
+    "$home/state/terminal-delivery/"*.json)
 
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   run_captain "$home" hold sample-layout-call --title "Choose the sample layout" \
     --reason "captain layout choice pending" --repo sample --origin "$id" >/dev/null \
     || fail "post-teardown visual review could not use the shared hold owner"
-  run_captain "$home" complete "$id" sample-layout-call >/dev/null \
+  run_captain "$home" complete "$id" --receipt "$receipt" sample-layout-call >/dev/null \
     || fail "post-teardown visual review could not use the shared completion owner"
   json=$(run_bearings "$home") || fail "Bearings failed after the ended visual review"
   printf '%s' "$json" | jq -e '
@@ -1380,6 +1425,11 @@ case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
     ;;
   terminal-status-attestation)
     test_terminal_status_requires_explicit_resolution_or_transfer
+    exit 0
+    ;;
+  review-recovery)
+    test_rehold_cycle_is_interruption_safe
+    test_visual_review_uses_shared_completion_owner
     exit 0
     ;;
   '') ;;

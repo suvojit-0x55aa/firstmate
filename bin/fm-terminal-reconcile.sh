@@ -11,6 +11,7 @@
 #        fm-terminal-reconcile.sh completed-after <id> <receipt-key>
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
+#        fm-terminal-reconcile.sh captain-reviewed <id> <receipt-key> <captain-task-ids>
 #        fm-terminal-reconcile.sh discard-reviewed <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
 #
@@ -94,19 +95,48 @@ select_existing_record() {
   select_record_path "$1" || return $?
   [ -f "$RECORD" ]
 }
-select_authenticated_receipt_key() {
-  local key=$1 id incarnation expected
-  valid "$key" || return 2
-  RECORD="$DIR/$key.json"
-  [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 1
+receipt_path_authenticated() {
+  local candidate=$1 name key id incarnation expected
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  name=${candidate##*/}
+  case "$name" in *.json) key=${name%.json} ;; *) return 1 ;; esac
+  valid "$key" || return 1
   jq -e --arg key "$key" \
     '.schema == "fm-terminal-delivery.v1" and .key == $key and (.id | type == "string" and length > 0) and (.incarnation | type == "string" and length > 0)' \
-    "$RECORD" >/dev/null || return 1
-  id=$(jq -r .id "$RECORD")
-  incarnation=$(jq -r .incarnation "$RECORD")
+    "$candidate" >/dev/null || return 1
+  id=$(jq -r .id "$candidate")
+  incarnation=$(jq -r .incarnation "$candidate")
   valid "$id" || return 1
   expected=$(printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}')
   [ "$expected" = "$key" ]
+}
+select_authenticated_receipt_key() {
+  local key=$1
+  valid "$key" || return 2
+  RECORD="$DIR/$key.json"
+  receipt_path_authenticated "$RECORD"
+}
+select_captain_review_receipt() {
+  local id=$1 key=$2 meta="$STATE/$1.meta" incarnation expected candidate count=0
+  select_authenticated_receipt_key "$key" || return $?
+  jq -e --arg id "$id" \
+    '.id == $id and .incarnation != "||" and .retired == true and .discarded != true and ((.superseded_by // "") == "")' \
+    "$RECORD" >/dev/null || return 1
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    incarnation=$(field "$meta" spawn_gen)
+    [ -n "$incarnation" ] || incarnation="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
+    [ -n "$incarnation" ] && [ "$incarnation" != '||' ] || return 1
+    expected=$(printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}')
+    [ "$expected" = "$key" ] || return 1
+    return 0
+  fi
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] || return 1
+  for candidate in "$DIR"/*.json; do
+    receipt_path_authenticated "$candidate" || continue
+    jq -e --arg id "$id" '.id == $id' "$candidate" >/dev/null || continue
+    count=$((count + 1))
+  done
+  [ "$count" -eq 1 ]
 }
 select_record() {
   local id=$1 meta="$STATE/$1.meta" tmp captain_keys decisions_reviewed=false
@@ -354,7 +384,7 @@ case "$mode" in
       elif .discarded == true then
         "\nReview the authenticated discard, then run bin/fm-terminal-reconcile.sh discard-reviewed \(.key). This retires presentation without marking delivery or backlog complete."
       elif (.decisions_reviewed // false) != true then
-        "\nCaptain-call inventory is not attested. Review every captain call, run bin/fm-captain-hold.sh complete \(.id) (--none | <task-id>...), then retry guarded teardown."
+        "\nCaptain-call inventory is not attested. Review every captain call, then run bin/fm-captain-hold.sh complete \(.id) --receipt \(.key) (--none | <task-id>...)."
       elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then
         "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key)."
       else
@@ -373,6 +403,19 @@ case "$mode" in
     captain_calls_resolved || exit 1
     put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
       '.backlog=true | .refill=true | .ready=$ready' ;;
+  captain-reviewed)
+    [ "$#" -eq 4 ] && valid "$2" && valid "$3" || exit 2
+    captain_keys=$(normalize_captain_keys "$4") || exit 1
+    select_captain_review_receipt "$2" "$3" || exit 1
+    if [ "$(jq -r '.decisions_reviewed // false' "$RECORD")" = true ]; then
+      previous_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
+      captain_keys=$(normalize_captain_keys "$previous_keys,$captain_keys") || exit 1
+      put --arg keys "$captain_keys" '.captain_keys=$keys'
+      exit
+    fi
+    jq -e '.backlog != true and .refill != true and .reviewed != true' \
+      "$RECORD" >/dev/null || exit 1
+    put --arg keys "$captain_keys" '.captain_keys=$keys | .decisions_reviewed=true' ;;
   discard-reviewed)
     [ "$#" -eq 2 ] || exit 2
     select_authenticated_receipt_key "$2" || exit 1

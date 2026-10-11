@@ -22,7 +22,8 @@ On a task closed outside the script, `answer` records the missing block only whe
 A hold whose `--until` date has passed keeps those annotations while tasks-axi reports it no longer held, so an expired deferral remains answerable.
 
 The `complete` subcommand unions the reviewed captain-held task ids into `decision_keys=` and appends `decisions_reviewed=1` while originating task metadata is live.
-A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
+A post-teardown visual review supplies the exact terminal receipt and can complete against the surviving task and durable captain-held inventory without recreating volatile task metadata.
+When retirement preserved a missing attestation, the same exact-incarnation path writes only the actually reviewed normalized inventory and reviewed flag into the authenticated receipt, leaving delivery, backlog, and refill state unchanged.
 It accepts `--none` as an explicit semantic inventory result, refused while the origin still has a lifecycle-open keyed status decision, and verifies every listed task against the configured backlog's canonical task model before recording completion.
 With a non-empty inventory it appends a `captain-held [key=<key>]: tracked by <inventory>` transfer event for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
