@@ -8,6 +8,7 @@
 #        fm-terminal-reconcile.sh default-landed <id> <commit>
 #        fm-terminal-reconcile.sh retired <id> <normal|discard>
 #        fm-terminal-reconcile.sh landing-proven <id>
+#        fm-terminal-reconcile.sh completed-after <id> <receipt-key>
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
@@ -127,6 +128,30 @@ delivery_proven() {
   fi
   [ -n "$(jq -r '(.local_head // .default_head // empty)' "$RECORD")" ]
 }
+terminal_completed_after() {
+  local id=$1 current=$2 next depth=0
+  while [ "$depth" -lt 64 ]; do
+    RECORD="$DIR/$current.json"
+    [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 1
+    jq -e --arg id "$id" --arg key "$current" \
+      '.schema == "fm-terminal-delivery.v1" and .id == $id and .key == $key and .discarded != true' \
+      "$RECORD" >/dev/null || return 1
+    next=$(jq -r '.superseded_by // ""' "$RECORD") || return 1
+    [ -n "$next" ] && valid "$next" && [ "$next" != "$current" ] || return 1
+    RECORD="$DIR/$next.json"
+    [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || return 1
+    jq -e --arg id "$id" --arg key "$next" \
+      '.schema == "fm-terminal-delivery.v1" and .id == $id and .key == $key and .discarded != true' \
+      "$RECORD" >/dev/null || return 1
+    if jq -e '.retired == true and .backlog == true and ((.superseded_by // "") == "")' \
+      "$RECORD" >/dev/null && delivery_proven; then
+      return 0
+    fi
+    current=$next
+    depth=$((depth + 1))
+  done
+  return 1
+}
 captain_calls_resolved() {
   local id receipt captain_keys captain_key
   id=$(jq -r .id "$RECORD") || return 1
@@ -190,6 +215,12 @@ reconcile_record() {
 }
 mode=${1:-report}
 case "$mode" in -h|--help) sed -n '2,29{s/^# \{0,1\}//;p;}' "$0"; exit 0;; esac
+if [ "$mode" = completed-after ]; then
+  [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
+  [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
+  terminal_completed_after "$2" "$3"
+  exit
+fi
 mkdir -p "$DIR" || exit 1
 [ ! -L "$DIR" ] || exit 1
 fm_lock_acquire_wait "$DIR/.lock" || exit 1

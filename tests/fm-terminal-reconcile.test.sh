@@ -136,6 +136,107 @@ run_terminal_captain_case() {
     *) fail "unknown terminal captain matrix expectation: $expected" ;;
   esac
 }
+run_transferred_release_resume_case() {
+  local backend=$1 scenario=$2 expected=$3
+  local id="release-$backend-$scenario" call old_key new_key key rc=0 backlog old_file tmp
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown transferred release backend: $backend" ;;
+  esac
+  make_task "$id"
+  call="$id-work"
+  make_task "$call"
+  tx hold "$call" --reason 'captain released work pending resume' --kind captain --json >/dev/null
+  printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
+  "$owner" custody "$call" https://github.com/o/r/pull/1
+  old_key=$(jq -r --arg id "$call" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  release_captain_task "$call"
+  case "$scenario" in
+    pre-resume) ;;
+    stale-done) tx 'done' "$call" --no-prune --json >/dev/null ;;
+    missing-proof)
+      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' \
+        "$call" > "$FM_HOME/state/$call.meta"
+      "$owner" custody "$call" https://github.com/o/r/pull/1
+      "$owner" retired "$call" normal
+      rm "$FM_HOME/state/$call.meta"
+      tx 'done' "$call" --no-prune --json >/dev/null
+      ;;
+    new-success|unrelated)
+      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' \
+        "$call" > "$FM_HOME/state/$call.meta"
+      "$owner" merged "$call" https://github.com/o/r/pull/1
+      "$owner" retired "$call" normal
+      rm "$FM_HOME/state/$call.meta"
+      new_key=$(jq -r --arg id "$call" \
+        'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+        "$FM_HOME/state/terminal-delivery/"*.json)
+      if [ "$backend" = manual ]; then
+        tx 'done' "$call" --no-prune --json >/dev/null
+        "$owner" manual-complete "$new_key"
+      else
+        "$owner" reconcile
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$new_key.json")" = true ] \
+        || fail "$backend/$scenario did not complete transferred resumed work"
+      if [ "$scenario" = unrelated ]; then
+        old_file="$FM_HOME/state/terminal-delivery/$old_key.json"
+        tmp="$old_file.tmp"
+        jq '.superseded_by=""' "$old_file" > "$tmp"
+        mv "$tmp" "$old_file"
+      fi
+      ;;
+    *) fail "unknown transferred release scenario: $scenario" ;;
+  esac
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  rm "$FM_HOME/state/$id.meta"
+  key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$backend" = manual ]; then
+    tx 'done' "$id" --no-prune --json >/dev/null
+    set +e
+    "$owner" manual-complete "$key"
+    rc=$?
+    set -e
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  backlog=$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")
+  case "$expected" in
+    blocked)
+      [ "$backlog" = false ] || fail "$backend/$scenario advanced the referring origin"
+      [ "$backend" != manual ] || [ "$rc" -ne 0 ] \
+        || fail "$backend/$scenario reported manual completion"
+      if [ "$backend" = manual ]; then
+        "$owner" manual-complete "$key" && fail "$backend/$scenario replay advanced the referring origin"
+      else
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = false ] \
+        || fail "$backend/$scenario replay advanced the referring origin"
+      ;;
+    progressed)
+      [ "$backlog" = true ] || fail "$backend/$scenario did not advance the referring origin"
+      [ "$backend" != manual ] || [ "$rc" -eq 0 ] \
+        || fail "$backend/$scenario refused manual completion"
+      if [ "$backend" = manual ]; then
+        "$owner" manual-complete "$key"
+      else
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
+        || fail "$backend/$scenario replay lost referring-origin progress"
+      ;;
+    *) fail "unknown transferred release expectation: $expected" ;;
+  esac
+}
 make_task article
 "$owner" observe article 'done' https://github.com/o/r/pull/1
 "$owner" reconcile
@@ -266,6 +367,22 @@ manual reheld-origin historical blocked
 manual reheld-origin current progressed
 EOF
 pass 'terminal captain matrix preserves unresolved calls and replays answered transitions'
+while read -r release_backend release_scenario release_expected; do
+  [ -n "$release_backend" ] || continue
+  run_transferred_release_resume_case "$release_backend" "$release_scenario" "$release_expected"
+done <<'EOF'
+auto pre-resume blocked
+auto stale-done blocked
+auto missing-proof blocked
+auto unrelated blocked
+auto new-success progressed
+manual pre-resume blocked
+manual stale-done blocked
+manual missing-proof blocked
+manual unrelated blocked
+manual new-success progressed
+EOF
+pass 'transferred releases require their own later verified terminal incarnation'
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"

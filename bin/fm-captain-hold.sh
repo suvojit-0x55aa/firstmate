@@ -131,6 +131,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -306,14 +307,20 @@ body_has_resolution_record() {  # <task-body>
   newest_resolution_header "$1" >/dev/null
 }
 
-terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1>
+terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1> <task-id>
   local mode release_receipt
   mode=$(recorded_resolution_mode "$1" || true)
   [ "$mode" = released ] || return 0
   [ "$2" != captain ] || return 1
-  [ "$4" = 1 ] || return 1
   release_receipt=$(recorded_release_receipt "$1" || true)
-  [ -n "$release_receipt" ] && [ -n "$3" ] && [ "$release_receipt" != "$3" ]
+  [ -n "$release_receipt" ] || return 1
+  if [ "$4" = 1 ]; then
+    [ -n "$3" ] && [ "$release_receipt" != "$3" ]
+    return
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+    completed-after "$5" "$release_receipt" >/dev/null 2>&1
 }
 
 newest_resolution_header() {  # <task-body>
@@ -912,7 +919,7 @@ command_terminal_ready() {
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
-    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 1 || return 1
+    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 1 "$origin" || return 1
     if [ "$hold_kind" = captain ]; then
       [ "$state" = "done" ] || return 1
       body_has_resolution_record "$body" || return 1
@@ -927,7 +934,7 @@ command_terminal_ready() {
     body=$(show_field "$show" body)
     [ "$state" = "done" ] || [ "$hold_kind" != captain ] || return 1
     body_has_resolution_record "$body" || return 1
-    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 0 || return 1
+    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 0 "$id" || return 1
   done
 }
 
