@@ -1044,18 +1044,18 @@ test_report_batches_receipts_at_scale() {
   dir="$home/state/terminal-delivery"
   printf '%s\n' manual > "$home/config/backlog-backend"
   for i in $(seq 1 108); do
-    printf '{"schema":"fm-terminal-delivery.v1","key":"reviewed-%03d","id":"reviewed-%03d","incarnation":"reviewed-%03d","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/1","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","decisions_reviewed":true}\n' \
+    printf '{"schema":"fm-terminal-delivery.v1","key":"reviewed-%03d","id":"reviewed-%03d","incarnation":"reviewed-%03d","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/1","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":true}\n' \
       "$i" "$i" "$i" > "$dir/reviewed-$(printf '%03d' "$i").json"
   done
   printf '%s\n' \
-    '{"schema":"fm-terminal-delivery.v1","key":"active-missing","id":"active-missing","incarnation":"active-missing","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/2","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":"","captain_keys":"","decisions_reviewed":false}' \
+    '{"schema":"fm-terminal-delivery.v1","key":"active-missing","id":"active-missing","incarnation":"active-missing","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/2","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":"","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":false}' \
     > "$dir/active-missing.json"
   printf '%s\n' \
-    '{"schema":"fm-terminal-delivery.v1","key":"active-ready","id":"active-ready","incarnation":"active-ready","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/3","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":"","captain_keys":"","decisions_reviewed":true}' \
+    '{"schema":"fm-terminal-delivery.v1","key":"active-ready","id":"active-ready","incarnation":"active-ready","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/3","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":"","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":true}' \
     > "$dir/active-ready.json"
-  printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"scale-release","incarnation":"old","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/4","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":true,"superseded_by":"%s","captain_keys":"","decisions_reviewed":true}\n' \
+  printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"scale-release","incarnation":"old","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/4","merged":true,"retired":true,"discarded":false,"backlog":false,"refill":false,"reviewed":true,"superseded_by":"%s","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":true}\n' \
     "$old_key" "$new_key" > "$dir/$old_key.json"
-  printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"scale-release","incarnation":"new","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/4","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","decisions_reviewed":true}\n' \
+  printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"scale-release","incarnation":"new","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/4","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":true}\n' \
     "$new_key" > "$dir/$new_key.json"
 
   real_jq=$(command -v jq)
@@ -1113,7 +1113,7 @@ test_reconcile_streams_history_past_argv_limit() {
   while [ "$total" -lt "$target" ]; do
     name=$(printf 'reviewed-%06d-%s' "$i" "$padding")
     path="$dir/$name.json"
-    printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"history-%06d","incarnation":"history-%06d","kind":"ship","mode":"no-mistakes","state":"done","pr":"","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","decisions_reviewed":true}\n' \
+    printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"history-%06d","incarnation":"history-%06d","kind":"ship","mode":"no-mistakes","state":"done","pr":"","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":true}\n' \
       "$name" "$i" "$i" > "$path"
     total=$((total + ${#path} + 1))
     i=$((i + 1))
@@ -1340,7 +1340,7 @@ run_archived_released_transfer_case() {
 }
 
 test_archived_released_origin_requires_successor() {
-  local id=archived-release-origin old_key new_key saved_backlog
+  local id=archived-release-origin old_key new_key saved_backlog saved_archive report
   printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
   make_task "$id"
   hold_captain_task "$id"
@@ -1358,6 +1358,40 @@ test_archived_released_origin_requires_successor() {
   fi
   [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$old_key.json")" = false ] \
     || fail 'stale archived origin advanced backlog state'
+  jq -e '.origin_captain_cycle | test("^[0-9a-f]{64}$")' \
+    "$FM_HOME/state/terminal-delivery/$old_key.json" >/dev/null \
+    || fail 'released origin receipt did not preserve its exact captain cycle'
+
+  saved_archive="$FM_HOME/data/done-archive.origin-evidence"
+  cp "$FM_HOME/data/done-archive.md" "$saved_archive"
+  : > "$FM_HOME/data/done-archive.md"
+  if "$owner" manual-complete "$old_key" >/dev/null 2>&1; then
+    fail 'missing archived origin evidence authorized stale-receipt manual completion'
+  fi
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+  "$owner" reconcile >/dev/null
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$old_key.json")" = false ] \
+    || fail 'missing archived origin evidence authorized automatic completion'
+  printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
+  report=$("$owner" report)
+  assert_contains "$report" 'restore the exact active or archived origin captain-cycle evidence' \
+    'missing origin proof did not retain an actionable recovery path'
+
+  cat > "$FM_HOME/data/done-archive.md" <<EOF
+## Archived 2026-10-12T00:00:00Z
+- [x] $id - corrupt released origin
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 2222222222222222222222222222222222222222222222222222222222222222
+  Resolution mode: released
+  Hold cycle: corrupt
+  Terminal receipt: $old_key
+  Captain decision:
+  Captain released the origin.
+EOF
+  if "$owner" manual-complete "$old_key" >/dev/null 2>&1; then
+    fail 'corrupt archived origin cycle authorized manual completion'
+  fi
+  mv "$saved_archive" "$FM_HOME/data/done-archive.md"
   printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" > "$FM_HOME/state/$id.meta"
   "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
@@ -1379,6 +1413,73 @@ test_archived_released_origin_requires_successor() {
   fi
   rmdir "$FM_HOME/data/backlog.md"
   mv "$saved_backlog" "$FM_HOME/data/backlog.md"
+}
+
+run_ordinary_origin_obligation_case() {
+  local backend=$1 id="ordinary-origin-$1" key saved_archive
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown ordinary-origin backend: $backend" ;;
+  esac
+  make_task "$id"
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  [ "$(jq -r .origin_captain_cycle "$FM_HOME/state/terminal-delivery/$key.json")" = none ] \
+    || fail "$backend ordinary origin receipt did not durably prove no captain obligation"
+  rm "$FM_HOME/state/$id.meta"
+  if [ "$backend" = manual ]; then
+    tx done "$id" --no-prune --json >/dev/null
+    archive_done_task "$id" "$id-archive"
+    saved_archive="$FM_HOME/data/done-archive.ordinary"
+    cp "$FM_HOME/data/done-archive.md" "$saved_archive"
+    : > "$FM_HOME/data/done-archive.md"
+    "$owner" manual-complete "$key" >/dev/null
+    "$owner" manual-complete "$key" >/dev/null
+    mv "$saved_archive" "$FM_HOME/data/done-archive.md"
+  else
+    "$owner" reconcile >/dev/null
+    "$owner" reconcile >/dev/null
+  fi
+  [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
+    || fail "$backend ordinary origin did not complete with durable no-obligation proof"
+}
+
+test_unknown_origin_obligation_recovers_through_captain_owner() {
+  local id=unknown-origin-obligation key record report tmp
+  printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
+  make_task "$id"
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  tmp=$(mktemp "$FM_HOME/state/terminal-delivery/.unknown.XXXXXX")
+  jq '.origin_captain_cycle="corrupt"' "$record" > "$tmp"
+  mv "$tmp" "$record"
+  if "$owner" manual-complete "$key" >/dev/null 2>&1; then
+    fail 'corrupt receipt origin obligation authorized manual completion'
+  fi
+  tmp=$(mktemp "$FM_HOME/state/terminal-delivery/.unknown.XXXXXX")
+  jq 'del(.origin_captain_cycle)' "$record" > "$tmp"
+  mv "$tmp" "$record"
+  if "$owner" manual-complete "$key" >/dev/null 2>&1; then
+    fail 'legacy-unknown origin obligation authorized manual completion'
+  fi
+  report=$("$owner" report)
+  assert_contains "$report" 'Origin captain-cycle evidence is unknown' \
+    'legacy-unknown origin obligation did not retain an actionable recovery path'
+  captain complete "$id" --receipt "$key" --none >/dev/null
+  [ "$(jq -r .origin_captain_cycle "$record")" = none ] \
+    || fail 'captain recovery did not authenticate the ordinary origin obligation'
+  "$owner" manual-complete "$key" >/dev/null
+  "$owner" manual-complete "$key" >/dev/null
+  [ "$(jq -r .backlog "$record")" = true ] \
+    || fail 'authenticated origin-obligation recovery did not complete backlog state'
 }
 
 test_archived_captain_answers_remain_exact_terminal_evidence() {
@@ -1409,6 +1510,9 @@ EOF
   run_archived_released_transfer_case auto
   run_archived_released_transfer_case manual
   test_archived_released_origin_requires_successor
+  run_ordinary_origin_obligation_case auto
+  run_ordinary_origin_obligation_case manual
+  test_unknown_origin_obligation_recovers_through_captain_owner
   pass 'archived captain answers and releases retain exact cycle-aware terminal evidence'
 }
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in

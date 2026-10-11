@@ -28,8 +28,9 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> [--receipt <receipt-key>] (--none | <task-id>...)
 #   fm-captain-hold.sh normalize-inventory <origin-id> [<task-id>...]
+#   fm-captain-hold.sh origin-obligation <origin-id>
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [<captain-task-id>...]
+#   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [--origin-cycle <cycle|none>] [<captain-task-id>...]
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -1250,8 +1251,47 @@ EOF
   printf 'verified: %s captain-call inventory\n' "$origin"
 }
 
+command_origin_obligation() {
+  local origin=${1:-} show state hold_kind body cycle rc decoded first
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  require_task_reader
+  if show=$(task_evidence_show "$origin"); then
+    :
+  else
+    rc=$?
+    [ "$rc" -ne 3 ] || fail "origin $origin has no active or archived evidence"
+    fail "origin $origin evidence is unreadable or ambiguous"
+  fi
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+  cycle=$(current_hold_cycle "$body" || true)
+  decoded=$(decode_shown_value "$body") || fail "origin $origin evidence body is unreadable"
+  first=$(printf '%s\n' "$decoded" | sed -n '1p')
+  if [ -n "$cycle" ]; then
+    if body_has_resolution_record "$body"; then
+      body_has_current_resolution "$body" \
+        || fail "origin $origin captain-cycle evidence is stale or corrupt"
+    elif [ "$hold_kind" != captain ] || [ "$state" = done ]; then
+      fail "origin $origin captain-cycle evidence is inconsistent"
+    fi
+    printf '%s\n' "$cycle"
+    return
+  fi
+  if [ "$hold_kind" = captain ] || body_has_resolution_record "$body"; then
+    fail "origin $origin captain-cycle evidence has no authentic cycle identity"
+  fi
+  case "$first" in
+    'Captain hold opened by fm-captain-hold.'|'Resolution recorded by fm-captain-hold.'|'Resolution recorded by fm-decision-hold.')
+      fail "origin $origin captain-cycle evidence is legacy or corrupt"
+      ;;
+  esac
+  printf 'none\n'
+}
+
 command_terminal_ready() {
-  local origin=${1:-} receipt='' entry id resolved seen show state hold_kind body rc
+  local origin=${1:-} receipt='' origin_cycle='' entry id resolved seen show state hold_kind body rc cycle
   local -a resolved_ids=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
@@ -1262,12 +1302,32 @@ command_terminal_ready() {
     validate_slug receipt-key "$receipt"
     shift 2
   fi
+  if [ "${1:-}" = --origin-cycle ]; then
+    [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+    origin_cycle=${2:-}
+    if [ "$origin_cycle" != none ]; then
+      [ "${#origin_cycle}" -eq 64 ] || return 1
+      case "$origin_cycle" in *[!0-9a-f]*) return 1 ;; esac
+    fi
+    shift 2
+  fi
   require_task_reader
   [ -z "$(status_open_decisions "$STATE/$origin.status")" ] || return 1
   if show=$(task_evidence_show "$origin"); then
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
+    if [ -n "$origin_cycle" ]; then
+      cycle=$(current_hold_cycle "$body" || true)
+      if [ "$origin_cycle" = none ]; then
+        if [ -n "$cycle" ] || [ "$hold_kind" = captain ] \
+          || body_has_resolution_record "$body"; then
+          return 1
+        fi
+      else
+        [ "$cycle" = "$origin_cycle" ] || return 1
+      fi
+    fi
     terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 1 "$origin" || return 1
     if [ "$hold_kind" = captain ]; then
       [ "$state" = "done" ] || return 1
@@ -1275,7 +1335,7 @@ command_terminal_ready() {
     fi
   else
     rc=$?
-    [ "$rc" -eq 3 ] || return 1
+    [ "$rc" -eq 3 ] && { [ -z "$origin_cycle" ] || [ "$origin_cycle" = none ]; } || return 1
   fi
   resolved_ids+=("$origin")
   for entry in "$@"; do
@@ -1427,6 +1487,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   normalize-inventory) shift; command_normalize_inventory "$@" ;;
+  origin-obligation) shift; command_origin_obligation "$@" ;;
   verify) shift; command_verify "$@" ;;
   terminal-ready) shift; command_terminal_ready "$@" ;;
   diverged) shift; command_diverged "$@" ;;
