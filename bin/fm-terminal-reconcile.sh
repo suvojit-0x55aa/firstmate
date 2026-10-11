@@ -101,13 +101,27 @@ delivery_proven() {
   fi
   [ -n "$(jq -r '(.local_head // .default_head // empty)' "$RECORD")" ]
 }
+captain_calls_resolved() {
+  local id captain_keys captain_key
+  id=$(jq -r .id "$RECORD") || return 1
+  set -- "$id"
+  captain_keys=$(jq -r '.captain_keys // ""' "$RECORD") || return 1
+  while IFS= read -r captain_key; do
+    [ -n "$captain_key" ] || continue
+    set -- "$@" "$captain_key"
+  done <<EOF
+$(printf '%s\n' "$captain_keys" | tr ',' '\n')
+EOF
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
+    terminal-ready "$@" >/dev/null 2>&1
+}
 reconcile_record() {
   local id pr state task snapshot retired discarded kind
   local -a args
   [ "$(jq -r .reviewed "$RECORD")" != true ] || return 0
   id=$(jq -r .id "$RECORD") || return 1
   record_matches_current_incarnation || return 0
-  [ -z "$(status_open_decisions "$STATE/$id.status")" ] || return 0
   pr=$(jq -r .pr "$RECORD")
   retired=$(jq -r .retired "$RECORD")
   discarded=$(jq -r .discarded "$RECORD")
@@ -136,6 +150,7 @@ reconcile_record() {
       # It does not prove delivery and must not close the backlog item.
       return 0
     fi
+    captain_calls_resolved || return 0
     task=$(fm_run_timed 3 tasks-axi 'done' "$id" "${args[@]}" --no-prune --file "$DATA/backlog.md" --json) || return 1
     printf '%s' "$task" | jq -e '.ok == true and .task.state == "done"' >/dev/null || return 1
     put '.backlog=true | .refill=true' || return 1
@@ -216,23 +231,9 @@ case "$mode" in
     RECORD="$DIR/$2.json"
     [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || exit 1
     record_matches_current_incarnation || exit 1
-    id=$(jq -r .id "$RECORD") || exit 1
-    [ -z "$(status_open_decisions "$STATE/$id.status")" ] || exit 1
-    captain_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
-    captain_args=()
-    while IFS= read -r captain_key; do
-      [ -n "$captain_key" ] || continue
-      captain_args+=("$captain_key")
-    done <<EOF
-$(printf '%s\n' "$captain_keys" | tr ',' '\n')
-EOF
-    if [ "${#captain_args[@]}" -gt 0 ]; then
-      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-        FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
-        terminal-ready "$id" "${captain_args[@]}" >/dev/null || exit 1
-    fi
     jq -e '.retired and (.discarded != true)' "$RECORD" >/dev/null || exit 1
     delivery_proven || exit 1
+    captain_calls_resolved || exit 1
     put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
       '.backlog=true | .refill=true | .ready=$ready' ;;
   refill-reviewed)

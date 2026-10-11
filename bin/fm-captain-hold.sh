@@ -869,18 +869,24 @@ EOF
 }
 
 command_terminal_ready() {
-  local origin=${1:-} id show state hold_kind body
+  local origin=${1:-} entry id show state hold_kind body
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
   require_tasks_axi
+  [ -z "$(origin_open_decisions "$origin")" ] || return 1
   if show=$(task_show "$origin"); then
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
-    [ "$state" = "done" ] || [ "$hold_kind" != captain ] || return 1
+    body=$(show_field "$show" body)
+    if [ "$hold_kind" = captain ]; then
+      [ "$state" = "done" ] || return 1
+      body_has_resolution_record "$body" || return 1
+    fi
   fi
-  for id in "$@"; do
-    validate_slug captain-task-id "$id"
+  for entry in "$@"; do
+    validate_slug captain-task-id "$entry"
+    id=$(resolve_entry "$origin" "$entry") || return 1
     show=$(task_show "$id") || return 1
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)

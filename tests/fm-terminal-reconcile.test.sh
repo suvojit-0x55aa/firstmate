@@ -15,6 +15,90 @@ make_task() {
   tx add "$1" "$1" --start --json >/dev/null
   printf 'spawn_gen=%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' "$1" > "$FM_HOME/state/$1.meta"
 }
+answer_captain_task() {
+  local id=$1 answer_file="$FM_HOME/$1-answer.txt"
+  printf 'Captain answered %s.\n' "$id" > "$answer_file"
+  FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
+    FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
+    answer "$id" --decision-file "$answer_file" >/dev/null
+}
+run_terminal_captain_case() {
+  local backend=$1 shape=$2 resolution=$3 expected=$4
+  local id="gate-$backend-$shape-$resolution" call key rc=0 backlog
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown terminal captain matrix backend: $backend" ;;
+  esac
+  make_task "$id"
+  case "$shape" in
+    transferred)
+      call="$id-call"
+      tx add "$call" "$call" --json >/dev/null
+      tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+      printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
+      printf '%s\n' \
+        'needs-decision [key=delivery]: choose delivery treatment' \
+        "captain-held [key=delivery]: tracked by $call" > "$FM_HOME/state/$id.status"
+      ;;
+    origin)
+      call=$id
+      tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+      printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
+      ;;
+    legacy)
+      call="$id-decision-choice"
+      tx add "$call" "$call" --json >/dev/null
+      tx hold "$call" --reason 'legacy captain choice pending' --kind captain --json >/dev/null
+      printf '%s\n' 'decisions_reviewed=1' 'decision_keys=choice' >> "$FM_HOME/state/$id.meta"
+      printf '%s\n' \
+        'needs-decision [key=choice]: choose legacy delivery treatment' \
+        "captain-held [key=choice]: tracked by $call" > "$FM_HOME/state/$id.status"
+      ;;
+    *) fail "unknown terminal captain matrix shape: $shape" ;;
+  esac
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  rm "$FM_HOME/state/$id.meta"
+  key=$(jq -r --arg id "$id" 'select(.id==$id)|.key' "$FM_HOME/state/terminal-delivery/"*.json)
+  if [ "$resolution" = answered ]; then
+    answer_captain_task "$call"
+  else
+    tx 'done' "$call" --no-prune --json >/dev/null
+  fi
+  if [ "$backend" = manual ]; then
+    [ "$call" = "$id" ] || tx 'done' "$id" --no-prune --json >/dev/null
+    set +e
+    "$owner" manual-complete "$key"
+    rc=$?
+    set -e
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  backlog=$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")
+  case "$expected" in
+    blocked)
+      [ "$backlog" = false ] || fail "$backend/$shape/$resolution advanced terminal backlog"
+      [ "$backend" != manual ] || [ "$rc" -ne 0 ] \
+        || fail "$backend/$shape/$resolution reported manual completion"
+      ;;
+    progressed)
+      [ "$backlog" = true ] || fail "$backend/$shape/$resolution did not advance terminal backlog"
+      [ "$backend" != manual ] || [ "$rc" -eq 0 ] \
+        || fail "$backend/$shape/$resolution refused manual completion"
+      if [ "$backend" = manual ]; then
+        "$owner" manual-complete "$key"
+      else
+        "$owner" reconcile
+      fi
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" = true ] \
+        || fail "$backend/$shape/$resolution replay lost terminal progress"
+      "$owner" refill-reviewed "$key"
+      ;;
+    *) fail "unknown terminal captain matrix expectation: $expected" ;;
+  esac
+}
 make_task article
 "$owner" observe article 'done' https://github.com/o/r/pull/1
 "$owner" reconcile
@@ -107,38 +191,24 @@ assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: manualdone')" 'bac
 "$owner" refill-reviewed "$manual_key"
 assert_not_contains "$("$owner" report)" 'TERMINAL DELIVERY: manualdone ' 'manual refill confirmation was not idempotent'
 pass 'manual completion and refill confirmation replay safely'
-make_task manualheld
-"$owner" merged manualheld https://github.com/o/r/pull/1
-"$owner" retired manualheld normal
-printf '%s\n' 'needs-decision [key=captain-call]: choose delivery treatment' > "$FM_HOME/state/manualheld.status"
-manual_held_key=$(jq -r 'select(.id=="manualheld")|.key' "$FM_HOME/state/terminal-delivery/"*.json)
-"$owner" manual-complete "$manual_held_key" && fail 'manual completion bypassed a captain-held decision'
-assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: manualheld')" 'backlog_done=false' 'captain-held manual receipt was completed'
-pass 'manual completion preserves captain-held decisions'
-make_task transferred
-tx add transferred-call 'Choose transferred delivery' --json >/dev/null
-tx hold transferred-call --reason 'captain delivery choice pending' --kind captain --json >/dev/null
-printf '%s\n' 'decisions_reviewed=1' 'decision_keys=transferred-call' >> "$FM_HOME/state/transferred.meta"
-printf '%s\n' \
-  'needs-decision [key=delivery]: choose transferred delivery' \
-  'captain-held [key=delivery]: tracked by transferred-call' \
-  > "$FM_HOME/state/transferred.status"
-"$owner" merged transferred https://github.com/o/r/pull/1
-"$owner" retired transferred normal
-rm "$FM_HOME/state/transferred.meta"
-transferred_key=$(jq -r 'select(.id=="transferred")|.key' "$FM_HOME/state/terminal-delivery/"*.json)
-tx 'done' transferred --pr https://github.com/o/r/pull/1 --no-prune --json >/dev/null
-"$owner" manual-complete "$transferred_key" && fail 'manual completion bypassed a transferred captain hold'
-tx 'done' transferred-call --no-prune --json >/dev/null
-"$owner" manual-complete "$transferred_key" && fail 'out-of-band close masqueraded as a recorded captain answer'
-printf '%s\n' 'Captain chose the transferred delivery.' > "$FM_HOME/transferred-answer.txt"
-FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
-  FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
-  answer transferred-call --decision-file "$FM_HOME/transferred-answer.txt" >/dev/null
-"$owner" manual-complete "$transferred_key"
-assert_contains "$("$owner" report | grep 'TERMINAL DELIVERY: transferred')" 'backlog_done=true' \
-  'recorded captain answer did not release manual completion'
-pass 'manual completion requires the transferred captain hold actual answer'
+while read -r matrix_backend matrix_shape matrix_resolution matrix_expected; do
+  [ -n "$matrix_backend" ] || continue
+  run_terminal_captain_case "$matrix_backend" "$matrix_shape" "$matrix_resolution" "$matrix_expected"
+done <<'EOF'
+auto transferred unanswered blocked
+auto transferred answered progressed
+auto origin unanswered blocked
+auto origin answered progressed
+auto legacy unanswered blocked
+auto legacy answered progressed
+manual transferred unanswered blocked
+manual transferred answered progressed
+manual origin unanswered blocked
+manual origin answered progressed
+manual legacy unanswered blocked
+manual legacy answered progressed
+EOF
+pass 'terminal captain matrix preserves unresolved calls and replays answered transitions'
 make_task manualopen
 "$owner" retired manualopen normal
 manual_open_key=$(jq -r 'select(.id=="manualopen")|.key' "$FM_HOME/state/terminal-delivery/"*.json)
