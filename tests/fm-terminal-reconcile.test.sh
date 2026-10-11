@@ -703,6 +703,113 @@ run_preserved_key_recovery_case() {
   pass "$backend retired attestation recovery preserves and verifies every existing key"
 }
 
+run_normalized_inventory_case() {
+  local backend=$1 id="normalized-inventory-$1" alias legacy exact key record rc=0
+  alias="$id-choice"
+  legacy="$id-decision-$alias"
+  exact=$alias
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown normalized inventory backend: $backend" ;;
+  esac
+  make_unreviewed_task "$id"
+  tx add "$legacy" "$legacy" --json >/dev/null
+  captain hold "$legacy" --reason 'legacy captain identity pending' >/dev/null
+  captain complete "$id" "$alias" >/dev/null
+  [ "$(sed -n 's/^decision_keys=//p' "$FM_HOME/state/$id.meta" | tail -1)" = "$legacy" ] \
+    || fail "$backend completion attestation retained a rebindable legacy alias"
+
+  printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$alias" >> "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  [ "$(jq -r .captain_keys "$record")" = "$legacy" ] \
+    || fail "$backend retirement retained a rebindable legacy alias"
+  rm "$FM_HOME/state/$id.meta"
+
+  tx add "$exact" "$exact" --json >/dev/null
+  captain hold "$exact" --reason 'unrelated exact-name captain task pending' >/dev/null
+  answer_captain_task "$exact"
+  if [ "$backend" = manual ]; then
+    tx done "$id" --no-prune --json >/dev/null
+    "$owner" manual-complete "$key" >/dev/null 2>&1 && rc=0 || rc=$?
+    [ "$rc" -ne 0 ] || fail "$backend exact-name collision advanced the original held captain call"
+  else
+    "$owner" reconcile
+  fi
+  [ "$(jq -r .backlog "$record")" = false ] \
+    || fail "$backend exact-name collision rebound the preserved captain identity"
+
+  answer_captain_task "$legacy"
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$key"
+    "$owner" manual-complete "$key"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  jq -e --arg legacy "$legacy" \
+    '.backlog == true and .captain_keys == $legacy' "$record" >/dev/null \
+    || fail "$backend canonical captain identity did not survive completion replay"
+  pass "$backend terminal receipts preserve normalized captain identities"
+}
+
+run_completed_inventory_replay_case() {
+  local backend=$1 id="completed-inventory-$1" original added key record before meta_before report_before rc=0
+  original="$id-original"
+  added="$id-added"
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown completed inventory backend: $backend" ;;
+  esac
+  make_task "$id"
+  tx add "$original" "$original" --json >/dev/null
+  captain hold "$original" --reason 'original captain call pending' >/dev/null
+  captain complete "$id" "$original" >/dev/null
+  answer_captain_task "$original"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  key=$(jq -r --arg id "$id" 'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  if [ "$backend" = manual ]; then
+    tx done "$id" --no-prune --json >/dev/null
+    "$owner" manual-complete "$key"
+  else
+    "$owner" reconcile
+  fi
+  "$owner" refill-reviewed "$key"
+
+  tx add "$added" "$added" --json >/dev/null
+  captain hold "$added" --reason 'late captain call pending' >/dev/null
+  before=$(jq -cS . "$record")
+  meta_before=$(cat "$FM_HOME/state/$id.meta")
+  report_before=$("$owner" report)
+  if captain complete "$id" --receipt "$key" "$original" "$added" \
+    > "$FM_HOME/$id-add.out" 2> "$FM_HOME/$id-add.err"; then
+    fail "$backend completed receipt accepted a new invisible captain call"
+  fi
+  assert_contains "$(cat "$FM_HOME/$id-add.err")" 'active originating work' \
+    "$backend completed receipt rejection omitted its existing-owner recovery route"
+  [ "$(jq -cS . "$record")" = "$before" ] \
+    || fail "$backend rejected completed-receipt mutation changed durable state"
+  [ "$(cat "$FM_HOME/state/$id.meta")" = "$meta_before" ] \
+    || fail "$backend rejected completed-receipt mutation changed live metadata"
+  [ "$("$owner" report)" = "$report_before" ] \
+    || fail "$backend rejected completed-receipt mutation changed presentation state"
+  captain complete "$id" --receipt "$key" "$original" >/dev/null \
+    || fail "$backend identical completed inventory replay was rejected"
+  [ "$(jq -cS . "$record")" = "$before" ] \
+    || fail "$backend identical completed inventory replay mutated its receipt"
+  [ "$(cat "$FM_HOME/state/$id.meta")" = "$meta_before" ] \
+    || fail "$backend identical completed inventory replay mutated live metadata"
+  pass "$backend completed receipts accept only identical captain inventory replay"
+}
+
 test_discard_review_acknowledgement() {
   local id=discarded key record report forged=forged-discard
   make_task "$id"
@@ -821,6 +928,13 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   preserved-key-recovery)
     for attestation_backend in auto manual; do
       run_preserved_key_recovery_case "$attestation_backend"
+    done
+    exit
+    ;;
+  inventory-contracts)
+    for attestation_backend in auto manual; do
+      run_normalized_inventory_case "$attestation_backend"
+      run_completed_inventory_replay_case "$attestation_backend"
     done
     exit
     ;;
@@ -1004,6 +1118,8 @@ pass 'terminal completion requires durable captain-call inventory attestation'
 for attestation_backend in auto manual; do
   run_retired_attestation_recovery_case "$attestation_backend"
   run_preserved_key_recovery_case "$attestation_backend"
+  run_normalized_inventory_case "$attestation_backend"
+  run_completed_inventory_replay_case "$attestation_backend"
 done
 test_report_batches_receipts_at_scale
 for identityless_backend in auto manual; do

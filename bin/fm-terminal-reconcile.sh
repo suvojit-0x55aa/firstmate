@@ -62,6 +62,21 @@ $(printf '%s\n' "$input" | tr ',' '\n')
 EOF
   printf '%s\n' "$normalized" | tr ' ' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
 }
+resolve_captain_keys() {
+  local origin=$1 input=$2 key
+  local -a args
+  args=("$origin")
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    valid "$key" || return 1
+    args+=("$key")
+  done <<EOF
+$(printf '%s\n' "$input" | tr ',' '\n')
+EOF
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
+    normalize-inventory "${args[@]}"
+}
 put() {
   local tmp
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
@@ -146,7 +161,7 @@ select_record() {
     supersede_prior_records "$id"
     return $?
   fi
-  captain_keys=$(normalize_captain_keys "$(field "$meta" decision_keys)") || return 1
+  captain_keys=$(resolve_captain_keys "$id" "$(field "$meta" decision_keys)") || return 1
   [ "$(field "$meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
   jq -n --arg id "$id" --arg key "$KEY" --arg incarnation "$INCARNATION" \
@@ -322,7 +337,7 @@ case "$mode" in
           put --arg head "$3" '.default_head=$head' || exit 1
         fi ;;
       retired)
-        captain_keys=$(normalize_captain_keys "$(field "$STATE/$2.meta" decision_keys)") || exit 1
+        captain_keys=$(resolve_captain_keys "$2" "$(field "$STATE/$2.meta" decision_keys)") || exit 1
         decisions_reviewed=false
         [ "$(field "$STATE/$2.meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
         case "$3" in
@@ -407,13 +422,20 @@ case "$mode" in
   captain-review-state)
     [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
     select_captain_review_receipt "$2" "$3" || exit 1
-    jq -c '{captain_keys:(.captain_keys // ""),decisions_reviewed:(.decisions_reviewed == true)}' \
+    jq -c '{captain_keys:(.captain_keys // ""),decisions_reviewed:(.decisions_reviewed == true),complete:(.backlog == true or .refill == true or .reviewed == true)}' \
       "$RECORD" ;;
   captain-reviewed)
     [ "$#" -eq 4 ] && valid "$2" && valid "$3" || exit 2
-    captain_keys=$(normalize_captain_keys "$4") || exit 1
     select_captain_review_receipt "$2" "$3" || exit 1
-    previous_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
+    captain_keys=$(resolve_captain_keys "$2" "$4") || exit 1
+    previous_keys=$(normalize_captain_keys "$(jq -r '.captain_keys // ""' "$RECORD")") || exit 1
+    if jq -e '.backlog == true or .refill == true or .reviewed == true' "$RECORD" >/dev/null; then
+      if [ "$captain_keys" != "$previous_keys" ]; then
+        printf 'Terminal receipt %s is complete; keep its captain inventory unchanged and register new calls against active originating work through fm-captain-hold.sh hold/complete.\n' "$3" >&2
+        exit 1
+      fi
+      exit 0
+    fi
     combined_keys=$(normalize_captain_keys "$previous_keys,$captain_keys") || exit 1
     [ "$combined_keys" = "$captain_keys" ] || exit 1
     if [ "$(jq -r '.decisions_reviewed // false' "$RECORD")" = true ]; then

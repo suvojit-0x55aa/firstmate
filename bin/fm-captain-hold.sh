@@ -27,6 +27,7 @@
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> [--receipt <receipt-key>] (--none | <task-id>...)
+#   fm-captain-hold.sh normalize-inventory <origin-id> [<task-id>...]
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [<captain-task-id>...]
 #   fm-captain-hold.sh diverged
@@ -115,10 +116,9 @@
 # every recorded inventory entry must still be durable and no keyed status
 # decision may be open.
 # Metadata compatibility: the attestation keeps the historical
-# `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
-# names no existing task resolves through the legacy `<origin>-decision-<entry>`
-# identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
-# unchanged. An entry that exists as a task id is always that task.
+# `decisions_reviewed=1` and `decision_keys=` keys. Inventory is persisted as
+# resolved task ids; pre-collapse metadata entries resolve through the legacy
+# `<origin>-decision-<entry>` identity before they enter durable state.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -311,6 +311,18 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
     printf '%s\n' "$existing" | tr ',' '\n'
     printf '%s\n' "$new" | tr ' ' '\n'
   } | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
+}
+
+normalized_inventory() {  # <origin> <comma-list>
+  local origin=$1 input=$2 entry resolved normalized=''
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    resolved=$(resolve_entry "$origin" "$entry") || return 1
+    normalized="${normalized}${normalized:+ }$resolved"
+  done <<EOF
+$(printf '%s\n' "$input" | tr ',' '\n')
+EOF
+  sorted_key_union '' "$normalized"
 }
 
 inventory_includes_previous() {  # <origin> <preserved-comma-list> <supplied-space-list>
@@ -934,7 +946,7 @@ command_answers() {
 
 command_complete() {
   local origin=${1:-} meta receipt='' receipt_state='' receipt_previous='' receipt_reviewed=false
-  local previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
+  local receipt_complete=false previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -980,17 +992,22 @@ command_complete() {
       || fail "cannot read preserved captain-call inventory from terminal receipt $receipt"
     receipt_reviewed=$(printf '%s\n' "$receipt_state" | jq -r '.decisions_reviewed') \
       || fail "cannot read captain-call review state from terminal receipt $receipt"
+    receipt_complete=$(printf '%s\n' "$receipt_state" | jq -r '.complete') \
+      || fail "cannot read captain-call lifecycle state from terminal receipt $receipt"
     if [ "$receipt_reviewed" != true ] \
       && ! inventory_includes_previous "$origin" "$receipt_previous" "$supplied"; then
       fail "reviewed inventory must include every captain task preserved by terminal receipt $receipt"
     fi
     previous=$(sorted_key_union "$previous" "$receipt_previous")
   fi
-  keys=$(sorted_key_union "$previous" "$supplied")
+  keys=$(normalized_inventory "$origin" "$(sorted_key_union "$previous" "$supplied")")
+  if [ "$receipt_complete" = true ] && [ "$keys" != "$receipt_previous" ]; then
+    fail "terminal receipt $receipt is complete; keep its captain inventory unchanged and register new calls against active originating work through fm-captain-hold.sh hold/complete"
+  fi
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
       [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
+      verify_hold_durable "$entry"
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -1035,6 +1052,20 @@ $raw_open
 EOF
   fi
   printf 'complete: %s captain-call inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
+}
+
+command_normalize_inventory() {
+  local origin=${1:-} supplied='' entry
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  shift
+  require_task_reader
+  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  for entry in "$@"; do
+    validate_slug task-id "$entry"
+    supplied="${supplied}${supplied:+ }$entry"
+  done
+  normalized_inventory "$origin" "$(sorted_key_union '' "$supplied")"
 }
 
 command_verify() {
@@ -1238,6 +1269,7 @@ case "${1:-}" in
   unbind) shift; command_unbind "$@" ;;
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
+  normalize-inventory) shift; command_normalize_inventory "$@" ;;
   verify) shift; command_verify "$@" ;;
   terminal-ready) shift; command_terminal_ready "$@" ;;
   diverged) shift; command_diverged "$@" ;;

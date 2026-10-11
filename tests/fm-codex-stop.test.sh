@@ -232,6 +232,61 @@ test_expired_successor_requires_replacement_generation() {
   pass 'expired Stop successor fails closed until a replacement generation'
 }
 
+test_afk_handoff_clears_owned_successor() {
+  local timing dir identity expires rc output replacement_pid replacement_identity before
+  for timing in before-deadline after-deadline; do
+    dir=$(make_home "afk-handoff-$timing")
+    identity=$(FM_HOME="$dir" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' \
+      _ "$ROOT" $$)
+    case "$timing" in
+      before-deadline) expires=$(( $(date +%s) + 300 )) ;;
+      after-deadline) expires=$(date +%s) ;;
+    esac
+    FM_HOME="$dir" bash -c \
+      '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$5" afk-handoff' \
+      _ "$ROOT" "$dir" $$ "$identity" "$expires"
+    : > "$dir/state/.afk"
+    rc=0
+    run_stop "$dir" > "$dir/away.out" 2>&1 || rc=$?
+    expect_code 0 "$rc" "$timing away handoff did not stand down cleanly"
+    assert_absent "$dir/state/.codex-stop-health" \
+      "$timing away handoff preserved its Stop successor claim"
+    [ -e "$dir/state/.afk" ] || fail "$timing away handoff removed away supervision"
+    rm "$dir/state/.afk"
+    rc=0
+    TEST_BUDGET=1 run_stop "$dir" > "$dir/return.out" 2>&1 || rc=$?
+    expect_code 2 "$rc" "$timing return did not establish a new native continuation"
+    output=$(cat "$dir/return.out")
+    assert_not_contains "$output" 'handling window expired before its required Stop successor' \
+      "$timing return consumed the pre-away Stop successor"
+    assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+      "$timing return did not establish a fresh handling claim"
+  done
+
+  dir=$(make_home afk-handoff-replacement)
+  sleep 30 &
+  STOP_PID_TWO=$!
+  replacement_pid=$STOP_PID_TWO
+  replacement_identity=$(FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$replacement_pid")
+  printf '%s\n' "$replacement_pid" > "$dir/state/.lock"
+  FM_HOME="$dir" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$(( $(date +%s) + 300 ))" afk-replacement' \
+    _ "$ROOT" "$dir" "$replacement_pid" "$replacement_identity"
+  : > "$dir/state/.afk"
+  before=$(cat "$dir/state/.codex-stop-health")
+  rc=0
+  run_stop "$dir" > "$dir/replacement.out" 2>&1 || rc=$?
+  expect_code 2 "$rc" 'superseded generation did not refuse the replacement session lock'
+  [ "$(cat "$dir/state/.codex-stop-health")" = "$before" ] \
+    || fail 'away handoff cleared a replacement generation Stop claim'
+  [ -e "$dir/state/.afk" ] || fail 'replacement generation check removed away supervision'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'away handoff clears only its owned Stop successor claim'
+}
+
 case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
   expired-successor)
     test_expired_successor_requires_replacement_generation
@@ -239,6 +294,10 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   final-cancellation)
     test_final_cancellation_revokes_handling
+    exit 0
+    ;;
+  afk-handoff)
+    test_afk_handoff_clears_owned_successor
     exit 0
     ;;
   '') ;;
@@ -354,3 +413,4 @@ assert_contains "$(cat "$dir/out")" 'rejected a duplicate or invalid Stop succes
 assert_absent "$dir/state/.watch.lock/pid" 'duplicate successor refusal started a watcher'
 pass 'public Stop rejects duplicate successor evidence before arming'
 test_expired_successor_requires_replacement_generation
+test_afk_handoff_clears_owned_successor

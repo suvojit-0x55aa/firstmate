@@ -33,7 +33,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
-[ ! -e "$STATE/.afk" ] || exit 0
 fm_session_lock_owned_by_self "$STATE" || {
   printf 'Codex supervision cannot park without verified session ownership; reconcile the session lock before continuing.\n' >&2
   exit 2
@@ -79,6 +78,11 @@ if ! fm_lock_try_acquire "$LOCK"; then
     sleep 0.1
     fm_lock_try_acquire "$LOCK" && break
   done
+fi
+if [ -e "$STATE/.afk" ]; then
+  fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true
+  fm_lock_release "$LOCK"
+  exit 0
 fi
 ARM_PID=
 ARM_IDENTITY=
