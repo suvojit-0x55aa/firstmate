@@ -3147,6 +3147,8 @@ test_forced_discard_replays_staged_inventory_after_interruption() {
   local case_dir rc=0 call=staged-captain-call decision receipt
   case_dir=$(make_case discard-stage-replay)
   write_meta "$case_dir" no-mistakes ship
+  tasks-axi add task-x1 "Forced discard origin" --start --json \
+    --file "$case_dir/data/backlog.md" >/dev/null
   tasks-axi add "$call" "Staged captain call" --json \
     --file "$case_dir/data/backlog.md" >/dev/null
   tasks-axi hold "$call" --reason "captain answer pending" --kind captain --json \

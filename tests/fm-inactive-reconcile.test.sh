@@ -57,6 +57,10 @@ make_world() { # <name>
   MAIN="$WORLD/main"
   MATE="$WORLD/mate"
   mkdir -p "$WORLD/root" "$MAIN"/{state,data,config,projects} "$MATE"/{state,data,config,projects,bin}
+  cp "$ROOT/.tasks.toml" "$MAIN/.tasks.toml"
+  cp "$ROOT/.tasks.toml" "$MATE/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$MAIN/data/backlog.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$MATE/data/backlog.md"
   : > "$MATE/AGENTS.md"
   make_tools "$WORLD"
   : > "$WORLD/forge.log"
@@ -81,10 +85,15 @@ EOF
 
 write_child() { # <home> <id> <status> [spawn-gen]
   local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
+  if ! tasks-axi show "$id" --file "$home/data/backlog.md" >/dev/null 2>&1; then
+    tasks-axi add "$id" "$id" --start --json --file "$home/data/backlog.md" >/dev/null \
+      || fail "could not create inactive child backlog fixture: $id"
+  fi
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
-    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
+    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1' \
+    'decisions_reviewed=1' 'decision_keys='
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"

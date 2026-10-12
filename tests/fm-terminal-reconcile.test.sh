@@ -64,7 +64,7 @@ run_terminal_captain_case() {
     transferred)
       call="$id-call"
       tx add "$call" "$call" --json >/dev/null
-      tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+      hold_captain_task "$call"
       printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
       printf '%s\n' \
         'needs-decision [key=delivery]: choose delivery treatment' \
@@ -72,19 +72,19 @@ run_terminal_captain_case() {
       ;;
     origin)
       call=$id
-      tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+      hold_captain_task "$call"
       printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
       ;;
     reheld-origin)
       call=$id
-      tx hold "$call" --reason 'first captain delivery choice pending' --kind captain --json >/dev/null
+      hold_captain_task "$call"
       release_captain_task "$call"
-      tx hold "$call" --reason 'new captain delivery choice pending' --kind captain --json >/dev/null
+      hold_captain_task "$call"
       printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
       ;;
     resumed-origin)
       call=$id
-      tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+      hold_captain_task "$call"
       release_captain_task "$call"
       printf '%s\n' 'decisions_reviewed=1' 'decision_keys=' >> "$FM_HOME/state/$id.meta"
       "$owner" merged "$id" https://github.com/o/r/pull/1
@@ -95,7 +95,7 @@ run_terminal_captain_case() {
     legacy)
       call="$id-decision-choice"
       tx add "$call" "$call" --json >/dev/null
-      tx hold "$call" --reason 'legacy captain choice pending' --kind captain --json >/dev/null
+      hold_captain_task "$call"
       printf '%s\n' 'decisions_reviewed=1' 'decision_keys=choice' >> "$FM_HOME/state/$id.meta"
       printf '%s\n' \
         'needs-decision [key=choice]: choose legacy delivery treatment' \
@@ -130,7 +130,8 @@ run_terminal_captain_case() {
         || fail "$backend/$shape/$resolution reported manual completion"
       ;;
     progressed)
-      [ "$backlog" = true ] || fail "$backend/$shape/$resolution did not advance terminal backlog"
+      [ "$backlog" = true ] \
+        || fail "$backend/$shape/$resolution did not advance terminal backlog: $(jq -c . "$FM_HOME/state/terminal-delivery/$key.json")"
       [ "$backend" != manual ] || [ "$rc" -eq 0 ] \
         || fail "$backend/$shape/$resolution refused manual completion"
       if [ "$backend" = manual ]; then
@@ -162,7 +163,7 @@ run_transferred_release_resume_case() {
   make_task "$id"
   call="$id-work"
   make_task "$call"
-  tx hold "$call" --reason 'captain released work pending resume' --kind captain --json >/dev/null
+  hold_captain_task "$call"
   printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
   "$owner" custody "$call" https://github.com/o/r/pull/1
   old_key=$(jq -r --arg id "$call" \
@@ -357,7 +358,7 @@ run_terminal_identity_case() {
   make_task "$id"
   case "$shape" in
     self-unresolved)
-      tx hold "$id" --reason 'origin captain call pending' --kind captain --json >/dev/null
+      hold_captain_task "$id"
       FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
         FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
         complete "$id" "$id" >/dev/null
@@ -367,7 +368,7 @@ run_terminal_identity_case() {
       tx 'done' "$id" --no-prune --json >/dev/null
       ;;
     self-resumed)
-      tx hold "$id" --reason 'origin captain call pending' --kind captain --json >/dev/null
+      hold_captain_task "$id"
       FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
         FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
         complete "$id" "$id" >/dev/null
@@ -382,7 +383,7 @@ run_terminal_identity_case() {
     legacy-alias)
       call="$id-decision-choice"
       make_task "$call"
-      tx hold "$call" --reason 'legacy captain call pending' --kind captain --json >/dev/null
+      hold_captain_task "$call"
       FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
         FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
         complete "$id" "$call" choice >/dev/null
@@ -535,7 +536,7 @@ run_attestation_case() {
   esac
   make_unreviewed_task "$id"
   tx add "$call" "$call" --json >/dev/null
-  tx hold "$call" --reason 'captain delivery choice pending' --kind captain --json >/dev/null
+  hold_captain_task "$call"
   printf '%s\n' \
     'needs-decision [key=delivery]: choose delivery treatment' \
     "$terminal: implementation terminal" > "$FM_HOME/state/$id.status"
@@ -605,7 +606,7 @@ run_active_attestation_recovery_case() {
   esac
   make_unreviewed_task "$id"
   tx add "$call" "$call" --json >/dev/null
-  tx hold "$call" --reason 'active captain review pending' --kind captain --json >/dev/null
+  hold_captain_task "$call"
   printf '%s\n' 'needs-decision [key=delivery]: choose active delivery treatment' \
     > "$FM_HOME/state/$id.status"
   "$owner" observe "$id" done https://github.com/o/r/pull/1
@@ -638,7 +639,7 @@ run_retired_attestation_recovery_case() {
   esac
   make_unreviewed_task "$id"
   tx add "$call" "$call" --json >/dev/null
-  tx hold "$call" --reason 'retired captain review pending' --kind captain --json >/dev/null
+  hold_captain_task "$call"
   printf '%s\n' \
     'needs-decision [key=delivery]: choose retired delivery treatment' \
     'done: implementation terminal' > "$FM_HOME/state/$id.status"
@@ -680,7 +681,7 @@ run_retired_attestation_recovery_case() {
   fi
   rm "$FM_HOME/state/terminal-delivery/$missing_key.json"
 
-  before=$(jq -cS 'del(.captain_keys,.decisions_reviewed)' "$record")
+  before=$(jq -cS 'del(.captain_keys,.captain_obligations,.decisions_reviewed)' "$record")
   mkdir -p "$fakebin"
   cat > "$fakebin/mv" <<'EOF'
 #!/usr/bin/env bash
@@ -700,13 +701,15 @@ EOF
     FM_FAIL_MV_TARGET="$record" captain complete "$id" --receipt "$key" "$call" \
     > "$FM_HOME/$id-interrupted.out" 2> "$FM_HOME/$id-interrupted.err" || rc=$?
   [ "$rc" -ne 0 ] || fail "$backend retired attestation interruption did not surface"
-  jq -e --arg call "$call" '.decisions_reviewed == true and .captain_keys == $call' \
-    "$record" >/dev/null || fail "$backend interrupted attestation did not leave one durable receipt transition"
+  jq -e --arg call "$call" \
+    '.decisions_reviewed == true and .captain_keys == $call and any(.captain_obligations[]; .captain_keys == $call)' \
+    "$record" >/dev/null \
+    || fail "$backend interrupted attestation did not leave one durable receipt transition: $(jq -c . "$record")"
   grep -F 'captain-held [key=delivery]' "$FM_HOME/state/$id.status" >/dev/null 2>&1 \
     && fail "$backend interrupted attestation transferred status after reporting persistence failure"
   [ ! -e "$FM_HOME/state/$id.meta" ] \
     || fail "$backend retired attestation recovery recreated live metadata"
-  after=$(jq -cS 'del(.captain_keys,.decisions_reviewed)' "$record")
+  after=$(jq -cS 'del(.captain_keys,.captain_obligations,.decisions_reviewed)' "$record")
   [ "$before" = "$after" ] \
     || fail "$backend retired attestation recovery changed delivery, backlog, or refill state"
 
@@ -748,7 +751,7 @@ EOF
   first_before=$(jq -cS . "$first_record")
   reused_call="$ambiguous-call"
   tx add "$reused_call" "$reused_call" --json >/dev/null
-  tx hold "$reused_call" --reason 'reused incarnation captain review pending' --kind captain --json >/dev/null
+  hold_captain_task "$reused_call"
   printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\n' \
     "$ambiguous" > "$FM_HOME/state/$ambiguous.meta"
   printf 'decision_keys=%s\n' "$reused_call" >> "$FM_HOME/state/$ambiguous.meta"
@@ -814,8 +817,8 @@ run_preserved_key_recovery_case() {
   make_unreviewed_task "$id"
   tx add "$call_a" "$call_a" --json >/dev/null
   tx add "$call_b" "$call_b" --json >/dev/null
-  tx hold "$call_a" --reason 'first preserved captain call pending' --kind captain --json >/dev/null
-  tx hold "$call_b" --reason 'second preserved captain call pending' --kind captain --json >/dev/null
+  hold_captain_task "$call_a"
+  hold_captain_task "$call_b"
   printf 'decision_keys=%s,%s\n' "$call_a" "$call_b" >> "$FM_HOME/state/$id.meta"
   printf '%s\n' 'done: implementation terminal' > "$FM_HOME/state/$id.status"
   "$owner" merged "$id" https://github.com/o/r/pull/1
@@ -1039,9 +1042,11 @@ test_discard_review_acknowledgement() {
 }
 
 test_report_batches_receipts_at_scale() {
-  local home="$TMP_ROOT/report-scale" dir fakebin real_jq out count reconcile_count i old_key=scale-release-old new_key=scale-release-new
+  local home="$TMP_ROOT/report-scale" dir fakebin real_jq out count reconcile_count i old_key new_key
   mkdir -p "$home/state/terminal-delivery" "$home/config" "$home/data" "$home/fakebin"
   dir="$home/state/terminal-delivery"
+  old_key=$(printf '%s' 'scale-release|old' | shasum -a 256 | awk '{print $1}')
+  new_key=$(printf '%s' 'scale-release|new' | shasum -a 256 | awk '{print $1}')
   printf '%s\n' manual > "$home/config/backlog-backend"
   for i in $(seq 1 108); do
     printf '{"schema":"fm-terminal-delivery.v1","key":"reviewed-%03d","id":"reviewed-%03d","incarnation":"reviewed-%03d","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/1","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":false,"reviewed":true,"superseded_by":"","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":true}\n' \
@@ -2092,6 +2097,29 @@ EOF
     test_none_cycle_transition_rejects_missing_identity
     test_unattested_predecessor_recovery
     test_ambiguous_predecessor_identity_fails_closed
+    exit
+    ;;
+  resumed-origin)
+    run_terminal_captain_case auto resumed-origin resumed progressed
+    run_terminal_captain_case manual resumed-origin resumed progressed
+    exit
+    ;;
+  transferred-release)
+    while read -r release_backend release_scenario release_expected; do
+      [ -n "$release_backend" ] || continue
+      run_transferred_release_resume_case "$release_backend" "$release_scenario" "$release_expected"
+    done <<'EOF'
+auto pre-resume blocked
+auto stale-done blocked
+auto missing-proof blocked
+auto unrelated blocked
+auto new-success progressed
+manual pre-resume blocked
+manual stale-done blocked
+manual missing-proof blocked
+manual unrelated blocked
+manual new-success progressed
+EOF
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
