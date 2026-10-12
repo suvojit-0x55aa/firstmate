@@ -1313,6 +1313,7 @@ run_ship_teardown_orca_landing_replay_case() {
   config="$TMP_ROOT/landing-$variant-config"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$data" "$state" "$config"
+  fm_test_seed_manual_task "$data" "$config" "$id"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-landing-$variant" "worktree=$wt" "project=$proj" \
@@ -1330,12 +1331,13 @@ run_ship_teardown_orca_landing_replay_case() {
   fi
   git -C "$proj" worktree remove --force "$wt"
   orca_case "landing-$variant"
+  add_teardown_side_effect_fakes "$FB"
   case "$variant" in
     exact|replacement)
-      printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
       if [ "$variant" = exact ]; then
-        printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/2.out"
-        printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/3.out"
+        : > "$RESP/always-worktree-not-found"
+      else
+        printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/1.out"
       fi
       ;;
     redirected)
