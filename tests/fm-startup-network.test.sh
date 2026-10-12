@@ -538,6 +538,48 @@ EOF
   pass "fm-startup-network: stronger same-owner requests hand off once after the live probe"
 }
 
+test_reused_pid_cannot_receive_a_stronger_handoff() {
+  local rec home root log generation sweep_runs cleanup_runs unrelated_pid
+  rec=$(new_world reused-worker-pid)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  sleep 45 &
+  unrelated_pid=$!
+  cat > "$home/state/.startup-network.status" <<EOF
+state=running
+pid=$unrelated_pid
+identity=retired-worker-generation
+started=$(date +%s)
+locked=0
+phases=probe
+generation=retired-probe-generation
+lock_pid=$$
+EOF
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" wait 30 >/dev/null \
+    || fail "the replacement locked worker never published: $(cat "$home/state/.startup-network.status")"
+
+  kill -0 "$unrelated_pid" 2>/dev/null || fail "startup handoff killed the unrelated reused PID"
+  kill "$unrelated_pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+  generation=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  [ "$generation" != retired-probe-generation ] \
+    || fail "the locked start handed mandatory sweeps to a reused PID"
+  sweep_runs=$(grep -c 'network=only detect_only=0' "$log" || true)
+  cleanup_runs=$(grep -c '^cleanup ' "$log" || true)
+  [ "$sweep_runs" -eq 1 ] && [ "$cleanup_runs" -eq 1 ] \
+    || fail "the replacement worker did not run mandatory locked work exactly once: $(cat "$log")"
+  assert_absent "$home/state/.startup-network.request" \
+    "the reused PID stranded a stronger startup request"
+  assert_grep 'phases=probe,sweeps' "$home/state/.startup-network.status" \
+    "the replacement worker omitted mandatory phase coverage"
+  pass "fm-startup-network: reused PIDs cannot inherit stronger startup handoffs"
+}
+
 test_truncated_stronger_request_fails_closed_and_retries() {
   local rec home root log barrier report sweep_runs cleanup_runs
   rec=$(new_world truncated-handoff)
@@ -812,6 +854,16 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
   pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
 }
 
+case "${FM_STARTUP_NETWORK_FOCUSED_TEST:-}" in
+  worker-identity-handoff)
+    test_stronger_request_is_handed_to_the_probe_worker_exactly_once
+    test_reused_pid_cannot_receive_a_stronger_handoff
+    exit 0
+    ;;
+  '') ;;
+  *) fail "unknown focused startup-network test: $FM_STARTUP_NETWORK_FOCUSED_TEST" ;;
+esac
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
@@ -824,6 +876,7 @@ test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
 test_start_is_single_flight
 test_stronger_request_is_handed_to_the_probe_worker_exactly_once
+test_reused_pid_cannot_receive_a_stronger_handoff
 test_truncated_stronger_request_fails_closed_and_retries
 test_start_reserves_its_generation_before_returning
 test_new_lock_owner_does_not_reuse_the_previous_owners_worker

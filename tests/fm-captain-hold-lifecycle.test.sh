@@ -305,6 +305,89 @@ test_active_rehold_preserves_prior_cycle_evidence() {
   pass "active re-holds retain exact historical and current cycle evidence"
 }
 
+test_resolution_evidence_is_authenticated_before_lifecycle_progress() {
+  local home id call cycle variant meta report before_meta before_report
+  home=$(make_home resolution-authentication)
+  id=sample-resolution-auth-origin
+  call=sample-resolution-auth-call
+  meta="$home/state/$id.meta"
+  report="$home/data/$id/report.md"
+  mkdir -p "$home/data/$id" "$home/projects/missing-$id"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Authenticated resolution evidence\n' > "$report"
+  printf 'custody retained\n' > "$home/projects/missing-$id/custody.marker"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain exact answer pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  cycle=$(sed -n 's/^decision_call_cycles=//p' "$meta" \
+    | tail -1 | jq -r --arg id "$call" '.[] | select(.id == $id) | .cycle')
+  printf 'Captain authenticated this exact answer.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null
+  tasks_in "$home" show "$call" --full | sed -n 's/^  body: //p' \
+    | jq -r . > "$home/resolution.valid"
+
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "valid captain resolution failed durable verification"
+  run_captain "$home" terminal-ready "$id" "$call:$cycle" >/dev/null \
+    || fail "valid captain resolution failed terminal readiness"
+
+  for variant in changed-answer unsupported-mode malformed-schema; do
+    case "$variant" in
+      changed-answer)
+        sed 's/Captain authenticated this exact answer\./Captain text was altered after recording./' \
+          "$home/resolution.valid" > "$home/resolution.invalid"
+        ;;
+      unsupported-mode)
+        sed 's/^Resolution mode: answered$/Resolution mode: fabricated/' \
+          "$home/resolution.valid" > "$home/resolution.invalid"
+        ;;
+      malformed-schema)
+        sed '/^Decision digest:/d' "$home/resolution.valid" > "$home/resolution.invalid"
+        ;;
+    esac
+    cmp -s "$home/resolution.valid" "$home/resolution.invalid" \
+      && fail "$variant fixture did not alter the serialized resolution"
+    tasks_in "$home" update "$call" --body-file "$home/resolution.invalid" --archive-body >/dev/null
+    before_meta=$(shasum -a 256 "$meta" | awk '{print $1}')
+    before_report=$(shasum -a 256 "$report" | awk '{print $1}')
+    if run_captain "$home" verify "$id" \
+      > "$home/$variant.verify.out" 2> "$home/$variant.verify.err"; then
+      fail "$variant captain resolution passed durable verification"
+    fi
+    if run_captain "$home" terminal-ready "$id" "$call:$cycle" \
+      > "$home/$variant.ready.out" 2> "$home/$variant.ready.err"; then
+      fail "$variant captain resolution passed terminal readiness"
+    fi
+    if run_teardown "$home" "$id" \
+      > "$home/$variant.teardown.out" 2> "$home/$variant.teardown.err"; then
+      fail "$variant captain resolution authorized scout teardown"
+    fi
+    [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before_meta" ] \
+      || fail "$variant refusal mutated captain attestation metadata"
+    [ "$(shasum -a 256 "$report" | awk '{print $1}')" = "$before_report" ] \
+      || fail "$variant refusal mutated the scout report"
+    assert_present "$home/projects/missing-$id/custody.marker" \
+      "$variant refusal removed worktree custody"
+    [ ! -e "$home/treehouse.log" ] || assert_no_grep 'return ' "$home/treehouse.log" \
+      "$variant refusal returned the worktree"
+    [ ! -e "$home/tmux.log" ] || assert_no_grep 'kill-window' "$home/tmux.log" \
+      "$variant refusal removed the endpoint"
+    tasks_in "$home" update "$call" --body-file "$home/resolution.valid" --archive-body >/dev/null
+  done
+
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "restored authentic resolution failed durable verification"
+  run_captain "$home" terminal-ready "$id" "$call:$cycle" >/dev/null \
+    || fail "restored authentic resolution failed terminal readiness"
+  rm -f "$home/projects/missing-$id/custody.marker"
+  rmdir "$home/projects/missing-$id"
+  run_teardown "$home" "$id" >/dev/null \
+    || fail "restored authentic resolution failed the valid teardown control"
+  pass "captain resolution evidence is authenticated before lifecycle progress"
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -1920,6 +2003,11 @@ case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
     run_reused_cycle_teardown_refusal tasks
     exit 0
     ;;
+  resolution-authentication)
+    test_resolution_evidence_is_authenticated_before_lifecycle_progress
+    test_active_rehold_preserves_prior_cycle_evidence
+    exit 0
+    ;;
   '') ;;
   *) fail "unknown focused captain-hold test: $FM_CAPTAIN_HOLD_FOCUSED_TEST" ;;
 esac
@@ -1943,6 +2031,7 @@ test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
 test_teardown_verifies_persisted_call_cycles
 test_active_rehold_preserves_prior_cycle_evidence
+test_resolution_evidence_is_authenticated_before_lifecycle_progress
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction

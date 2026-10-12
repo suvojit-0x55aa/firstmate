@@ -76,8 +76,8 @@
 #
 # STATE, all under this home's state/ and gitignored with it:
 #   .startup-network.status   key=value record - generation, lock_pid, state,
-#                             pid, started, finished, rc, locked, phases, and
-#                             whether the report was published. The single
+#                             pid, process identity, started, finished, rc,
+#                             locked, phases, and whether the report was published. The single
 #                             source of truth for what ran and how it ended.
 #   .startup-network.report   the sweep output, byte for byte as
 #                             bin/fm-bootstrap.sh produced it, plus a
@@ -87,7 +87,7 @@
 #                             intends to print the result inline; a matching live
 #                             claimant gives harvest a bounded chance to finish.
 #   .startup-network.request  a versioned stronger-phase request for the current
-#                             generation and lock owner. It is written atomically,
+#                             generation, exact worker, and lock owner. It is written atomically,
 #                             claimed between the probe and publication, and
 #                             removed only after the worker records the upgrade.
 #   .startup-network.delivered
@@ -187,14 +187,18 @@ delivery_budget() {
 # treated as abandoned no matter what its pid says, which keeps "in progress"
 # from becoming a permanent state.
 worker_alive() {
-  local pid started age
+  local pid identity current_identity started age
   pid=$(status_get pid)
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
+  fm_pid_alive "$pid" || return 1
   started=$(status_get started)
   age=$(age_of "$started")
-  case "$age" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$age" -le "$(( $(stage_budget) + 30 ))" ]
+  case "$age" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$age" -le "$(( $(stage_budget) + 30 ))" ] || return 1
+  identity=$(status_get identity)
+  [ -n "$identity" ] || return 2
+  current_identity=$(fm_pid_identity "$pid") || return 2
+  [ "$current_identity" = "$identity" ] || return 1
 }
 
 # The exact phase names the digest and the report use, so "what has not been
@@ -207,25 +211,27 @@ phase_label() {  # <phases>
   esac
 }
 
-queue_stronger_request() {  # <generation> <lock-pid>
-  local generation=$1 lock_pid=$2
+queue_stronger_request() {  # <generation> <lock-pid> <worker-identity>
+  local generation=$1 lock_pid=$2 worker_identity=$3
   write_atomic "$REQUEST_FILE" <<EOF
-version=1
+version=2
 generation=$generation
 locked=1
 lock_pid=$lock_pid
+worker_identity=$worker_identity
 EOF
 }
 
-stronger_request_is_current() {  # <generation> <lock-pid>
-  local generation=$1 lock_pid=$2 record expected
+stronger_request_is_current() {  # <generation> <lock-pid> <worker-identity>
+  local generation=$1 lock_pid=$2 worker_identity=$3 record expected
   [ -f "$REQUEST_FILE" ] && [ ! -L "$REQUEST_FILE" ] || return 2
   record=$(cat "$REQUEST_FILE" 2>/dev/null) || return 2
   expected=$(cat <<EOF
-version=1
+version=2
 generation=$generation
 locked=1
 lock_pid=$lock_pid
+worker_identity=$worker_identity
 EOF
 )
   [ "$record" = "$expected" ] || return 2
@@ -234,7 +240,8 @@ EOF
 # --- start -------------------------------------------------------------------
 
 cmd_start() {  # <locked> <harvest-pid>
-  local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started current_locked
+  local locked=$1 harvest_pid=$2 lock_pid generation worker_pid worker_identity current_identity phases started current_locked worker_rc=1
+  local identity_file identity_wait=0
   mkdir -p "$STATE" 2>/dev/null || return 1
   # Captured HERE, at the moment the caller still holds the lock, and carried to
   # the worker: re-reading the lock later would only prove that SOME session
@@ -245,15 +252,24 @@ cmd_start() {  # <locked> <harvest-pid>
   fi
 
   fm_lock_acquire_wait "$PUBLISH_LOCK"
-  if [ "$(status_get state)" = running ] && worker_alive \
+  if [ "$(status_get state)" = running ]; then
+    worker_alive
+    worker_rc=$?
+    if [ "$worker_rc" -eq 2 ]; then
+      fm_lock_release "$PUBLISH_LOCK"
+      return 1
+    fi
+  fi
+  if [ "$(status_get state)" = running ] && [ "$worker_rc" -eq 0 ] \
     && { [ "$locked" != 1 ] || [ "$(status_get lock_pid)" = "$lock_pid" ]; }; then
     # A worker from this or a previous session is still going. Starting a second
     # one would run the same mutating sweeps concurrently, so leave it alone and
     # let the harvest report its real state.
     generation=$(status_get generation)
     current_locked=$(status_get locked)
+    worker_identity=$(status_get identity)
     if [ "$locked" = 1 ] && [ "$current_locked" != 1 ]; then
-      if ! queue_stronger_request "$generation" "$lock_pid"; then
+      if ! queue_stronger_request "$generation" "$lock_pid" "$worker_identity"; then
         fm_lock_release "$PUBLISH_LOCK"
         return 1
       fi
@@ -274,6 +290,7 @@ cmd_start() {  # <locked> <harvest-pid>
   if ! write_atomic "$STATUS_FILE" <<EOF
 state=running
 pid=0
+identity=
 started=$started
 locked=$locked
 phases=$phases
@@ -301,13 +318,32 @@ EOF
   local monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  nohup "$SCRIPT_DIR/fm-startup-network.sh" run --locked "$locked" --lock-pid "$lock_pid" \
+  identity_file=$(mktemp "$STATE/.startup-network.identity.XXXXXX" 2>/dev/null) || {
+    fm_lock_release "$PUBLISH_LOCK"
+    [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+    return 1
+  }
+  nohup env FM_STARTUP_NETWORK_IDENTITY_FILE="$identity_file" \
+    "$SCRIPT_DIR/fm-startup-network.sh" run --locked "$locked" --lock-pid "$lock_pid" \
     --generation "$generation" \
     >/dev/null 2>&1 </dev/null &
   worker_pid=$!
+  while [ ! -s "$identity_file" ] && [ "$identity_wait" -lt 100 ]; do
+    sleep 0.01
+    identity_wait=$((identity_wait + 1))
+  done
+  worker_identity=$(cat "$identity_file" 2>/dev/null || true)
+  rm -f "$identity_file" 2>/dev/null || true
+  current_identity=$(fm_pid_identity "$worker_pid" 2>/dev/null || true)
+  if [ -z "$worker_identity" ] || [ "$current_identity" != "$worker_identity" ]; then
+    fm_lock_release "$PUBLISH_LOCK"
+    [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+    return 1
+  fi
   if ! write_atomic "$STATUS_FILE" <<EOF
 state=running
 pid=$worker_pid
+identity=$worker_identity
 started=$started
 locked=$locked
 phases=$phases
@@ -315,7 +351,6 @@ generation=$generation
 lock_pid=$lock_pid
 EOF
   then
-    kill "$worker_pid" 2>/dev/null || true
     fm_lock_release "$PUBLISH_LOCK"
     [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
     return 1
@@ -417,7 +452,7 @@ EOF
 
 publish() {  # <generation> <phases> <locked> <started> <rc> <output-file> <timing-file> <stage-started> <allow-upgrade>
   local generation=$1 phases=$2 locked=$3 started=$4 rc=$5 out=$6 timings=${7:-} stage_started=${8:-} allow_upgrade=${9:-0}
-  local report_published=1 state request_rc=0 lock_pid
+  local report_published=1 state request_rc=0 lock_pid worker_identity
   fm_lock_acquire_wait "$PUBLISH_LOCK"
   if [ "$(status_get generation)" != "$generation" ]; then
     fm_lock_release "$PUBLISH_LOCK"
@@ -425,7 +460,8 @@ publish() {  # <generation> <phases> <locked> <started> <rc> <output-file> <timi
   fi
   if [ "$allow_upgrade" -eq 1 ] && { [ -e "$REQUEST_FILE" ] || [ -L "$REQUEST_FILE" ]; }; then
     lock_pid=$(status_get lock_pid)
-    stronger_request_is_current "$generation" "$lock_pid"
+    worker_identity=$(status_get identity)
+    stronger_request_is_current "$generation" "$lock_pid" "$worker_identity"
     request_rc=$?
     if [ "$request_rc" -ne 0 ]; then
       printf 'NETWORK_CHECKS: the queued stronger startup request was unreadable, so mutating sweeps and stale Herdr cleanup were not authorized; rerun %s/bin/fm-startup-network.sh start --locked 1 --harvest-pid <pid>\n' "$FM_ROOT" >> "$out"
@@ -435,6 +471,7 @@ publish() {  # <generation> <phases> <locked> <started> <rc> <output-file> <timi
       if write_atomic "$STATUS_FILE" <<EOF
 state=running
 pid=$$
+identity=$worker_identity
 started=$started
 locked=1
 phases=probe,sweeps
@@ -481,6 +518,7 @@ EOF
   write_atomic "$STATUS_FILE" <<EOF || true
 state=$state
 pid=$$
+identity=$(status_get identity)
 started=$started
 finished=$(now)
 rc=$rc
@@ -496,14 +534,22 @@ EOF
 
 cmd_run() {  # <locked> <lock-pid> <generation>
   local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
-  local allow_upgrade=0 publish_rc=0 first_rc=0 remaining upgrade_rc=0
+  local allow_upgrade=0 publish_rc=0 first_rc=0 remaining upgrade_rc=0 worker_identity worker_rc
   mkdir -p "$STATE" 2>/dev/null || return 1
+  worker_identity=$(fm_pid_identity "$$") || return 1
+  if [ -n "${FM_STARTUP_NETWORK_IDENTITY_FILE:-}" ]; then
+    [ -f "$FM_STARTUP_NETWORK_IDENTITY_FILE" ] \
+      && [ ! -L "$FM_STARTUP_NETWORK_IDENTITY_FILE" ] \
+      && printf '%s\n' "$worker_identity" > "$FM_STARTUP_NETWORK_IDENTITY_FILE" \
+      || return 1
+  fi
   started=$(now)
   budget=$(stage_budget)
   phases=probe
   if [ -n "$generation" ]; then
     fm_lock_acquire_wait "$PUBLISH_LOCK"
-    if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ]; then
+    if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get pid)" = "$$" ] \
+      && [ "$(status_get identity)" = "$worker_identity" ]; then
       internal=1
       started=$(status_get started)
     fi
@@ -529,13 +575,18 @@ cmd_run() {  # <locked> <lock-pid> <generation>
   if [ "$internal" -eq 0 ]; then
     generation="$(now).$$.manual"
     fm_lock_acquire_wait "$PUBLISH_LOCK"
-    if [ "$(status_get state)" = running ] && worker_alive; then
-      fm_lock_release "$PUBLISH_LOCK"
-      return 1
+    if [ "$(status_get state)" = running ]; then
+      worker_alive
+      worker_rc=$?
+      if [ "$worker_rc" -ne 1 ]; then
+        fm_lock_release "$PUBLISH_LOCK"
+        return 1
+      fi
     fi
     write_atomic "$STATUS_FILE" <<EOF || true
 state=running
 pid=$$
+identity=$worker_identity
 started=$started
 locked=$sweep_locked
 phases=$phases

@@ -371,7 +371,7 @@ task_evidence_show() {  # <id>
   printf '%s\n' "$show"
 }
 
-historical_resolution_body_for_cycle() {  # <shown-body> <hold-cycle>
+authenticated_resolution_body_for_cycle() {  # <shown-body> <hold-cycle>
   local decoded
   decoded=$(decode_shown_value "$1") || return 1
   printf '%s' "$decoded" | perl -MDigest::SHA=sha256_hex -MEncode=decode,encode,FB_CROAK -MJSON::PP -e '
@@ -390,16 +390,25 @@ historical_resolution_body_for_cycle() {  # <shown-body> <hold-cycle>
         $rest = substr($rest, $end + length($separator));
         next;
       }
-      if ($rest =~ /\AResolution recorded by fm-(?:captain|decision)-hold\.\nDecision digest: ([0-9a-f]{64})\nResolution mode: [^\n]+\nHold cycle: ([0-9a-f]{64})\n(?:Terminal receipt: [^\n]+\n)?(?:Terminal incarnation: [^\n]+\n)?\n?Captain decision:\n/) {
-        my ($digest, $cycle) = ($1, $2);
+      if ($rest =~ /\AResolution recorded by fm-(?:captain|decision)-hold\.\nDecision digest: ([0-9a-f]{64})\nResolution mode: ([^\n]+)\nHold cycle: ([0-9a-f]{64})\n(?:Terminal receipt: ([^\n]+)\n)?(?:Terminal incarnation: ([^\n]+)\n)?\n?Captain decision:\n/) {
+        my ($digest, $mode, $cycle, $receipt, $incarnation) = ($1, $2, $3, $4, $5);
+        if ($mode eq "released") {
+          exit 1 unless defined $receipt && ($receipt eq "none" || $receipt =~ /\A[0-9a-f]{64}\z/);
+          exit 1 if defined $incarnation && ($receipt ne "none" || $incarnation !~ /\A[0-9a-f]{64}\z/);
+        } elsif ($mode eq "answered" || $mode eq "repaired") {
+          exit 1 if defined $receipt || defined $incarnation;
+        } else {
+          exit 1;
+        }
         my $answer_start = $+[0];
         my @ends;
         push @ends, [length($rest), length($rest)]
-          if sha256_hex(encode("UTF-8", substr($rest, $answer_start))) eq $digest;
+          if length($rest) > $answer_start
+          && sha256_hex(encode("UTF-8", substr($rest, $answer_start))) eq $digest;
         pos($rest) = $answer_start;
         while ($rest =~ /\n+/g) {
           my $end = $-[0];
-          next if $end < $answer_start;
+          next if $end <= $answer_start;
           push @ends, [$end, $+[0]]
             if sha256_hex(encode("UTF-8", substr($rest, $answer_start, $end - $answer_start))) eq $digest;
         }
@@ -426,7 +435,7 @@ active_task_show_cycle() {  # <show-output> <id> <hold-cycle>
     printf '%s\n' "$show"
     return 0
   fi
-  if historical=$(historical_resolution_body_for_cycle "$body" "$cycle"); then
+  if historical=$(authenticated_resolution_body_for_cycle "$body" "$cycle"); then
     printf '  id: %s\n  title: %s\n  state: %s\n  hold_kind: -\n  body: %s\n' \
       "$id" "$(show_field "$show" title)" "$(show_field "$show" state)" "$historical"
     return 0
@@ -606,15 +615,10 @@ current_hold_cycle() {  # <task-body>
   '
 }
 
-recorded_resolution_cycle() {  # <task-body>
-  newest_resolution_field "$1" 'Hold cycle'
-}
-
 body_has_current_resolution() {  # <task-body>
-  local current recorded
+  local current
   current=$(current_hold_cycle "$1" || true)
-  recorded=$(recorded_resolution_cycle "$1" || true)
-  [ -n "$current" ] && [ "$recorded" = "$current" ]
+  [ -n "$current" ] && authenticated_resolution_body_for_cycle "$1" "$current" >/dev/null
 }
 
 release_resolution_matches_current() {  # <task-id> <task-body>
@@ -730,29 +734,14 @@ recorded_release_incarnation() {  # <task-body>
 }
 
 historical_release_matches() {  # <task-body> <hold-cycle> <terminal-receipt>
-  local decoded
-  decoded=$(decode_shown_value "$1") || return 1
-  printf '%s\n' "$decoded" | perl -e '
-    use strict;
-    use warnings;
-    my ($cycle, $receipt) = @ARGV;
-    local $/;
-    my $body = <STDIN> // "";
-    my @records = split /(?=^Resolution recorded by fm-(?:captain|decision)-hold\.\n)/m, $body;
-    for my $record (@records) {
-      next unless $record =~ /^Resolution recorded by fm-(?:captain|decision)-hold\.\n/m;
-      my ($mode) = $record =~ /^Resolution mode: ([^\n]+)$/m;
-      my ($held) = $record =~ /^Hold cycle: ([0-9a-f]{64})$/m;
-      my ($terminal) = $record =~ /^Terminal receipt: ([^\n]+)$/m;
-      my ($incarnation) = $record =~ /^Terminal incarnation: ([^\n]+)$/m;
-      next unless defined $mode && $mode eq "released";
-      next unless defined $held && $held eq $cycle;
-      exit 0 if defined $terminal && $terminal eq $receipt;
-      exit 0 if defined $terminal && $terminal eq "none"
-        && defined $incarnation && $incarnation eq $receipt;
-    }
-    exit 1;
-  ' "$2" "$3"
+  local record mode terminal incarnation
+  record=$(authenticated_resolution_body_for_cycle "$1" "$2") || return 1
+  mode=$(recorded_resolution_mode "$record" || true)
+  [ "$mode" = released ] || return 1
+  terminal=$(recorded_release_receipt "$record" || true)
+  [ "$terminal" != "$3" ] || return 0
+  incarnation=$(recorded_release_incarnation "$record" || true)
+  [ "$terminal" = none ] && [ "$incarnation" = "$3" ]
 }
 
 terminal_receipt_key() {  # <task-id>
@@ -789,7 +778,9 @@ verify_hold_durable() {  # <task-id> [hold-cycle]
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
-  if body_has_current_resolution "$body"; then
+  if body_has_resolution_record "$body"; then
+    body_has_current_resolution "$body" \
+      || fail "captain-held task $id has invalid captain-resolution evidence"
     return 0
   fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then

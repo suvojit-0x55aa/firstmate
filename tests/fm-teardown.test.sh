@@ -748,12 +748,13 @@ test_ship_teardown_requires_captain_inventory_attestation() {
 }
 
 test_manual_backend_attestation_without_tasks_axi() {
-  local variant case_dir rc wt_head receipt key manual_path before after
+  local variant case_dir rc wt_head receipt key manual_path before after decision_digest
+  decision_digest=$(printf '%s' 'Captain approved.' | shasum -a 256 | awk '{print $1}')
   for variant in absent incompatible; do
     case_dir=$(make_case "manual-attestation-$variant")
     write_meta "$case_dir" local-only ship
     printf '%s\n' manual > "$case_dir/config/backlog-backend"
-    cat > "$case_dir/data/backlog.md" <<'EOF'
+    cat > "$case_dir/data/backlog.md" <<EOF
 ## In flight
 
 - [ ] task-x1 - Manual ship (repo: firstmate)
@@ -817,7 +818,7 @@ EOF
 
 - [x] manual-call - Manual captain call (repo: firstmate) (hold: captain answer pending) (hold-kind: captain) (done 2026-10-11)
   Resolution recorded by fm-captain-hold.
-  Decision digest: 2222222222222222222222222222222222222222222222222222222222222222
+  Decision digest: $decision_digest
   Resolution mode: answered
   Hold cycle: 1111111111111111111111111111111111111111111111111111111111111111
   Captain decision:
@@ -851,7 +852,7 @@ EOF
       || fail "manual-$variant: reviewed teardown failed: $(cat "$case_dir/reviewed.stderr")"
     receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
     key=$(jq -r .key "$receipt")
-    cat > "$case_dir/data/backlog.md" <<'EOF'
+    cat > "$case_dir/data/backlog.md" <<EOF
 ## In flight
 
 ## Queued
@@ -862,7 +863,7 @@ EOF
 
 - [x] manual-call - Manual captain call (repo: firstmate) (hold: captain answer pending) (hold-kind: captain) (done 2026-10-11)
   Resolution recorded by fm-captain-hold.
-  Decision digest: 2222222222222222222222222222222222222222222222222222222222222222
+  Decision digest: $decision_digest
   Resolution mode: answered
   Hold cycle: 1111111111111111111111111111111111111111111111111111111111111111
   Captain decision:
