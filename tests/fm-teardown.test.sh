@@ -1903,7 +1903,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
 }
 
 assert_herdr_teardown_preflight_refuses_before_changes() {
-  local mode=$1 case_dir log closed rc thlog teardown_bin
+  local mode=$1 case_dir log closed rc thlog teardown_bin teardown_root
   case_dir=$(make_case "herdr-preflight-$mode")
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -1938,15 +1938,19 @@ SH
       teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
       ;;
   esac
+  teardown_root=${teardown_bin%/bin/fm-teardown.sh}
   rc=0
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$teardown_root" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
     FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-preflight-$mode: teardown continued without its required preflight: stdout=$(cat "$case_dir/stdout"); stderr=$(cat "$case_dir/stderr")"
   assert_grep "nothing was changed" "$case_dir/stderr" \
-    "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly"
+    "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly: $(cat "$case_dir/stderr")"
   [ -d "$case_dir/wt" ] || fail "herdr-preflight-$mode: refusal removed the isolated copy"
   [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "fm/task-x1" ] \
     || fail "herdr-preflight-$mode: refusal dropped the task branch"
@@ -3466,6 +3470,10 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
     ;;
   receipt-authentication)
     test_unauthenticated_landing_receipts_refuse_replay
+    exit
+    ;;
+  herdr-preflight)
+    test_herdr_flat_teardown_preflight_refuses_before_changes
     exit
     ;;
   *) fail "unknown focused teardown test: $FM_TEARDOWN_FOCUSED_TEST" ;;

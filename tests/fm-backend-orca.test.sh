@@ -854,9 +854,11 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
     "backend=orca" "orca_worktree_id=wt-teardown" \
     "decisions_reviewed=1" "decision_keys="
   orca_case teardown
-  for response in 1 2 3 5; do
-    printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown","path":"%s"}}}\n' "$wt" > "$RESP/$response.out"
-  done
+  : > "$RESP/use-show-sequence"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-teardown","path":"%s"}}}\n' "$wt" \
+    > "$RESP/worktree.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1979,6 +1981,10 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     test_teardown_retries_after_orca_remove_failures
     test_orca_rechecks_safety_after_process_cleanup
     test_ship_teardown_removes_orca_worktree_when_id_path_matches
+    exit
+    ;;
+  teardown-scout)
+    test_scout_teardown_removes_orca_worktree_via_helper
     exit
     ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;

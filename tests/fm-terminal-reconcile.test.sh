@@ -155,6 +155,7 @@ run_terminal_captain_case() {
 run_transferred_release_resume_case() {
   local backend=$1 scenario=$2 expected=$3
   local id="release-$backend-$scenario" call old_key new_key key rc=0 backlog old_file tmp
+  local reconcile_attempt reconcile_limit
   case "$backend" in
     auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
     manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
@@ -194,9 +195,12 @@ run_transferred_release_resume_case() {
         tx 'done' "$call" --no-prune --json >/dev/null
         "$owner" manual-complete "$new_key"
       else
-        for _ in 1 2 3 4 5 6 7 8; do
+        reconcile_limit=$(( $(find "$FM_HOME/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d '[:space:]') + 1 ))
+        reconcile_attempt=0
+        while [ "$reconcile_attempt" -lt "$reconcile_limit" ]; do
           "$owner" reconcile
           [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$new_key.json")" != true ] || break
+          reconcile_attempt=$((reconcile_attempt + 1))
         done
       fi
       [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$new_key.json")" = true ] \

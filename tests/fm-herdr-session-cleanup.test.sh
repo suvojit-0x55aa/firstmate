@@ -347,4 +347,86 @@ FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
 [ ! -s "$TRACE" ] || fail "read-only session start ran stale projection cleanup"
 pass "session start runs cleanup only after acquiring its home lock"
 
+# Exercise the real bounded CLI, not the sourced safety-test overrides above.
+# Discovery is read-only; timing out must retain every journal and reap probes.
+BOUNDED_HOME="$TMP_ROOT/bounded-home"
+mkdir -p "$BOUNDED_HOME/state" "$BOUNDED_HOME/config"
+for i in $(seq 1 108); do
+  printf 'version=1\ntask_id=scale-%s\nprojection_id=%022d\n' "$i" "$i" \
+    > "$BOUNDED_HOME/state/scale-$i.herdr-presentation"
+done
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/calls"
+case "$*" in
+  *'workspace list'*)
+    echo $$ > "$FM_HOME/probe.pid"
+    trap '' TERM
+    while :; do sleep 1; done
+    ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/herdr"
+for attempt in 1 2; do
+  started=$SECONDS
+  out=$(FM_HOME="$BOUNDED_HOME" FM_STATE_OVERRIDE="$BOUNDED_HOME/state" \
+    FM_CONFIG_OVERRIDE="$BOUNDED_HOME/config" FM_HERDR_CLEANUP_TIMEOUT=1 \
+    bash "$ROOT/bin/fm-herdr-session-cleanup.sh" 2>&1) || fail "timeout attempt $attempt failed startup"
+  [ "$((SECONDS - started))" -lt 8 ] || fail 'cleanup exceeded its bounded grace'
+  assert_contains "$out" 'cleanup incomplete' 'missing cleanup timeout warning'
+  [ "$(find "$BOUNDED_HOME/state" -name '*.herdr-presentation' | wc -l | tr -d ' ')" = 108 ] \
+    || fail 'timeout discarded candidate journals'
+  if kill -0 "$(cat "$BOUNDED_HOME/probe.pid")" 2>/dev/null; then fail 'timeout leaked CLI'; fi
+done
+[ "$(wc -l < "$BOUNDED_HOME/calls" | tr -d ' ')" = 2 ] || fail 'timeout issued a mutation or prevented retry'
+pass 'bounded CLI warns, preserves 108 candidates, reaps resistant probes, and retries'
+
+# The enclosing deferred stage can expire before cleanup's own deadline.
+# Cancellation must cross the nested process-group boundary, too.
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
+rm -f "$BOUNDED_HOME/probe.pid"
+rc=0
+FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed 2 env \
+  FM_HOME="$BOUNDED_HOME" FM_STATE_OVERRIDE="$BOUNDED_HOME/state" \
+  FM_CONFIG_OVERRIDE="$BOUNDED_HOME/config" FM_HERDR_CLEANUP_TIMEOUT=30 \
+  bash "$ROOT/bin/fm-herdr-session-cleanup.sh" > "$TMP_ROOT/outer-timeout.log" 2>&1 || rc=$?
+[ "$rc" = 124 ] || fail 'outer deadline did not expire'
+[ -f "$BOUNDED_HOME/probe.pid" ] || fail 'outer deadline never exercised the nested CLI'
+if kill -0 "$(cat "$BOUNDED_HOME/probe.pid")" 2>/dev/null; then fail 'outer cancellation leaked CLI'; fi
+[ "$(find "$BOUNDED_HOME/state" -name '*.herdr-presentation' | wc -l | tr -d ' ')" = 108 ] \
+  || fail 'outer cancellation discarded candidates'
+pass 'outer startup cancellation reaps nested cleanup probes and preserves candidates'
+
+
+# Many syntactically matching candidates also consume one aggregate budget,
+# rather than starting a fresh timeout for each journal/workspace pair.
+: > "$BOUNDED_HOME/calls"
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/calls"
+case "$*" in
+  *'workspace list'*)
+    printf '{"result":{"workspaces":['
+    for i in $(seq 1 84); do
+      [ "$i" = 1 ] || printf ','
+      printf '{"workspace_id":"w%s","label":"└ scale-%s · p:%022d"}' "$i" "$i" "$i"
+    done
+    printf ']}}\n'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+started=$SECONDS
+out=$(FM_HOME="$BOUNDED_HOME" FM_STATE_OVERRIDE="$BOUNDED_HOME/state" \
+  FM_CONFIG_OVERRIDE="$BOUNDED_HOME/config" FM_HERDR_CLEANUP_TIMEOUT=1 \
+  bash "$ROOT/bin/fm-herdr-session-cleanup.sh" 2>&1) || fail 'scale timeout failed startup'
+[ "$((SECONDS - started))" -lt 8 ] || fail 'matching population exceeded aggregate budget'
+assert_contains "$out" 'cleanup incomplete' 'large matching population never hit its bound'
+[ "$(find "$BOUNDED_HOME/state" -name '*.herdr-presentation' | wc -l | tr -d ' ')" = 108 ] \
+  || fail 'scale timeout discarded candidates'
+if grep -E 'pane close|workspace close' "$BOUNDED_HOME/calls" >/dev/null; then fail 'ambiguous scale candidate closed'; fi
+pass '84 matching workspaces and 108 journals share one bounded cleanup budget'
+
 printf 'all fm-herdr-session-cleanup tests passed\n'

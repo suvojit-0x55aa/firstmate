@@ -523,7 +523,7 @@ select_merge_observation_record() {
     if [ -e "$current" ] || [ -L "$current" ]; then
       receipt_path_authenticated "$current" || return 1
       if [ "$current_pr_matches" -eq 1 ]; then
-        jq -e --arg id "$id" --arg pr "$pr" '.id == $id and .pr == $pr' \
+        jq -e --arg id "$id" '.id == $id' \
           "$current" >/dev/null || return 1
       fi
     else
@@ -548,6 +548,16 @@ select_merge_observation_record() {
     receipt_path_authenticated "$RECORD" || return 1
     jq -e --arg id "$id" --arg pr "$pr" '.id == $id and .pr == $pr' \
       "$RECORD" >/dev/null || return 1
+    return 0
+  fi
+  if [ "$current_pr_matches" -eq 1 ] && [ "$current_missing" -eq 0 ] \
+    && ! jq -e --arg pr "$pr" '.pr == $pr' "$current" >/dev/null; then
+    # A different PR on the same authenticated current incarnation advances
+    # that receipt. A retired match remains ambiguous and must fail closed.
+    [ "$count" -eq 0 ] || return 1
+    RECORD=$current
+    KEY=${current##*/}
+    KEY=${KEY%.json}
     return 0
   fi
   [ "$count" -eq 1 ] || return 1

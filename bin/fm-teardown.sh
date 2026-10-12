@@ -2971,5 +2971,7 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
-"$SCRIPT_DIR/fm-terminal-reconcile.sh" reconcile || true
-[ "$KIND" = secondmate ] || "$SCRIPT_DIR/fm-terminal-reconcile.sh" report
+if [ "$KIND" != secondmate ]; then
+  "$SCRIPT_DIR/fm-terminal-reconcile.sh" reconcile || true
+  "$SCRIPT_DIR/fm-terminal-reconcile.sh" report
+fi

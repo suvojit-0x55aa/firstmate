@@ -414,8 +414,17 @@ spawn_secondmate_task() {
 }
 
 teardown_task() {  # <id> <home>
-  local id=$1 home=$2
-  fm_test_seed_manual_task "$home/data" "$home/config" "$id"
+  local id=$1 home=$2 fixture_lock="$2/state/.manual-backlog-fixture.lock" wait_count=0
+  while ! mkdir "$fixture_lock" 2>/dev/null; do
+    wait_count=$((wait_count + 1))
+    [ "$wait_count" -le 250 ] || fail "timed out serializing teardown fixture input for $id"
+    sleep 0.02
+  done
+  if ! fm_test_seed_manual_task "$home/data" "$home/config" "$id"; then
+    rmdir "$fixture_lock" 2>/dev/null || true
+    fail "could not seed teardown fixture input for $id"
+  fi
+  rmdir "$fixture_lock" || fail "could not release teardown fixture input lock for $id"
   FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \

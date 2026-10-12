@@ -3052,7 +3052,7 @@ test_merged_poll_reregistration_after_notification_is_absorbed() {
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err")"
+  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err"); output=$(cat "$dir/watch-1.out"); triage=$(cat "$state/.watch-triage.log" 2>/dev/null || true)"
   first=$(cat "$dir/watch-1.out")
   case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merge confirmation was not delivered: $first" ;; esac
   ack_watcher_cycle "$state" || fail "first merge confirmation acknowledgement failed"
@@ -3273,17 +3273,18 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   printf -- '- task-a | scope: test | home: %s\n' "$dir/secondmate-home" \
     > "$dir/home/data/secondmates.md"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/1
-  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
   fm_write_meta "$state/task-a.meta" \
     'window=session:fm-task-a' "worktree=$dir/secondmate-home" "project=$dir/project" \
     'kind=secondmate' 'mode=secondmate' 'backend=tmux' "home=$dir/secondmate-home" \
-    'pr=https://github.com/o/r/pull/1' 'decisions_reviewed=1' 'decision_keys='
+    'decisions_reviewed=1' 'decision_keys=' 'pr=https://github.com/o/r/pull/1'
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
 
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err")"
+  [ "$rc" -eq 0 ] \
+    || fail "first merged watcher cycle failed (rc=$rc): stderr=$(cat "$dir/watch-1.err"); output=$(cat "$dir/watch-1.out"); triage=$(cat "$state/.watch-triage.log" 2>/dev/null || true)"
   case "$(cat "$dir/watch-1.out")" in
     check:*task-a.check.sh:*merged) ;;
     *) fail "first PR merge confirmation was not delivered: $(cat "$dir/watch-1.out")" ;;
@@ -3292,18 +3293,19 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   assert_poll_absent "$state" task-a
 
   write_poll_meta "$state" task-a https://github.com/o/r/pull/2
-  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/2
   fm_write_meta "$state/task-a.meta" \
     'window=session:fm-task-a' "worktree=$dir/secondmate-home" "project=$dir/project" \
     'kind=secondmate' 'mode=secondmate' 'backend=tmux' "home=$dir/secondmate-home" \
-    'pr=https://github.com/o/r/pull/2' 'decisions_reviewed=1' 'decision_keys='
+    'decisions_reviewed=1' 'decision_keys=' 'pr=https://github.com/o/r/pull/2'
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/2
   rm -f "$state/.last-check"
 
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "different-PR watcher cycle failed: $(cat "$dir/watch-2.err")"
+  [ "$rc" -eq 0 ] \
+    || fail "different-PR watcher cycle failed (rc=$rc): stderr=$(cat "$dir/watch-2.err"); output=$(cat "$dir/watch-2.out"); triage=$(cat "$state/.watch-triage.log" 2>/dev/null || true); receipts=$(find "$state/terminal-delivery" -type f -name '*.json' -maxdepth 1 -exec jq -c '{key,id,pr,retired,reviewed,superseded_by}' {} \; 2>/dev/null)"
   case "$(cat "$dir/watch-2.out")" in
     check:*task-a.check.sh:*merged) ;;
     *) fail "a different PR merge was absorbed: $(cat "$dir/watch-2.out")" ;;
@@ -3717,6 +3719,15 @@ test_receipt_consumes_authenticated_poll_merge() {
   assert_poll_absent "$state" task-a
   pass "authenticated poll publishes merge proof before endpoint retirement"
 }
+
+case "${FM_PR_CHECK_SECURITY_FOCUSED_TEST:-}" in
+  '') ;;
+  different-merged-pr)
+    test_different_merged_pr_for_same_task_is_not_absorbed
+    exit
+    ;;
+  *) fail "unknown focused PR check security test: $FM_PR_CHECK_SECURITY_FOCUSED_TEST" ;;
+esac
 
 test_parser_matrix
 test_gitlab_merge_watch

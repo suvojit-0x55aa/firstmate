@@ -39,7 +39,11 @@ cleanup() {
       sleep 0.05
     done
   fi
-  rm -rf -- "$TMP_ROOT"
+  if [ "${FM_TEST_KEEP_TMP:-0}" = 1 ]; then
+    printf 'preserved remote lifecycle fixture: %s\n' "$TMP_ROOT" >&2
+  else
+    rm -rf -- "$TMP_ROOT"
+  fi
 }
 trap cleanup EXIT
 
@@ -366,7 +370,8 @@ FM_SECONDMATE_CHARTER='Failing seed charter.' FM_SECONDMATE_SCOPE='failed seed' 
 seed_fail_pid=$!
 seed_wait=0
 while [ ! -f "$TMP_ROOT/seed.entered" ]; do
-  kill -0 "$seed_fail_pid" 2>/dev/null || fail "failing seed exited before remote provisioning"
+  kill -0 "$seed_fail_pid" 2>/dev/null \
+    || fail "failing seed exited before remote provisioning: $(cat "$TMP_ROOT/seed-fail.out")"
   seed_wait=$((seed_wait + 1))
   [ "$seed_wait" -le 250 ] || fail "failing seed never reached remote provisioning"
   sleep 0.02
@@ -468,6 +473,7 @@ git init -q --bare "$TMP_ROOT/beta.git"
 fm_git_init_commit "$TMP_ROOT/beta-src"
 git -C "$TMP_ROOT/beta-src" remote add origin "file://$TMP_ROOT/beta.git"
 git -C "$TMP_ROOT/beta-src" push -q -u origin HEAD
+git --git-dir="$TMP_ROOT/beta.git" symbolic-ref HEAD refs/heads/main
 rm -rf "$TMP_ROOT/beta-src"
 cat > "$TMP_ROOT/seed-parent/data/projects.md" <<'EOF'
 - beta [direct-PR] - beta project (added 2026-08-06)
@@ -1238,7 +1244,8 @@ if ! wait "$teardown_pid"; then
   printf 'serialized retirement output:\n%s\n' "$(cat "$TMP_ROOT/teardown-serialized.out")" >&2
   fail "safe remote retirement failed after handoff serialization"
 fi
-assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
+assert_absent "$REMOTE_HOME" \
+  "remote retirement did not remove the remote home: $(cat "$TMP_ROOT/teardown-serialized.out")"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
 assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
   "remote retirement left receiver wake state that could poison a replacement route"
