@@ -451,7 +451,7 @@ EOF
     fi
   fi
   case "$rc" in
-    0) state=done ;;
+    0) state='done' ;;
     124)
       state=timeout
       printf 'NETWORK_CHECKS: hit the %ss bound before finishing, so %s may be incomplete; rerun %s/bin/fm-startup-network.sh run --locked %s\n' \

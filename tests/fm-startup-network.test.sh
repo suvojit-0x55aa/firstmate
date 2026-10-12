@@ -566,7 +566,7 @@ EOF
 
   FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" start --locked 1 --harvest-pid $$
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the retry after a truncated handoff never published"
-  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = done ] \
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
     || fail "the retry after a truncated handoff did not recover"
   sweep_runs=$(grep -c 'network=only detect_only=0' "$log" || true)
   cleanup_runs=$(grep -c '^cleanup ' "$log" || true)

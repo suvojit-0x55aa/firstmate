@@ -920,9 +920,12 @@ command_answer() {
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
-    [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
-      && release_resolution_matches_current "$id" "$body" \
-      || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    if [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
+      && release_resolution_matches_current "$id" "$body"; then
+      :
+    else
+      fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    fi
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -1317,7 +1320,7 @@ command_origin_obligation() {
     if body_has_resolution_record "$body"; then
       body_has_current_resolution "$body" \
         || fail "origin $origin captain-cycle evidence is stale or corrupt"
-    elif [ "$hold_kind" != captain ] || [ "$state" = done ]; then
+    elif [ "$hold_kind" != captain ] || [ "$state" = 'done' ]; then
       fail "origin $origin captain-cycle evidence is inconsistent"
     fi
     printf '%s\n' "$cycle"

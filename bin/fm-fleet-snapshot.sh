@@ -198,8 +198,8 @@ EOF
 OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
-  --backlog-json) OUTPUT_MODE=backlog-json ;;
-  --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+  --backlog-json) OUTPUT_MODE='backlog-json' ;;
+  --secondmate-home-summary) OUTPUT_MODE='secondmate-home-summary' ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac

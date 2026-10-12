@@ -423,7 +423,7 @@ select_authenticated_receipt_key() {
   receipt_path_authenticated "$RECORD"
 }
 select_captain_review_receipt() {
-  local id=$1 key=$2 meta="$STATE/$1.meta" incarnation expected candidate active_key= count=0 metadata_status
+  local id=$1 key=$2 meta="$STATE/$1.meta" incarnation expected candidate active_key='' count=0 metadata_status
   select_authenticated_receipt_key "$key" || return $?
   jq -e --arg id "$id" \
     '.id == $id and .incarnation != "||" and .retired == true and .discarded != true and ((.superseded_by // "") == "")' \
@@ -494,7 +494,7 @@ select_record() {
     && supersede_prior_records "$id"
 }
 select_retired_record() {
-  local id=$1 pr=$2 candidate found= count=0
+  local id=$1 pr=$2 candidate found='' count=0
   valid "$id" || return 2
   for candidate in "$DIR"/*.json; do
     receipt_path_authenticated "$candidate" || continue
@@ -511,7 +511,7 @@ select_retired_record() {
   KEY=${KEY%.json}
 }
 select_merge_observation_record() {
-  local id=$1 pr=$2 meta="$STATE/$1.meta" current= candidate found= count=0
+  local id=$1 pr=$2 meta="$STATE/$1.meta" current='' candidate found='' count=0
   local current_pr_matches=0 current_missing=0
   valid "$id" || return 2
   [ -n "$pr" ] || return 2
@@ -839,15 +839,15 @@ case "$mode" in
     manual=false
     fm_backlog_backend_manual "$CONFIG" && manual=true
     report_records=()
-    for RECORD in "$DIR"/*.json; do
-      [ -f "$RECORD" ] && [ ! -L "$RECORD" ] || continue
-      report_records+=("$RECORD")
+    for report_record in "$DIR"/*.json; do
+      [ -f "$report_record" ] && [ ! -L "$report_record" ] || continue
+      report_records+=("$report_record")
     done
     [ "${#report_records[@]}" -eq 0 ] || {
-      for RECORD in "${report_records[@]}"; do
+      for report_record in "${report_records[@]}"; do
         while IFS= read -r receipt_line || [ -n "$receipt_line" ]; do
           printf '%s\n' "$receipt_line"
-        done < "$RECORD"
+        done < "$report_record"
       done
     } | jq -r --argjson manual "$manual" '
       def valid_origin_cycle:
@@ -890,7 +890,7 @@ case "$mode" in
     if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
       record_is_unique_actionable || exit 1
       backlog_record=$(backlog_task_record "$id") || exit 1
-      [ "$(printf '%s\n' "$backlog_record" | jq -r .state)" = done ] || exit 1
+      [ "$(printf '%s\n' "$backlog_record" | jq -r .state)" = 'done' ] || exit 1
       backlog_evidence=$(printf '%s' "$backlog_record" | jq -cS . | shasum -a 256 | awk '{print $1}') || exit 1
       put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
         --arg evidence "$backlog_evidence" \

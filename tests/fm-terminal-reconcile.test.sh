@@ -283,7 +283,7 @@ run_preterminal_transferred_release_case() {
   case "$proof" in
     running) ;;
     presented)
-      "$owner" observe "$call" done https://github.com/o/r/pull/1
+      "$owner" observe "$call" 'done' https://github.com/o/r/pull/1
       "$owner" report >/dev/null
       ;;
     undelivered)
@@ -609,7 +609,7 @@ run_active_attestation_recovery_case() {
   hold_captain_task "$call"
   printf '%s\n' 'needs-decision [key=delivery]: choose active delivery treatment' \
     > "$FM_HOME/state/$id.status"
-  "$owner" observe "$id" done https://github.com/o/r/pull/1
+  "$owner" observe "$id" 'done' https://github.com/o/r/pull/1
   key=$("$owner" receipt-key "$id")
   record="$FM_HOME/state/terminal-delivery/$key.json"
   report=$("$owner" report)
@@ -722,7 +722,7 @@ EOF
   answer_captain_task "$call"
   rm "$FM_HOME/state/$id.status"
   if [ "$backend" = manual ]; then
-    tx done "$id" --no-prune --json >/dev/null
+    tx 'done' "$id" --no-prune --json >/dev/null
     "$owner" manual-complete "$key"
     "$owner" manual-complete "$key"
   else
@@ -741,7 +741,7 @@ EOF
     "$FM_HOME/state/terminal-delivery/"*.json)
   first_record="$FM_HOME/state/terminal-delivery/$first_key.json"
   if [ "$backend" = manual ]; then
-    tx done "$ambiguous" --no-prune --json >/dev/null
+    tx 'done' "$ambiguous" --no-prune --json >/dev/null
     "$owner" manual-complete "$first_key"
   else
     "$owner" reconcile
@@ -827,7 +827,7 @@ run_preserved_key_recovery_case() {
     "$FM_HOME/state/terminal-delivery/"*.json)
   record="$FM_HOME/state/terminal-delivery/$key.json"
   rm "$FM_HOME/state/$id.meta"
-  [ "$backend" != manual ] || tx done "$id" --no-prune --json >/dev/null
+  [ "$backend" != manual ] || tx 'done' "$id" --no-prune --json >/dev/null
   before=$(jq -cS . "$record")
   if captain complete "$id" --receipt "$key" "$call_a" \
     > "$FM_HOME/$id-omitted.out" 2> "$FM_HOME/$id-omitted.err"; then
@@ -913,7 +913,7 @@ run_normalized_inventory_case() {
   captain hold "$exact" --reason 'unrelated exact-name captain task pending' >/dev/null
   answer_captain_task "$exact"
   if [ "$backend" = manual ]; then
-    tx done "$id" --no-prune --json >/dev/null
+    tx 'done' "$id" --no-prune --json >/dev/null
     "$owner" manual-complete "$key" >/dev/null 2>&1 && rc=0 || rc=$?
     [ "$rc" -ne 0 ] || fail "$backend exact-name collision advanced the original held captain call"
   else
@@ -956,7 +956,7 @@ run_completed_inventory_replay_case() {
     "$FM_HOME/state/terminal-delivery/"*.json)
   record="$FM_HOME/state/terminal-delivery/$key.json"
   if [ "$backend" = manual ]; then
-    tx done "$id" --no-prune --json >/dev/null
+    tx 'done' "$id" --no-prune --json >/dev/null
     "$owner" manual-complete "$key"
   else
     "$owner" reconcile
@@ -1007,7 +1007,7 @@ test_discard_review_acknowledgement() {
 
   printf 'spawn_gen=%s-next\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" > "$FM_HOME/state/$id.meta"
-  "$owner" observe "$id" done https://github.com/o/r/pull/1
+  "$owner" observe "$id" 'done' https://github.com/o/r/pull/1
   new_key=$(jq -r --arg id "$id" 'select(.id==$id and .incarnation==($id+"-next"))|.key' \
     "$FM_HOME/state/terminal-delivery/"*.json)
   [ -n "$new_key" ] || fail 'replacement incarnation did not create its own receipt'
@@ -1253,7 +1253,7 @@ run_archived_captain_answer_case() {
   answer_captain_task "$call"
   for filler in $(seq 1 11); do
     tx add "$id-filler-$filler" "$id filler $filler" --json >/dev/null
-    tx done "$id-filler-$filler" --json >/dev/null
+    tx 'done' "$id-filler-$filler" --json >/dev/null
   done
   if tx show "$call" --full >/dev/null 2>&1; then
     fail "$backend answered captain call did not cross the configured Done archive boundary"
@@ -1267,7 +1267,7 @@ run_archived_captain_answer_case() {
     'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
     "$FM_HOME/state/terminal-delivery/"*.json)
   if [ "$backend" = manual ]; then
-    tx done "$id" --no-prune --json >/dev/null
+    tx 'done' "$id" --no-prune --json >/dev/null
     "$owner" manual-complete "$key" >/dev/null
     "$owner" manual-complete "$key" >/dev/null
   else
@@ -1283,7 +1283,7 @@ archive_done_task() {
   local id=$1 prefix=$2 filler
   for filler in $(seq 1 11); do
     tx add "$prefix-filler-$filler" "$prefix filler $filler" --json >/dev/null
-    tx done "$prefix-filler-$filler" --json >/dev/null
+    tx 'done' "$prefix-filler-$filler" --json >/dev/null
   done
   if tx show "$id" --full >/dev/null 2>&1; then
     fail "$id did not cross the configured Done archive boundary"
@@ -1317,7 +1317,7 @@ run_archived_released_transfer_case() {
     "$FM_HOME/state/terminal-delivery/"*.json)
   [ "$new_key" != "$old_key" ] || fail "$backend released transfer did not create a successor receipt"
   if [ "$backend" = manual ]; then
-    tx done "$call" --no-prune --json >/dev/null
+    tx 'done' "$call" --no-prune --json >/dev/null
     "$owner" manual-complete "$new_key" >/dev/null
   else
     "$owner" reconcile >/dev/null
@@ -1333,7 +1333,7 @@ run_archived_released_transfer_case() {
     'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
     "$FM_HOME/state/terminal-delivery/"*.json)
   if [ "$backend" = manual ]; then
-    tx done "$id" --no-prune --json >/dev/null
+    tx 'done' "$id" --no-prune --json >/dev/null
     "$owner" manual-complete "$origin_key" >/dev/null
     "$owner" manual-complete "$origin_key" >/dev/null
   else
@@ -1356,7 +1356,7 @@ test_archived_released_origin_requires_successor() {
     "$FM_HOME/state/terminal-delivery/"*.json)
   release_captain_task "$id"
   rm "$FM_HOME/state/$id.meta"
-  tx done "$id" --no-prune --json >/dev/null
+  tx 'done' "$id" --no-prune --json >/dev/null
   archive_done_task "$id" "$id-archive"
   if "$owner" manual-complete "$old_key" >/dev/null 2>&1; then
     fail 'archived released origin accepted its stale release incarnation'
@@ -1437,7 +1437,7 @@ run_ordinary_origin_obligation_case() {
     || fail "$backend ordinary origin receipt did not durably prove no captain obligation"
   rm "$FM_HOME/state/$id.meta"
   if [ "$backend" = manual ]; then
-    tx done "$id" --no-prune --json >/dev/null
+    tx 'done' "$id" --no-prune --json >/dev/null
     archive_done_task "$id" "$id-archive"
     saved_archive="$FM_HOME/data/done-archive.ordinary"
     cp "$FM_HOME/data/done-archive.md" "$saved_archive"
@@ -1464,7 +1464,7 @@ test_unknown_origin_obligation_recovers_through_captain_owner() {
     "$FM_HOME/state/terminal-delivery/"*.json)
   record="$FM_HOME/state/terminal-delivery/$key.json"
   rm "$FM_HOME/state/$id.meta"
-  tx done "$id" --no-prune --json >/dev/null
+  tx 'done' "$id" --no-prune --json >/dev/null
   archive_done_task "$id" "$id-archive"
   saved_archive="$FM_HOME/data/done-archive.unknown-origin"
   cp "$FM_HOME/data/done-archive.md" "$saved_archive"
@@ -1568,7 +1568,7 @@ test_merge_observation_stays_bound_to_exact_receipt() {
   local early=merge-observed-early early_pr=https://github.com/o/r/pull/404 early_key early_record
 
   report_merge() {
-    FM_HOME="$FM_HOME" bash -c \
+    bash -c \
       '. "$1"; fm_merge_outcome_report "$2" "$3" "$4" "$5" poll' \
       _ "$ROOT/bin/fm-merge-outcome-lib.sh" "$FM_HOME" "$FM_HOME/state" "$1" "$2"
   }
@@ -1592,14 +1592,14 @@ test_merge_observation_stays_bound_to_exact_receipt() {
     'persisted early merge proof did not recover after metadata disappeared'
 
   make_task "$id"
-  "$owner" observe "$id" done "$p1"
+  "$owner" observe "$id" 'done' "$p1"
   key_a=$("$owner" receipt-key "$id")
   record_a="$FM_HOME/state/terminal-delivery/$key_a.json"
   "$owner" retired "$id" normal
 
   printf 'spawn_gen=%s-b\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" "$p2" > "$FM_HOME/state/$id.meta"
-  "$owner" observe "$id" done "$p2"
+  "$owner" observe "$id" 'done' "$p2"
   key_b=$("$owner" receipt-key "$id")
   record_b="$FM_HOME/state/terminal-delivery/$key_b.json"
   [ "$key_a" != "$key_b" ] || fail 'reused merge-observation fixture did not create a new incarnation'
@@ -1637,7 +1637,7 @@ test_merge_observation_stays_bound_to_exact_receipt() {
   "$owner" landing-proven "$id" || fail 'exact current P2 observation did not establish delivery proof'
 
   make_task "$ambiguous"
-  "$owner" observe "$ambiguous" done "$p1"
+  "$owner" observe "$ambiguous" 'done' "$p1"
   ambiguous_a=$("$owner" receipt-key "$ambiguous")
   "$owner" retired "$ambiguous" normal
   printf 'spawn_gen=%s-b\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
@@ -1653,7 +1653,7 @@ test_merge_observation_stays_bound_to_exact_receipt() {
     'same-PR ambiguity created a replacement receipt'
   [ "$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')" = "$before_a" ] \
     || fail 'same-PR ambiguity mutated the retired receipt'
-  "$owner" observe "$ambiguous" done "$p1"
+  "$owner" observe "$ambiguous" 'done' "$p1"
   ambiguous_b=$("$owner" receipt-key "$ambiguous")
   before_a=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')
   before_ambiguous_b=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_b.json" | awk '{print $1}')
@@ -1689,7 +1689,7 @@ test_supersession_preserves_unresolved_captain_inventory() {
   rm "$FM_HOME/state/$id.meta"
   printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" "$pr" > "$FM_HOME/state/$id.meta"
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   new_key=$("$owner" receipt-key "$id")
   new_record="$FM_HOME/state/terminal-delivery/$new_key.json"
   [ "$old_key" != "$new_key" ] || fail 'supersession fixture did not create a replacement receipt'
@@ -1729,7 +1729,7 @@ test_verified_merge_refuses_retired_fallback_for_current_metadata() {
   local id=verified-merge-current-failure pr=https://github.com/o/r/pull/506
   local old_key new_key old_record new_record rc=0
   make_unreviewed_task "$id"
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   "$owner" retired "$id" normal
   old_key=$("$owner" receipt-key "$id")
   old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
@@ -1766,7 +1766,7 @@ test_same_cycle_obligation_updates_preserve_inherited_calls() {
   hold_captain_task "$id"
   hold_captain_task "$call"
   printf 'decision_keys=%s\ndecisions_reviewed=1\n' "$call" >> "$FM_HOME/state/$id.meta"
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   "$owner" retired "$id" normal
   old_key=$("$owner" receipt-key "$id")
   old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
@@ -1774,7 +1774,7 @@ test_same_cycle_obligation_updates_preserve_inherited_calls() {
   rm "$FM_HOME/state/$id.meta"
   printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" "$pr" > "$FM_HOME/state/$id.meta"
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   new_key=$("$owner" receipt-key "$id")
   new_record="$FM_HOME/state/terminal-delivery/$new_key.json"
   jq -e --arg key "$new_key" '.superseded_by == $key' "$old_record" >/dev/null \
@@ -1816,7 +1816,7 @@ run_same_receipt_rehold_case() {
   hold_captain_task "$call_a"
   hold_captain_task "$call_b"
   printf 'decision_keys=%s\ndecisions_reviewed=1\n' "$call_a" >> "$FM_HOME/state/$id.meta"
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   "$owner" retired "$id" normal
   receipt=$("$owner" receipt-key "$id")
   record="$FM_HOME/state/terminal-delivery/$receipt.json"
@@ -1915,7 +1915,7 @@ test_none_cycle_transitions_to_first_hold() {
 test_none_cycle_transition_rejects_missing_identity() {
   local id=none-cycle-missing-identity record key bogus before rc=0 tmp
   make_task "$id"
-  "$owner" observe "$id" done https://github.com/o/r/pull/510
+  "$owner" observe "$id" 'done' https://github.com/o/r/pull/510
   key=$("$owner" receipt-key "$id")
   record="$FM_HOME/state/terminal-delivery/$key.json"
   bogus=$(printf '0%.0s' {1..64})
@@ -1936,14 +1936,14 @@ test_unattested_predecessor_recovery() {
   local id=unattested-predecessor pr=https://github.com/o/r/pull/511
   local old_key old_record current_key current_record rc=0 report
   make_unreviewed_task "$id"
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   old_key=$("$owner" receipt-key "$id")
   old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
   rm "$FM_HOME/state/$id.meta"
   printf 'spawn_gen=%s-current\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" "$pr" > "$FM_HOME/state/$id.meta"
   set +e
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'unattested predecessor did not block replacement receipt'
@@ -1981,14 +1981,14 @@ test_ambiguous_predecessor_identity_fails_closed() {
   local id=ambiguous-predecessor pr=https://github.com/o/r/pull/512
   local old_key old_record tmp before rc=0
   make_unreviewed_task "$id"
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   old_key=$("$owner" receipt-key "$id")
   old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
   rm "$FM_HOME/state/$id.meta"
   printf 'spawn_gen=%s-current\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" "$pr" > "$FM_HOME/state/$id.meta"
   set +e
-  "$owner" observe "$id" done "$pr"
+  "$owner" observe "$id" 'done' "$pr"
   set -e
   tmp="$old_record.tmp"
   jq '.captain_obligations += [(.captain_obligations[0] | .origin_resolved=true)]' \
@@ -2035,7 +2035,7 @@ test_terminal_metadata_identity_boundary() {
   tx add "$id" "$id" --start --json >/dev/null
   printf 'tasktmp=\nworktree=\nwindow=\nkind=ship\nmode=no-mistakes\n' > "$FM_HOME/state/$id.meta"
   set +e
-  "$owner" observe "$id" done >/dev/null 2>&1
+  "$owner" observe "$id" 'done' >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'empty legacy identity created a terminal receipt'
@@ -2055,7 +2055,7 @@ test_terminal_metadata_identity_boundary() {
   tx add "$id" "$id" --start --json >/dev/null
   printf 'spawn_gen= \nkind=ship\nmode=no-mistakes\n' > "$FM_HOME/state/$id.meta"
   set +e
-  "$owner" observe "$id" done >/dev/null 2>&1
+  "$owner" observe "$id" 'done' >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'whitespace generation created terminal authority'
@@ -2064,7 +2064,7 @@ test_terminal_metadata_identity_boundary() {
   tx add "$id" "$id" --start --json >/dev/null
   printf 'tasktmp= \nworktree=\t\nwindow= \nkind=ship\nmode=no-mistakes\n' > "$FM_HOME/state/$id.meta"
   set +e
-  "$owner" observe "$id" done >/dev/null 2>&1
+  "$owner" observe "$id" 'done' >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail 'semantically empty legacy identity created terminal authority'
@@ -2073,7 +2073,7 @@ test_terminal_metadata_identity_boundary() {
   tx add "$id" "$id" --start --json >/dev/null
   printf 'spawn_gen=s1234567890.12345.6789\nkind=ship\nmode=no-mistakes\ndecisions_reviewed=1\ndecision_keys=\n' \
     > "$FM_HOME/state/$id.meta"
-  "$owner" observe "$id" done
+  "$owner" observe "$id" 'done'
   "$owner" receipt-key "$id" >/dev/null \
     || fail 'real producer generation format was rejected'
 
@@ -2124,7 +2124,7 @@ test_terminal_metadata_identity_boundary() {
   captain complete "$id" --none >/dev/null \
     || fail 'captain completion rejected equivalent regular metadata'
 
-  id=legacy-window-identity
+  id='legacy-window-identity'
   tx add "$id" "$id" --start --json >/dev/null
   printf 'window=firstmate:fm-%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" > "$FM_HOME/state/$id.meta"
@@ -2133,7 +2133,7 @@ test_terminal_metadata_identity_boundary() {
   key=$("$owner" receipt-key "$id")
   rm "$FM_HOME/state/$id.meta"
   printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
-  tx done "$id" --pr https://github.com/o/r/pull/1 --no-prune --json >/dev/null
+  tx 'done' "$id" --pr https://github.com/o/r/pull/1 --no-prune --json >/dev/null
   "$owner" manual-complete "$key"
   jq -e '.backlog == true and .refill == true' \
     "$FM_HOME/state/terminal-delivery/$key.json" >/dev/null \
@@ -2203,7 +2203,7 @@ test_manual_backend_binding_and_legacy_recovery() {
   id=manual-binding-present
   make_task "$id"
   before=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
-  "$owner" observe "$id" done https://github.com/o/r/pull/601
+  "$owner" observe "$id" 'done' https://github.com/o/r/pull/601
   after=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
   [ "$after" = "$before" ] || fail 'manual backend mutated backlog through installed tasks-axi'
   key=$("$owner" receipt-key "$id")
@@ -2230,7 +2230,7 @@ EOF
   chmod +x "$fakebin/tasks-axi"
   before=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
   FM_INCOMPATIBLE_UPDATE_MARKER="$marker" PATH="$fakebin:$PATH" \
-    "$owner" observe "$id" done https://github.com/o/r/pull/602
+    "$owner" observe "$id" 'done' https://github.com/o/r/pull/602
   after=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
   [ "$after" = "$before" ] || fail 'manual backend mutated backlog through incompatible tasks-axi'
   [ ! -e "$marker" ] || fail 'manual backend invoked incompatible tasks-axi update'
@@ -2240,11 +2240,11 @@ EOF
   jq_dir=$(dirname "$(command -v jq)")
   before=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
   PATH="$jq_dir:/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$owner" observe "$id" done https://github.com/o/r/pull/603
+    "$owner" observe "$id" 'done' https://github.com/o/r/pull/603
   after=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
   [ "$after" = "$before" ] || fail 'manual backend without tasks-axi mutated backlog'
 
-  id=legacy-manual-recovery
+  id='legacy-manual-recovery'
   make_task "$id"
   "$owner" merged "$id" https://github.com/o/r/pull/604
   "$owner" retired "$id" normal
@@ -2253,13 +2253,13 @@ EOF
   jq 'del(.backlog_binding,.backlog_attested,.backlog_evidence)' "$record" > "$record.tmp"
   mv "$record.tmp" "$record"
   rm "$FM_HOME/state/$id.meta"
-  tx done "$id" --pr https://github.com/o/r/pull/604 --no-prune --json >/dev/null
+  tx 'done' "$id" --pr https://github.com/o/r/pull/604 --no-prune --json >/dev/null
   "$owner" manual-complete "$key"
   "$owner" manual-complete "$key"
   jq -e '.backlog == true and .refill == true and .backlog_attested == true and (.backlog_evidence | length == 64)' \
     "$record" >/dev/null || fail 'exact legacy manual recovery did not migrate receipt evidence'
 
-  id=legacy-reused-blocked
+  id='legacy-reused-blocked'
   make_task "$id"
   "$owner" merged "$id" https://github.com/o/r/pull/605
   "$owner" retired "$id" normal
@@ -2276,7 +2276,7 @@ EOF
   set -e
   [ "$rc" -ne 0 ] || fail 'legacy exact receipt completed a reused in-flight task id'
 
-  id=legacy-ambiguous-blocked
+  id='legacy-ambiguous-blocked'
   make_task "$id"
   "$owner" merged "$id" https://github.com/o/r/pull/606
   "$owner" retired "$id" normal
@@ -2291,7 +2291,7 @@ EOF
     '.key=$key | .incarnation=$incarnation | .retired=true | .backlog=false | .refill=false | .superseded_by=""' \
     "$record" > "$ambiguous_record"
   rm "$FM_HOME/state/$id.meta"
-  tx done "$id" --pr https://github.com/o/r/pull/606 --no-prune --json >/dev/null
+  tx 'done' "$id" --pr https://github.com/o/r/pull/606 --no-prune --json >/dev/null
   set +e
   "$owner" manual-complete "$key" >/dev/null 2>&1
   rc=$?
@@ -2303,7 +2303,7 @@ EOF
   set -e
   [ "$rc" -ne 0 ] || fail 'legacy manual recovery accepted omitted receipt identity'
 
-  id=legacy-automatic-attestation
+  id='legacy-automatic-attestation'
   printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
   make_task "$id"
   "$owner" merged "$id" https://github.com/o/r/pull/607
@@ -2331,7 +2331,7 @@ test_stable_legacy_attestation_replay() {
   local id call key record attestation before after rc=0
 
   printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
-  id=legacy-attestation-interruption
+  id='legacy-attestation-interruption'
   call="$id-call"
   make_task "$id"
   tx add "$call" "$call" --json >/dev/null
@@ -2361,7 +2361,7 @@ test_stable_legacy_attestation_replay() {
     || fail 'legacy attestation required re-review after captain interruption'
 
   printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
-  id=legacy-manual-interruption
+  id='legacy-manual-interruption'
   call="$id-call"
   make_task "$id"
   tx add "$call" "$call" --json >/dev/null
@@ -2374,7 +2374,7 @@ test_stable_legacy_attestation_replay() {
   jq 'del(.backlog_binding,.backlog_attested,.backlog_evidence)' "$record" > "$record.tmp"
   mv "$record.tmp" "$record"
   rm "$FM_HOME/state/$id.meta"
-  tx done "$id" --pr https://github.com/o/r/pull/609 --no-prune --json >/dev/null
+  tx 'done' "$id" --pr https://github.com/o/r/pull/609 --no-prune --json >/dev/null
   before=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
   "$owner" manual-complete "$key" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail 'manual legacy recovery ignored an unresolved captain call'
@@ -2406,7 +2406,7 @@ run_completed_history_backlog_recovery_case() {
   record_a="$FM_HOME/state/terminal-delivery/$key_a.json"
   rm "$FM_HOME/state/$id.meta"
   if [ "$backend" = manual ]; then
-    tx done "$id" --pr https://github.com/o/r/pull/610 --no-prune --json >/dev/null
+    tx 'done' "$id" --pr https://github.com/o/r/pull/610 --no-prune --json >/dev/null
     "$owner" manual-complete "$key_a"
   else
     "$owner" reconcile
@@ -2453,7 +2453,7 @@ run_completed_history_backlog_recovery_case() {
   [ "$rc" -ne 0 ] || fail "$backend exact recovery accepted a superseded receipt"
   rm "$other_record"
 
-  forged_key=forged-completed-history
+  forged_key='forged-completed-history'
   forged_record="$FM_HOME/state/terminal-delivery/$forged_key.json"
   jq --arg key "$forged_key" '.key=$key' "$record_b" > "$forged_record"
   rc=0
@@ -2496,7 +2496,7 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   captain-attestation-report)
     for attestation_backend in auto manual; do
       run_active_attestation_recovery_case "$attestation_backend"
-      for attestation_terminal in done failed; do
+      for attestation_terminal in 'done' failed; do
         run_attestation_case "$attestation_backend" "$attestation_terminal"
       done
       run_retired_attestation_recovery_case "$attestation_backend"
@@ -2506,7 +2506,7 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
     ;;
   review-contracts)
     for attestation_backend in auto manual; do
-      for attestation_terminal in done failed; do
+      for attestation_terminal in 'done' failed; do
         run_attestation_case "$attestation_backend" "$attestation_terminal"
       done
     done
@@ -2823,7 +2823,7 @@ EOF
 pass 'terminal reconciliation binds repeated answers to the current hold cycle'
 for attestation_backend in auto manual; do
   run_active_attestation_recovery_case "$attestation_backend"
-  for attestation_terminal in done failed; do
+  for attestation_terminal in 'done' failed; do
     run_attestation_case "$attestation_backend" "$attestation_terminal"
   done
 done

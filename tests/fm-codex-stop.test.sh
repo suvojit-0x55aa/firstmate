@@ -81,7 +81,7 @@ freeze_configured_stop_runtime() {
   fi
   mkdir -p "$dir/.codex"
   cp "$ROOT/.codex/hooks.json" "$dir/.codex/hooks.json"
-  printf 'PATH="%s/fakebin:$PATH"\nexport PATH\n' "$dir" > "$dir/configured-stop.bash-env"
+  printf 'PATH="%s/fakebin:$%s"\nexport PATH\n' "$dir" PATH > "$dir/configured-stop.bash-env"
 }
 run_configured_stop() {
   local dir=$1 command
@@ -89,7 +89,6 @@ run_configured_stop() {
   [ -n "$command" ] || fail 'configured Codex Stop command is missing'
   (
     cd "$dir" || exit 1
-    export PATH="$dir/fakebin:$PATH"
     export BASH_ENV="$dir/configured-stop.bash-env"
     export FM_TEST_CODEX_OWNER=$$
     export FM_HOME="$dir"
@@ -103,7 +102,8 @@ run_configured_stop() {
     export FM_GUARD_GRACE="${TEST_GRACE:-300}"
     export FM_TEST_CODEX_STANDDOWN_MARKER="${FM_TEST_CODEX_STANDDOWN_MARKER:-}"
     export FM_TEST_CODEX_STANDDOWN_RELEASE="${FM_TEST_CODEX_STANDDOWN_RELEASE:-}"
-    printf '{"stop_hook_active":false,"turn_id":"configured-stop"}' | bash -c "$command"
+    printf '{"stop_hook_active":false,"turn_id":"configured-stop"}' \
+      | PATH="$dir/fakebin:$PATH" bash -c "$command"
   )
 }
 install_standdown_barrier() {

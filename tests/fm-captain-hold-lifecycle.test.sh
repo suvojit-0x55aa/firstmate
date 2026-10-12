@@ -765,7 +765,7 @@ SH
   [ "$(printf '%s\n' "$show" | grep -o 'Captain hold opened by fm-captain-hold\.' | wc -l | tr -d ' ')" = "$records" ] \
     || fail "an active same-cycle hold retry duplicated its cycle record"
 
-  tasks_in "$home" done sample-interrupted-work >/dev/null \
+  tasks_in "$home" 'done' sample-interrupted-work >/dev/null \
     || fail "could not reproduce the out-of-band completion"
   if run_captain "$home" terminal-ready sample-interrupted-work \
     --receipt out-of-band > "$home/out-of-band-ready.out" 2> "$home/out-of-band-ready.err"; then

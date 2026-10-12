@@ -293,7 +293,7 @@ fm_session_transition_afk_restore() {  # <state> <saved-flag>
 }
 
 fm_session_transition_afk_reset() {  # <state> [saved-flag]
-  local state=$1 saved=${2:-} pending= status=0
+  local state=$1 saved=${2:-} pending='' status=0
   if [ -n "$saved" ]; then
     [ -f "$saved" ] && [ ! -L "$saved" ] || return 1
     pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
@@ -383,6 +383,7 @@ fm_codex_stop_successor_begin() {  # <state> <session-pid> <identity>
         return
       fi
       if [ "$phase" != watching ]; then
+        # shellcheck disable=SC2034 # Returned to callers as the failure detail.
         FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision found an invalid Stop phase; reconcile the session generation before continuing.'
         return 1
       fi

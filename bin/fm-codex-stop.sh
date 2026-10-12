@@ -128,6 +128,7 @@ cleanup() {
   CLEANUP_ACTIVE=0
 }
 trap cleanup EXIT
+# shellcheck disable=SC2329 # Invoked indirectly by the signal trap below.
 cancel() {
   CANCELLED=1
   CONTINUATION_READY=0
