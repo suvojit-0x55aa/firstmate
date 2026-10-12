@@ -549,13 +549,13 @@ select_merge_observation_record() {
   KEY=${found##*/}
   KEY=${KEY%.json}
 }
-record_is_unique_unsuperseded() {
+record_is_unique_actionable() {
   local id candidate count=0 found=
   id=$(jq -r .id "$RECORD") || return 1
   for candidate in "$DIR"/*.json; do
     receipt_path_authenticated "$candidate" || continue
     jq -e --arg id "$id" \
-      '.id == $id and ((.superseded_by // "") == "")' \
+      '.id == $id and .backlog != true and .discarded != true and .reviewed != true and ((.superseded_by // "") == "")' \
       "$candidate" >/dev/null || continue
     count=$((count + 1))
     found=$candidate
@@ -563,19 +563,12 @@ record_is_unique_unsuperseded() {
   [ "$count" -eq 1 ] && [ "$found" = "$RECORD" ]
 }
 record_backlog_identity_matches() {
-  local id body evidence expected
+  local id body
   id=$(jq -r .id "$RECORD") || return 1
-  record_is_unique_unsuperseded || return 1
-  if jq -e '.backlog_binding == true' "$RECORD" >/dev/null; then
-    body=$(backlog_task_body "$id") || return 1
-    backlog_body_has_receipt "$body" "$(jq -r .key "$RECORD")"
-    return $?
-  fi
-  jq -e '.backlog_attested == true' "$RECORD" >/dev/null || return 1
-  expected=$(jq -r '.backlog_evidence // ""' "$RECORD") || return 1
-  [ -n "$expected" ] || return 1
-  evidence=$(backlog_task_evidence "$id") || return 1
-  [ "$evidence" = "$expected" ]
+  record_is_unique_actionable || return 1
+  jq -e '.backlog_binding == true' "$RECORD" >/dev/null || return 1
+  body=$(backlog_task_body "$id") || return 1
+  backlog_body_has_receipt "$body" "$(jq -r .key "$RECORD")"
 }
 record_matches_current_incarnation() {
   local id meta incarnation metadata_status
@@ -889,7 +882,7 @@ case "$mode" in
     id=$(jq -r .id "$RECORD") || exit 1
     meta="$STATE/$id.meta"
     if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
-      record_is_unique_unsuperseded || exit 1
+      record_is_unique_actionable || exit 1
       backlog_record=$(backlog_task_record "$id") || exit 1
       [ "$(printf '%s\n' "$backlog_record" | jq -r .state)" = done ] || exit 1
       backlog_evidence=$(printf '%s' "$backlog_record" | jq -cS . | shasum -a 256 | awk '{print $1}') || exit 1
@@ -904,16 +897,18 @@ case "$mode" in
     fi ;;
   backlog-reviewed)
     [ "$#" -eq 2 ] && valid "$2" || exit 2
+    fm_backlog_backend_manual "$CONFIG" && exit 1
     select_authenticated_receipt_key "$2" || exit 1
     jq -e '.retired == true and .discarded != true and .backlog != true and ((.superseded_by // "") == "")' \
       "$RECORD" >/dev/null || exit 1
     id=$(jq -r .id "$RECORD") || exit 1
     meta="$STATE/$id.meta"
     [ ! -e "$meta" ] && [ ! -L "$meta" ] || exit 1
-    record_is_unique_unsuperseded || exit 1
+    record_is_unique_actionable || exit 1
+    bind_backlog_receipt "$id" "$2" || exit 1
     backlog_evidence=$(backlog_task_evidence "$id") || exit 1
     put --arg evidence "$backlog_evidence" \
-      '.backlog_attested=true | .backlog_evidence=$evidence' || exit 1 ;;
+      '.backlog_binding=true | .backlog_attested=true | .backlog_evidence=$evidence' || exit 1 ;;
   captain-review-state)
     [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
     select_captain_review_receipt "$2" "$3" || exit 1

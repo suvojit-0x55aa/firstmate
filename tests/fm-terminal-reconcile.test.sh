@@ -2327,6 +2327,170 @@ EOF
     || fail 'attested legacy receipt did not replay automatic completion'
   pass 'manual backend remains read-only and legacy receipts recover exactly'
 }
+test_stable_legacy_attestation_replay() {
+  local id call key record attestation before after rc=0
+
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+  id=legacy-attestation-interruption
+  call="$id-call"
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$call"
+  printf 'decision_keys=%s\n' "$call" >> "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" https://github.com/o/r/pull/608
+  "$owner" retired "$id" normal
+  key=$("$owner" receipt-key "$id")
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  tx update "$id" --body 'legacy row awaiting exact recovery' --json >/dev/null
+  jq 'del(.backlog_binding,.backlog_attested,.backlog_evidence)' "$record" > "$record.tmp"
+  mv "$record.tmp" "$record"
+  rm "$FM_HOME/state/$id.meta"
+  "$owner" backlog-reviewed "$key"
+  attestation=$(jq -cS '{backlog_binding,backlog_attested,backlog_evidence}' "$record")
+  "$owner" reconcile
+  jq -e '.custody == true and .backlog == false' "$record" >/dev/null \
+    || fail 'legacy attestation did not survive the PR-custody interruption boundary'
+  [ "$(jq -cS '{backlog_binding,backlog_attested,backlog_evidence}' "$record")" = "$attestation" ] \
+    || fail 'PR-custody mutation invalidated stable legacy receipt identity'
+  assert_contains "$(tx show "$id" --full)" "Firstmate terminal receipt: $key" \
+    'legacy attestation did not establish durable receipt identity'
+  answer_captain_task "$call"
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true' "$record" >/dev/null \
+    || fail 'legacy attestation required re-review after captain interruption'
+
+  printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
+  id=legacy-manual-interruption
+  call="$id-call"
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$call"
+  printf 'decision_keys=%s\n' "$call" >> "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" https://github.com/o/r/pull/609
+  "$owner" retired "$id" normal
+  key=$("$owner" receipt-key "$id")
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  jq 'del(.backlog_binding,.backlog_attested,.backlog_evidence)' "$record" > "$record.tmp"
+  mv "$record.tmp" "$record"
+  rm "$FM_HOME/state/$id.meta"
+  tx done "$id" --pr https://github.com/o/r/pull/609 --no-prune --json >/dev/null
+  before=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
+  "$owner" manual-complete "$key" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail 'manual legacy recovery ignored an unresolved captain call'
+  after=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
+  [ "$after" = "$before" ] || fail 'manual interruption mutated backlog bytes'
+  answer_captain_task "$call"
+  before=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
+  "$owner" manual-complete "$key"
+  "$owner" manual-complete "$key"
+  after=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
+  [ "$after" = "$before" ] || fail 'manual exact recovery mutated backlog bytes'
+  jq -e '.backlog == true and .refill == true' "$record" >/dev/null \
+    || fail 'manual legacy recovery did not resume after the genuine answer'
+  pass 'legacy attestation survives owner mutation and captain interruption'
+}
+run_completed_history_backlog_recovery_case() {
+  local backend=$1 id="completed-history-$1" key_a key_b record_a record_b before_a
+  local other_incarnation other_key other_record forged_key forged_record before after rc=0
+  case "$backend" in
+    auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
+    manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
+    *) fail "unknown completed-history backend: $backend" ;;
+  esac
+
+  make_task "$id"
+  "$owner" merged "$id" https://github.com/o/r/pull/610
+  "$owner" retired "$id" normal
+  key_a=$("$owner" receipt-key "$id")
+  record_a="$FM_HOME/state/terminal-delivery/$key_a.json"
+  rm "$FM_HOME/state/$id.meta"
+  if [ "$backend" = manual ]; then
+    tx done "$id" --pr https://github.com/o/r/pull/610 --no-prune --json >/dev/null
+    "$owner" manual-complete "$key_a"
+  else
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  "$owner" refill-reviewed "$key_a"
+  before_a=$(jq -cS . "$record_a")
+
+  printf 'spawn_gen=%s-b\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/611\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" > "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" https://github.com/o/r/pull/611
+  "$owner" retired "$id" normal
+  key_b=$("$owner" receipt-key "$id")
+  record_b="$FM_HOME/state/terminal-delivery/$key_b.json"
+  [ "$key_a" != "$key_b" ] || fail "$backend completed-history fixture reused one receipt"
+  if [ "$backend" = auto ]; then
+    tx update "$id" --body 'legacy active B awaiting exact recovery' --json >/dev/null
+  fi
+  jq 'del(.backlog_binding,.backlog_attested,.backlog_evidence)' "$record_b" > "$record_b.tmp"
+  mv "$record_b.tmp" "$record_b"
+  rm "$FM_HOME/state/$id.meta"
+
+  other_incarnation="$id-other-active"
+  other_key=$(printf '%s' "$id|$other_incarnation" | shasum -a 256 | awk '{print $1}')
+  other_record="$FM_HOME/state/terminal-delivery/$other_key.json"
+  jq --arg key "$other_key" --arg incarnation "$other_incarnation" \
+    '.key=$key | .incarnation=$incarnation | .backlog=false | .refill=false | .reviewed=false | .superseded_by=""' \
+    "$record_b" > "$other_record"
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$key_b" >/dev/null 2>&1 || rc=$?
+  else
+    "$owner" backlog-reviewed "$key_b" >/dev/null 2>&1 || rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "$backend exact recovery accepted two active receipt candidates"
+
+  jq --arg successor "$key_b" '.superseded_by=$successor' "$other_record" > "$other_record.tmp"
+  mv "$other_record.tmp" "$other_record"
+  rc=0
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$other_key" >/dev/null 2>&1 || rc=$?
+  else
+    "$owner" backlog-reviewed "$other_key" >/dev/null 2>&1 || rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "$backend exact recovery accepted a superseded receipt"
+  rm "$other_record"
+
+  forged_key=forged-completed-history
+  forged_record="$FM_HOME/state/terminal-delivery/$forged_key.json"
+  jq --arg key "$forged_key" '.key=$key' "$record_b" > "$forged_record"
+  rc=0
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete "$forged_key" >/dev/null 2>&1 || rc=$?
+  else
+    "$owner" backlog-reviewed "$forged_key" >/dev/null 2>&1 || rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "$backend exact recovery accepted mismatched receipt identity"
+  rm "$forged_record"
+
+  rc=0
+  if [ "$backend" = manual ]; then
+    "$owner" manual-complete >/dev/null 2>&1 || rc=$?
+  else
+    "$owner" backlog-reviewed >/dev/null 2>&1 || rc=$?
+  fi
+  [ "$rc" -ne 0 ] || fail "$backend exact recovery accepted omitted receipt identity"
+
+  if [ "$backend" = manual ]; then
+    before=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
+    "$owner" manual-complete "$key_b"
+    "$owner" manual-complete "$key_b"
+    after=$(shasum -a 256 "$FM_HOME/data/backlog.md" | awk '{print $1}')
+    [ "$after" = "$before" ] || fail 'manual completed-history recovery mutated backlog bytes'
+  else
+    "$owner" backlog-reviewed "$key_b"
+    "$owner" backlog-reviewed "$key_b"
+    "$owner" reconcile
+    "$owner" reconcile
+  fi
+  jq -e '.backlog == true and .refill == true' "$record_b" >/dev/null \
+    || fail "$backend exact active B recovery was blocked by completed history A"
+  [ "$(jq -cS . "$record_a")" = "$before_a" ] \
+    || fail "$backend active B recovery mutated completed history A"
+  pass "$backend exact recovery ignores completed history and rejects active ambiguity"
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -2435,6 +2599,14 @@ EOF
     exit
     ;;
   manual-legacy-compat)
+    test_manual_backend_binding_and_legacy_recovery
+    test_absent_metadata_backlog_identity
+    exit
+    ;;
+  legacy-recovery-contracts)
+    test_stable_legacy_attestation_replay
+    run_completed_history_backlog_recovery_case auto
+    run_completed_history_backlog_recovery_case manual
     test_manual_backend_binding_and_legacy_recovery
     test_absent_metadata_backlog_identity
     exit
@@ -2669,6 +2841,9 @@ test_archived_captain_answers_remain_exact_terminal_evidence
 test_terminal_metadata_identity_boundary
 test_absent_metadata_backlog_identity
 test_manual_backend_binding_and_legacy_recovery
+test_stable_legacy_attestation_replay
+run_completed_history_backlog_recovery_case auto
+run_completed_history_backlog_recovery_case manual
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"
