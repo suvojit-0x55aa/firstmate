@@ -419,6 +419,35 @@ authenticated_resolution_body_for_cycle() {  # <shown-body> <hold-cycle>
         $rest = substr($rest, $next);
         next;
       }
+      if ($rest =~ /\AResolution recorded by fm-decision-hold\.\nDecision digest: ([0-9a-f]{64})\nRouted identities: (none|[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*)\nResolution mode: (answered|routed)\n\nCaptain decision:\n/) {
+        my ($digest, $routes, $mode) = ($1, $2, $3);
+        my $answer_start = $+[0];
+        my @matches;
+        if ($mode eq "answered") {
+          exit 1 unless $routes eq "none";
+          my $answer = substr($rest, $answer_start);
+          push @matches, 1 if length($answer) && sha256_hex(encode("UTF-8", $answer)) eq $digest;
+          exit 1 unless @matches == 1;
+          $rest = "";
+          next;
+        }
+        exit 1 if $routes eq "none";
+        pos($rest) = $answer_start;
+        while ($rest =~ /\n\nRouted work:\n/g) {
+          my ($answer_end, $routes_start) = ($-[0], $+[0]);
+          next unless sha256_hex(encode("UTF-8", substr($rest, $answer_start, $answer_end - $answer_start))) eq $digest;
+          my $route_body = substr($rest, $routes_start);
+          my @body_routes = ($route_body =~ /^- ([A-Za-z0-9._-]+)$/mg);
+          next unless @body_routes && join("\n", map { "- $_" } @body_routes) eq $route_body;
+          my @recorded_routes = split /,/, $routes;
+          next unless join(",", sort @recorded_routes) eq join(",", @recorded_routes);
+          next unless join(",", @body_routes) eq $routes;
+          push @matches, 1;
+        }
+        exit 1 unless @matches == 1;
+        $rest = "";
+        next;
+      }
       exit 1 if $rest =~ /\A(?:Captain hold opened by fm-captain-hold\.|Resolution recorded by fm-(?:captain|decision)-hold\.)/;
       last;
     }

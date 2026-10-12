@@ -754,7 +754,7 @@ test_manual_backend_attestation_without_tasks_axi() {
     case_dir=$(make_case "manual-attestation-$variant")
     write_meta "$case_dir" local-only ship
     printf '%s\n' manual > "$case_dir/config/backlog-backend"
-    cat > "$case_dir/data/backlog.md" <<EOF
+    cat > "$case_dir/data/backlog.md" <<'EOF'
 ## In flight
 
 - [ ] task-x1 - Manual ship (repo: firstmate)
@@ -799,15 +799,19 @@ SH
 
 ## Done
 EOF
-    printf '%s\n' 'decision_keys=manual-call' >> "$case_dir/state/task-x1.meta"
+    printf '%s\n' \
+      'decision_keys=manual-call' \
+      'decision_call_cycles=[{"id":"manual-call","cycle":"1111111111111111111111111111111111111111111111111111111111111111"}]' \
+      >> "$case_dir/state/task-x1.meta"
     rc=0
     PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
       FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
       FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
-      "$ROOT/bin/fm-captain-hold.sh" terminal-ready task-x1 --receipt pending manual-call \
+      "$ROOT/bin/fm-captain-hold.sh" terminal-ready task-x1 --receipt pending \
+      manual-call:1111111111111111111111111111111111111111111111111111111111111111 \
       > "$case_dir/unresolved-ready.stdout" 2> "$case_dir/unresolved-ready.stderr" || rc=$?
     expect_code 1 "$rc" "manual-$variant: unresolved inventory must block terminal readiness"
-    cat > "$case_dir/data/backlog.md" <<'EOF'
+    cat > "$case_dir/data/backlog.md" <<EOF
 ## In flight
 
 - [ ] task-x1 - Manual ship (repo: firstmate)
@@ -844,7 +848,8 @@ EOF
     PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
       FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
       FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
-      "$ROOT/bin/fm-captain-hold.sh" terminal-ready task-x1 --receipt pending manual-call >/dev/null \
+      "$ROOT/bin/fm-captain-hold.sh" terminal-ready task-x1 --receipt pending \
+      manual-call:1111111111111111111111111111111111111111111111111111111111111111 >/dev/null \
       || fail "manual-$variant: answered inventory blocked terminal readiness"
 
     FM_TEARDOWN_TEST_PATH="$manual_path" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \

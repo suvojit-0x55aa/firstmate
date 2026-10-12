@@ -65,10 +65,10 @@ run_terminal_captain_case() {
       call="$id-call"
       tx add "$call" "$call" --json >/dev/null
       hold_captain_task "$call"
-      printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
       printf '%s\n' \
         'needs-decision [key=delivery]: choose delivery treatment' \
         "captain-held [key=delivery]: tracked by $call" > "$FM_HOME/state/$id.status"
+      captain complete "$id" "$call" >/dev/null
       ;;
     origin)
       call=$id
@@ -96,10 +96,10 @@ run_terminal_captain_case() {
       call="$id-decision-choice"
       tx add "$call" "$call" --json >/dev/null
       hold_captain_task "$call"
-      printf '%s\n' 'decisions_reviewed=1' 'decision_keys=choice' >> "$FM_HOME/state/$id.meta"
       printf '%s\n' \
         'needs-decision [key=choice]: choose legacy delivery treatment' \
         "captain-held [key=choice]: tracked by $call" > "$FM_HOME/state/$id.status"
+      captain complete "$id" choice >/dev/null
       ;;
     *) fail "unknown terminal captain matrix shape: $shape" ;;
   esac
@@ -165,7 +165,7 @@ run_transferred_release_resume_case() {
   call="$id-work"
   make_task "$call"
   hold_captain_task "$call"
-  printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
+  captain complete "$id" "$call" >/dev/null
   "$owner" custody "$call" https://github.com/o/r/pull/1
   old_key=$(jq -r --arg id "$call" \
     'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
@@ -272,7 +272,7 @@ run_preterminal_transferred_release_case() {
   make_task "$call"
   hold_captain_task "$call"
   release_captain_task "$call"
-  printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$origin.meta"
+  captain complete "$origin" "$call" >/dev/null
   "$owner" merged "$origin" https://github.com/o/r/pull/1
   origin_key=$("$owner" receipt-key "$origin")
   "$owner" retired "$origin" normal
@@ -367,7 +367,7 @@ run_terminal_identity_case() {
       hold_captain_task "$id"
       FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
         FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
-        complete "$id" "$id" >/dev/null
+        complete "$id" --none >/dev/null
       "$owner" merged "$id" https://github.com/o/r/pull/1
       "$owner" retired "$id" normal
       rm "$FM_HOME/state/$id.meta"
@@ -377,11 +377,12 @@ run_terminal_identity_case() {
       hold_captain_task "$id"
       FM_STATE_OVERRIDE="$FM_HOME/state" FM_DATA_OVERRIDE="$FM_HOME/data" \
         FM_CONFIG_OVERRIDE="$FM_HOME/config" "$ROOT/bin/fm-captain-hold.sh" \
-        complete "$id" "$id" >/dev/null
+        complete "$id" --none >/dev/null
       "$owner" custody "$id" https://github.com/o/r/pull/1
       release_captain_task "$id"
-      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=%s\n' \
-        "$id" "$id" > "$FM_HOME/state/$id.meta"
+      printf 'spawn_gen=%s-resumed\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+        "$id" > "$FM_HOME/state/$id.meta"
+      captain complete "$id" --none >/dev/null
       "$owner" merged "$id" https://github.com/o/r/pull/1
       "$owner" retired "$id" normal
       rm "$FM_HOME/state/$id.meta"
@@ -458,16 +459,22 @@ run_cycle_answer_case() {
     legacy) target="$id-decision-choice"; inventory=choice; make_task "$target" ;;
     *) fail "unknown cycle-answer shape: $shape" ;;
   esac
-  if [ -n "$inventory" ]; then
-    printf '%s\n' 'decisions_reviewed=1' "decision_keys=$inventory" >> "$FM_HOME/state/$id.meta"
-  fi
   hold_captain_task "$target"
+  if [ -n "$inventory" ]; then
+    captain complete "$id" "$inventory" >/dev/null
+  fi
   "$owner" custody "$target" https://github.com/o/r/pull/1
   release_captain_task "$target"
-  printf 'spawn_gen=%s-cycle-two\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=%s\n' \
-    "$target" "$target_keys" > "$FM_HOME/state/$target.meta"
+  printf 'spawn_gen=%s-cycle-two\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$target" > "$FM_HOME/state/$target.meta"
+  if [ -n "$target_keys" ]; then
+    captain complete "$target" "$target" >/dev/null
+  fi
   "$owner" custody "$target" https://github.com/o/r/pull/1
   hold_captain_task "$target"
+  if [ -n "$inventory" ]; then
+    captain complete "$id" "$inventory" >/dev/null
+  fi
   release_captain_task "$target"
   "$owner" merged "$target" https://github.com/o/r/pull/1
   "$owner" retired "$target" normal
@@ -487,8 +494,11 @@ run_cycle_answer_case() {
   assert_contains "$(tx show "$target")" 'state: in_flight' \
     "$backend/$shape completed work from an earlier answer cycle"
 
-  printf 'spawn_gen=%s-cycle-three\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=%s\n' \
-    "$target" "$target_keys" > "$FM_HOME/state/$target.meta"
+  printf 'spawn_gen=%s-cycle-three\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$target" > "$FM_HOME/state/$target.meta"
+  if [ -n "$target_keys" ]; then
+    captain complete "$target" "$target" >/dev/null
+  fi
   "$owner" merged "$target" https://github.com/o/r/pull/1
   "$owner" retired "$target" normal
   rm "$FM_HOME/state/$target.meta"

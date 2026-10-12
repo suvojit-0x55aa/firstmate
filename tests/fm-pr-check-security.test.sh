@@ -642,13 +642,16 @@ SH
 
   for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     dir=$(make_case "legacy-teardown-${id:0:12}")
+    fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" "$id"
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "endpoint_task_id=$id" \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
-      'mode=local-only'
+      'mode=local-only' \
+      'decisions_reviewed=1' \
+      'decision_keys='
     mkdir -p "$dir/home/state/.pr-check-quarantine"
     chmod 0700 "$dir/home/state/.pr-check-quarantine"
     printf 'reserved migration evidence\n' \
@@ -3356,6 +3359,9 @@ test_persistent_secondmate_retirement_is_poll_only() {
   [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
   [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
   [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
+  [ ! -d "$state/terminal-delivery" ] \
+    || [ -z "$(find "$state/terminal-delivery" -type f -name '*.json' -print -quit)" ] \
+    || fail "persistent secondmate poll created a terminal-delivery receipt"
   pass "merged poll retirement preserves every persistent secondmate lifecycle artifact"
 }
 

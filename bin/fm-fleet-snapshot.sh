@@ -387,8 +387,12 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
       ({path:$path,present:true,records:[],section:null,order:0};
        if ($line | test("^##[[:space:]]+")) then
          .section = (($line | sub("^##[[:space:]]+";"") | trim) | section_state)
-       elif .section == null or ($line | trim) == "" then
+       elif .section == null then
          .
+       elif ($line | trim) == "" then
+         if ((.records | length) > 0 and .records[-1].structured == true) then
+           .records[-1].body_lines += [""]
+         else . end
        elif structured_row($line) then
          .order += 1
          | .records += [parse_row($line; .section; .order)]
@@ -401,7 +405,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
          | .records += [{order:.order,state:.section,structured:false,id:null,raw:$line,body_lines:[],body_excerpt:null}]
        end)
     | .records |= map(
-        if (.body_lines | length) > 0 then
+        .body_lines |= (def trim_empty_tail:
+          if length > 0 and .[-1] == "" then .[0:-1] | trim_empty_tail else . end;
+          trim_empty_tail)
+        | if (.body_lines | length) > 0 then
           .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
     | .records as $records

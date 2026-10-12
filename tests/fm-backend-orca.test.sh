@@ -888,6 +888,7 @@ test_scout_teardown_refuses_orca_id_path_mismatch() {
   git -C "$proj" worktree add --quiet -b "fm/$id-other" "$other_wt"
   mkdir -p "$data/$id" "$state" "$config"
   printf 'report\n' > "$data/$id/report.md"
+  fm_test_seed_manual_task "$data" "$config" "$id"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-scout-mismatch" "worktree=$wt" "project=$proj" \
