@@ -1161,10 +1161,11 @@ test_private_context_survives_inbox_cleanup() {
 test_cleanup_refuses_while_a_public_reply_is_owed() {
   local home rc
   home=$(make_home cleanup-guard)
+  fm_git_worktree "$home/projects/sample" "$home/projects/worktree" "fm/ship-task"
   seed_commitment "$home" pf-guard req-guard discord main ship-task
   fm_write_meta "$home/state/ship-task.meta" \
     "window=firstmate:fm-ship-task" \
-    "worktree=$home/projects/gone" \
+    "worktree=$home/projects/worktree" \
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
@@ -1418,7 +1419,9 @@ test_dropped_baton_now_surfaces_open_loop() {
 
   fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+    "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" pi-rearm-loop-fix-r1
 
   PATH="$parent/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$parent" \
     FM_STATE_OVERRIDE="$parent/state" "$PF" guard-work secondmate:mate pi-rearm-loop-fix-r1 \
@@ -1454,7 +1457,9 @@ test_control_registered_followon_is_guarded() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/pi-rearm-loop-fix-r1.meta" \
     "window=firstmate:fm-pi-rearm-loop-fix-r1" "endpoint_task_id=pi-rearm-loop-fix-r1" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+    "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" pi-rearm-loop-fix-r1
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
     expect_failure "registered follow-on must be guarded" "$TEARDOWN" pi-rearm-loop-fix-r1
@@ -1494,7 +1499,8 @@ SH
   ')
   assert_contains "$command" "--outcome-text" \
     "the exact rechain command must remain continuous through outcome text"
-  command=${command/"$ROOT/bin/fm-public-followup-emit.sh"/"$parent/fakebin/record-emit"}
+  command=$(printf '%s\n' "$command" \
+    | sed "s|$ROOT/bin/fm-public-followup-emit.sh|$parent/fakebin/record-emit|")
   command=${command//<value>/https://github.com/example/repo/pull/99}
   RECORD_ARGS="$command_log" bash -c "$command" \
     || fail "the exact rechain command must execute after filling its deliverable value"
@@ -1991,10 +1997,11 @@ EOF
 test_retention_creates_no_false_teardown_refusal() {
   local home home2 rc out registry tmp
   home=$(make_home retain-teardown)
+  fm_git_worktree "$home/projects/sample" "$home/projects/worktree" "fm/ship-retain"
   seed_commitment "$home" pf-retain req-retain discord main ship-retain
   fm_write_meta "$home/state/ship-retain.meta" \
     "window=firstmate:fm-ship-retain" \
-    "worktree=$home/projects/gone" \
+    "worktree=$home/projects/worktree" \
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
@@ -2150,9 +2157,10 @@ test_prechange_registration_is_open_and_unrechainable() {
 test_x_request_teardown_warns_when_final_unposted() {
   local home rc
   home=$(make_home xreq-warn)
+  fm_git_worktree "$home/projects/sample" "$home/projects/worktree" "fm/linked-task"
   fm_write_meta "$home/state/linked-task.meta" \
     "window=firstmate:fm-linked-task" \
-    "worktree=$home/projects/gone" \
+    "worktree=$home/projects/worktree" \
     "project=$home/projects/sample" \
     "kind=ship" \
     "mode=local-only" \
