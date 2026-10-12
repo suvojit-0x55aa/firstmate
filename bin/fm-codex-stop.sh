@@ -98,7 +98,7 @@ arm_alive() {
 OUT=
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 cleanup() {
-  local attempt=0 watch_pid watch_identity watch_home watch_path
+  local attempt=0 watch_owner watch_pid watch_identity watch_home watch_path
   CLEANUP_ACTIVE=1
   if [ "$CLEANUP_DONE" = 1 ]; then
     CLEANUP_ACTIVE=0
@@ -119,15 +119,15 @@ cleanup() {
       attempt=$((attempt + 1))
     done
   fi
-  watch_pid=$(cat "$STATE/.watch.lock/pid" 2>/dev/null || true)
-  watch_identity=$(cat "$STATE/.watch.lock/pid-identity" 2>/dev/null || true)
-  watch_home=$(cat "$STATE/.watch.lock/fm-home" 2>/dev/null || true)
-  watch_path=$(cat "$STATE/.watch.lock/watcher-path" 2>/dev/null || true)
-  if [ -n "$watch_pid" ] && [ -n "$watch_identity" ] \
-    && [ "$watch_home" = "$FM_HOME" ] && [ "$watch_path" = "$SCRIPT_DIR/fm-watch.sh" ] \
-    && [ "$(fm_pid_identity "$watch_pid")" != "$watch_identity" ]; then
-    fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$STATE/.watch.lock" downtime \
-      || true
+  watch_owner=$(fm_lock_existing_owner "$STATE/.watch.lock" 2>/dev/null || true)
+  watch_pid=$(cat "$watch_owner/pid" 2>/dev/null || true)
+  watch_identity=$(cat "$watch_owner/pid-identity" 2>/dev/null || true)
+  watch_home=$(cat "$watch_owner/fm-home" 2>/dev/null || true)
+  watch_path=$(cat "$watch_owner/watcher-path" 2>/dev/null || true)
+  if [ -n "$watch_owner" ] && [ -n "$watch_pid" ] && [ -n "$watch_identity" ] \
+    && [ "$watch_home" = "$FM_HOME" ] && [ "$watch_path" = "$SCRIPT_DIR/fm-watch.sh" ]; then
+    fm_watcher_lock_clear_stale_exact "$STATE/.watcher-down" "$STATE/.watch.lock" \
+      "$watch_owner" "$watch_pid" "$watch_identity" "$watch_home" "$watch_path" downtime || true
   fi
   if [ "$STOP_RECORD_OWNED" = 1 ] && [ "$CONTINUATION_READY" != 1 ]; then
     fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true

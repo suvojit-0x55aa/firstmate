@@ -1630,7 +1630,50 @@ test_receipt_inventory_is_bound_to_hold_cycles() {
   run_reused_captain_call_receipt_case unresolved-reused
   run_reused_captain_call_receipt_case answered-reused
   run_reused_captain_call_receipt_case legacy-missing
+  test_legacy_metadata_without_call_cycles_fails_closed
   pass 'terminal receipts bind captain inventory to authenticated hold cycles'
+}
+
+test_legacy_metadata_without_call_cycles_fails_closed() {
+  local id=legacy-meta-cycle call=legacy-meta-cycle-call saved_calls before rc=0
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$call"
+  captain complete "$id" "$call" >/dev/null
+  saved_calls=$(sed -n 's/^decision_call_cycles=//p' "$FM_HOME/state/$id.meta" | tail -1)
+  [ -n "$saved_calls" ] || fail 'valid control did not persist captain call-cycle identity'
+  tx 'done' "$call" --no-prune --json >/dev/null
+  archive_done_task "$call" "$id-call-archive"
+  tx add "$call" "$call replacement" --json >/dev/null
+  hold_captain_task "$call"
+  answer_captain_task "$call"
+  awk '!/^decision_call_cycles=/' "$FM_HOME/state/$id.meta" > "$FM_HOME/state/$id.meta.tmp"
+  mv "$FM_HOME/state/$id.meta.tmp" "$FM_HOME/state/$id.meta"
+  before=$(shasum -a 256 "$FM_HOME/state/$id.meta" | awk '{print $1}')
+
+  if captain complete "$id" "$call" > "$FM_HOME/$id-complete.out" 2>&1; then
+    fail 'legacy captain inventory rebound missing cycle identity from a replacement task'
+  fi
+  [ "$(shasum -a 256 "$FM_HOME/state/$id.meta" | awk '{print $1}')" = "$before" ] \
+    || fail 'rejected legacy captain inventory mutated its attestation metadata'
+  if "$owner" merged "$id" https://github.com/o/r/pull/1 > "$FM_HOME/$id-merged.out" 2>&1; then
+    fail 'terminal receipt inferred a missing historical cycle from the replacement task'
+  fi
+  "$owner" reconcile >/dev/null
+  jq -se --arg id "$id" 'all(.id != $id)' "$FM_HOME/state/terminal-delivery/"*.json >/dev/null \
+    || fail 'failed legacy attestation left a terminal receipt eligible for completion'
+
+  printf 'decision_call_cycles=%s\n' "$saved_calls" >> "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" https://github.com/o/r/pull/1 > "$FM_HOME/$id-valid-merged.out" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail 'valid persisted cycle identity could not create its terminal receipt'
+  "$owner" retired "$id" normal >/dev/null
+  rm "$FM_HOME/state/$id.meta"
+  "$owner" reconcile >/dev/null
+  "$owner" reconcile >/dev/null
+  jq -e --arg id "$id" 'select(.id == $id) | .backlog == false and .decisions_reviewed == true' \
+    "$FM_HOME/state/terminal-delivery/"*.json >/dev/null \
+    || fail 'valid persisted unresolved cycle did not remain terminal-blocking'
 }
 test_merge_observation_stays_bound_to_exact_receipt() {
   local id=merge-observed-reuse p1=https://github.com/o/r/pull/101 p2=https://github.com/o/r/pull/202

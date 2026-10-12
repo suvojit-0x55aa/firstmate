@@ -1268,8 +1268,9 @@ command_complete() {
     previous=$(meta_value "$meta" decision_keys)
     previous_calls=$(meta_value "$meta" decision_call_cycles)
     if ! inventory_cycles_valid_for_keys "$previous" "${previous_calls:-null}"; then
-      previous_calls=$(normalized_inventory_cycles "$origin" "$previous") \
-        || fail "cannot authenticate the previously reviewed captain-call cycles for $origin"
+      [ -z "$previous" ] \
+        || fail "previously reviewed captain-call inventory for $origin has no authenticated hold-cycle identity"
+      previous_calls='[]'
     fi
   fi
   if [ -n "$receipt" ]; then

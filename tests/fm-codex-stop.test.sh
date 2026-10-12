@@ -77,7 +77,10 @@ run_frozen_stop() {
   PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
     FM_PROCEVENT_CLAIM_ROOT="$dir/claims" FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
-    FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" "$dir/bin/fm-codex-stop.sh"
+    FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" \
+    FM_TEST_CODEX_STALE_CLEAR_MARKER="${FM_TEST_CODEX_STALE_CLEAR_MARKER:-}" \
+    FM_TEST_CODEX_STALE_CLEAR_RELEASE="${FM_TEST_CODEX_STALE_CLEAR_RELEASE:-}" \
+    BASH_ENV="$dir/configured-stop.bash-env" "$dir/bin/fm-codex-stop.sh"
 }
 freeze_configured_stop_runtime() {
   local dir=$1
@@ -133,6 +136,26 @@ if [ -n "${FM_TEST_CODEX_STANDDOWN_MARKER:-}" ]; then
     [ -e "$release" ] || exit 124
   }
   trap fm_test_codex_standdown_barrier DEBUG
+fi
+SH
+}
+install_stale_clear_barrier() {
+  local dir=$1
+  cat >> "$dir/configured-stop.bash-env" <<'SH'
+if [ -n "${FM_TEST_CODEX_STALE_CLEAR_MARKER:-}" ]; then
+  set -T
+  fm_test_codex_stale_clear_barrier() {
+    local n=0
+    case "$BASH_COMMAND" in fm_watcher_lock_clear_stale_exact\ *) ;; *) return 0 ;; esac
+    trap - DEBUG
+    : > "$FM_TEST_CODEX_STALE_CLEAR_MARKER"
+    while [ ! -e "$FM_TEST_CODEX_STALE_CLEAR_RELEASE" ] && [ "$n" -lt 500 ]; do
+      sleep 0.01
+      n=$((n + 1))
+    done
+    [ -e "$FM_TEST_CODEX_STALE_CLEAR_RELEASE" ] || exit 124
+  }
+  trap fm_test_codex_stale_clear_barrier DEBUG
 fi
 SH
 }
@@ -467,6 +490,66 @@ test_hard_killed_watcher_releases_only_its_stale_lock() {
   wait "$STOP_PID_TWO" 2>/dev/null || true
   STOP_PID_TWO=
   pass 'hard-killed Stop watcher clears only its authenticated stale lock'
+}
+
+test_hard_killed_watcher_preserves_replacement_lock() {
+  local dir stop_owner watch_pid marker release ready replacement_pid rc=0 n=0
+  dir=$(make_home hard-kill-replacement-lock)
+  freeze_configured_stop_runtime "$dir"
+  install_stale_clear_barrier "$dir"
+  marker="$dir/stale-clear.marker"
+  release="$dir/stale-clear.release"
+  ready="$dir/replacement.ready"
+
+  TEST_BUDGET=12 FM_TEST_CODEX_STALE_CLEAR_MARKER="$marker" \
+    FM_TEST_CODEX_STALE_CLEAR_RELEASE="$release" \
+    run_frozen_stop "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  while [ "$n" -lt 100 ]; do
+    watch_pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$watch_pid" ] && kill -0 "$watch_pid" 2>/dev/null \
+      && [ -s "$dir/state/.watch.lock/pid-identity" ] \
+      && [ -e "$dir/state/.last-watcher-beat" ]; then
+      break
+    fi
+    sleep 0.05
+    n=$((n + 1))
+  done
+  [ "$n" -lt 100 ] || fail "replacement fixture watcher never became ready: $(cat "$dir/out" 2>/dev/null || true)"
+  stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+  await_arm_child "$stop_owner"
+  kill -STOP "$watch_pid"
+  kill -TERM "$stop_owner"
+  await_cleanup_wait "$stop_owner"
+  kill -KILL "$watch_pid"
+  await_file "$marker"
+
+  FM_HOME="$dir" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$2/state/.watch.lock" || exit 1
+    printf "%s\n" "$2" > "$2/state/.watch.lock/fm-home"
+    printf "%s\n" "$1/bin/fm-watch.sh" > "$2/state/.watch.lock/watcher-path"
+    fm_pid_identity "${BASHPID:-$$}" > "$2/state/.watch.lock/pid-identity"
+    : > "$3"
+    trap "fm_lock_release \"$2/state/.watch.lock\"; exit 0" TERM INT HUP EXIT
+    while :; do sleep 1; done
+  ' _ "$ROOT" "$dir" "$ready" > "$dir/replacement.out" 2>&1 &
+  STOP_PID_TWO=$!
+  await_file "$ready"
+  replacement_pid=$(cat "$dir/state/.watch.lock/pid")
+  [ "$replacement_pid" = "$STOP_PID_TWO" ] \
+    || fail "replacement lock recorded $replacement_pid instead of live owner $STOP_PID_TWO"
+  : > "$release"
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 0 "$rc" 'cancelled Stop against a replacement watcher returned continuation'
+  [ "$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)" = "$replacement_pid" ] \
+    || fail 'stale cleanup deleted the replacement watcher lock'
+  kill -0 "$replacement_pid" 2>/dev/null || fail 'stale cleanup killed the replacement watcher owner'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'hard-killed Stop watcher cleanup preserves a replacement lock owner'
 }
 
 test_expired_successor_requires_replacement_generation() {
@@ -1077,6 +1160,7 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   hard-kill-lock)
     test_hard_killed_watcher_releases_only_its_stale_lock
+    test_hard_killed_watcher_preserves_replacement_lock
     exit 0
     ;;
   afk-handoff)

@@ -707,6 +707,58 @@ fm_lock_recheck_stale_owner() {
   return 0
 }
 
+fm_lock_existing_owner() {
+  local lockdir=$1
+  if [ -L "$lockdir" ]; then
+    fm_lock_link_owner "$lockdir"
+  elif [ -d "$lockdir" ]; then
+    printf '%s\n' "$lockdir"
+  else
+    return 1
+  fi
+}
+
+fm_watcher_lock_snapshot_matches() {
+  local lockdir=$1 expected_owner=$2 expected_pid=$3 expected_identity=$4
+  local expected_home=$5 expected_path=$6
+  [ -n "$expected_owner" ] || return 1
+  if [ "$expected_owner" = "$lockdir" ]; then
+    [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+  else
+    fm_lock_points_to_owner "$lockdir" "$expected_owner" || return 1
+  fi
+  [ "$(cat "$expected_owner/pid" 2>/dev/null || true)" = "$expected_pid" ] || return 1
+  [ "$(cat "$expected_owner/pid-identity" 2>/dev/null || true)" = "$expected_identity" ] || return 1
+  [ "$(cat "$expected_owner/fm-home" 2>/dev/null || true)" = "$expected_home" ] || return 1
+  [ "$(cat "$expected_owner/watcher-path" 2>/dev/null || true)" = "$expected_path" ]
+}
+
+fm_watcher_lock_clear_stale_exact() {
+  local marker=$1 lockdir=$2 expected_owner=$3 expected_pid=$4 expected_identity=$5
+  local expected_home=$6 expected_path=$7 kind=${8:-downtime} steal steal_owner current_identity status=1
+  case "$expected_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$expected_identity" ] && [ -n "$expected_home" ] && [ -n "$expected_path" ] || return 1
+  steal="$lockdir.steal"
+  fm_lock_try_acquire "$steal" || return 1
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
+  if fm_lock_points_to_owner "$steal" "$steal_owner" \
+    && fm_watcher_lock_snapshot_matches "$lockdir" "$expected_owner" "$expected_pid" \
+      "$expected_identity" "$expected_home" "$expected_path"; then
+    current_identity=$(fm_pid_identity "$expected_pid" 2>/dev/null || true)
+    if [ "$current_identity" != "$expected_identity" ] \
+      && _fm_recovery_marker_publish "$marker" "$kind" \
+      && fm_watcher_lock_snapshot_matches "$lockdir" "$expected_owner" "$expected_pid" \
+        "$expected_identity" "$expected_home" "$expected_path"; then
+      current_identity=$(fm_pid_identity "$expected_pid" 2>/dev/null || true)
+      if [ "$current_identity" != "$expected_identity" ]; then
+        fm_lock_remove_path "$lockdir" && status=0
+      fi
+    fi
+  fi
+  fm_lock_release "$steal"
+  return "$status"
+}
+
 FM_RECOVERY_MARKER_TOKEN=
 FM_RECOVERY_MARKER_ACTION='none'
 
@@ -1065,11 +1117,6 @@ fm_recovery_transition() {
       fi
       fm_lock_release "$target"
       fm_lock_release "$lock"
-      ;;
-    clear-stale-lock)
-      [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
-      fm_lock_remove_path "$target"
       ;;
     *) return 2 ;;
   esac
