@@ -3116,6 +3116,130 @@ SH
   pass "TERM-pushed follow-up custody cannot replace current landing proof"
 }
 
+test_late_captain_call_refuses_before_worktree_removal() {
+  local backend case_dir head marker ready pid i rc receipt log
+  for backend in treehouse orca; do
+    case_dir=$(make_case "late-captain-$backend")
+    write_meta "$case_dir" local-only ship
+    printf '# Backlog\n\n## In flight\n\n- [ ] task-x1 - Late captain call fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+      > "$case_dir/data/backlog.md"
+    wt_commit "$case_dir" "landed late captain fixture"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/project" update-ref refs/heads/main "$head"
+    log="$case_dir/removal.log"
+    : > "$log"
+
+    if [ "$backend" = orca ]; then
+      sed -i.bak 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta"
+      rm -f "$case_dir/state/task-x1.meta.bak"
+      printf '%s\n' 'backend=orca' 'terminal=term-late' 'orca_worktree_id=wt-late' \
+        >> "$case_dir/state/task-x1.meta"
+      cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_REMOVAL_LOG:?}"
+case "${1:-} ${2:-}" in
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-late","path":"%s"}}}\n' "${FM_TEST_ORCA_WT:?}"
+    ;;
+  *) printf '%s\n' '{"ok":true,"result":{}}' ;;
+esac
+SH
+      chmod +x "$case_dir/fakebin/orca"
+    else
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_REMOVAL_LOG:?}"
+exit 0
+SH
+      chmod +x "$case_dir/fakebin/treehouse"
+    fi
+
+    marker="$case_dir/term-finished"
+    ready="$case_dir/term-ready"
+    cat > "$case_dir/term-worker" <<'SH'
+#!/usr/bin/env bash
+set -u
+cd "${FM_TEST_TERM_WT:?}"
+on_term() {
+  printf '%s\n' 'needs-decision [key=late-call]: captain answer pending after TERM' \
+    >> "${FM_TEST_TERM_STATUS:?}"
+  : > "${FM_TEST_TERM_MARKER:?}"
+  exit 0
+}
+trap on_term TERM
+: > "${FM_TEST_TERM_READY:?}"
+while :; do sleep 0.1; done
+SH
+    chmod +x "$case_dir/term-worker"
+    cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+if [ ! -f "${FM_TEST_TERM_MARKER:?}" ]; then
+  printf 'p%s\nfcwd\nn%s\n' "${FM_TEST_TERM_PID:?}" "${FM_TEST_TERM_SCAN_WT:?}"
+fi
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/lsof"
+
+    FM_TEST_TERM_WT="$case_dir/wt" \
+    FM_TEST_TERM_STATUS="$case_dir/state/task-x1.status" \
+    FM_TEST_TERM_MARKER="$marker" FM_TEST_TERM_READY="$ready" \
+      "$case_dir/term-worker" &
+    pid=$!
+    i=0
+    while [ ! -f "$ready" ] && [ "$i" -lt 50 ]; do
+      sleep 0.02
+      i=$((i + 1))
+    done
+    [ -f "$ready" ] || fail "late-captain-$backend: worker did not become ready"
+
+    rc=0
+    FM_TEST_TERM_PID="$pid" FM_TEST_TERM_SCAN_WT="$(cd "$case_dir/wt" && pwd -P)" \
+    FM_TEST_TERM_MARKER="$marker" FM_TEST_REMOVAL_LOG="$log" \
+    FM_TEST_ORCA_WT="$case_dir/wt" \
+      run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+
+    [ -f "$marker" ] || fail "late-captain-$backend: TERM handler did not run"
+    expect_code 1 "$rc" "late-captain-$backend: late captain call must refuse removal"
+    assert_present "$case_dir/wt" "late-captain-$backend: refusal removed the worktree"
+    assert_present "$case_dir/state/task-x1.meta" "late-captain-$backend: refusal removed metadata"
+    assert_grep "captain-call completion gate" "$case_dir/first.stderr" \
+      "late-captain-$backend: refusal did not identify the captain gate"
+    if [ "$backend" = orca ]; then
+      assert_no_grep "worktree rm" "$log" \
+        "late-captain-orca: refusal called Orca worktree removal"
+      assert_no_grep "terminal close" "$log" \
+        "late-captain-orca: refusal closed the endpoint before preserving evidence"
+    else
+      [ ! -s "$log" ] || fail "late-captain-treehouse: refusal called treehouse return"
+    fi
+    receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+    assert_present "$receipt" "late-captain-$backend: landing receipt was not retained"
+    [ "$(jq -r '.retired // false' "$receipt")" != true ] \
+      || fail "late-captain-$backend: refusal recorded false retirement"
+
+    printf '%s\n' 'resolved [key=late-call]: answered: continue synthetic teardown' \
+      >> "$case_dir/state/task-x1.status"
+    rc=0
+    FM_TEST_TERM_PID="$pid" FM_TEST_TERM_SCAN_WT="$case_dir/wt" \
+    FM_TEST_TERM_MARKER="$marker" FM_TEST_REMOVAL_LOG="$log" \
+    FM_TEST_ORCA_WT="$case_dir/wt" \
+      run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+    expect_code 0 "$rc" "late-captain-$backend: resolved retry should complete"
+    if [ "$backend" = orca ]; then
+      assert_grep "worktree rm --worktree id:wt-late" "$log" \
+        "late-captain-orca: resolved retry did not remove the authenticated worktree"
+    else
+      assert_grep "return --force $case_dir/wt" "$log" \
+        "late-captain-treehouse: resolved retry did not return the worktree"
+    fi
+  done
+  pass "post-reap captain calls block both worktree removal backends and retry safely"
+}
+
 test_forced_discard_refuses_unstageable_inventory_before_removal() {
   local case_dir rc=0
   case_dir=$(make_case discard-stage-refusal)
@@ -3213,6 +3337,10 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
     test_local_only_merged_to_local_main_allows
     exit
     ;;
+  late-captain-removal)
+    test_late_captain_call_refuses_before_worktree_removal
+    exit
+    ;;
   receipt-authentication)
     test_unauthenticated_landing_receipts_refuse_replay
     exit
@@ -3285,5 +3413,6 @@ test_persisted_landing_proof_replays_after_worktree_return
 test_persisted_landing_proof_rejects_replacement_incarnation
 test_persisted_landing_proof_revalidates_existing_worktree
 test_term_pushed_followup_requires_current_landing
+test_late_captain_call_refuses_before_worktree_removal
 test_forced_discard_refuses_unstageable_inventory_before_removal
 test_forced_discard_replays_staged_inventory_after_interruption

@@ -904,6 +904,48 @@ test_out_of_band_close_is_recordable() {
   pass "an out-of-band close is recordable with the captain's word and nothing else"
 }
 
+test_terminal_resolution_mode_is_whitelisted() {
+  local home id call pristine
+  home=$(make_home resolution-mode-validation)
+  id=sample-resolution-review
+  call=sample-resolution-call
+  tasks_in "$home" add "$id" "Review resolution validation" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the resolution validation origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$call" --title "Choose the resolution path" \
+    --reason "captain resolution choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not create the resolution validation call"
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "could not attest the resolution validation inventory"
+  printf 'Captain selected the supported path.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the supported answered mode"
+  run_captain "$home" terminal-ready "$id" "$call" >/dev/null \
+    || fail "the supported answered mode did not authorize readiness"
+
+  pristine="$home/backlog-pristine.md"
+  cp "$home/data/backlog.md" "$pristine"
+  sed -i.bak 's/Resolution mode: answered/Resolution mode: garbage/' "$home/data/backlog.md"
+  rm -f "$home/data/backlog.md.bak"
+  if run_captain "$home" terminal-ready "$id" "$call" \
+    > "$home/garbage.out" 2> "$home/garbage.err"; then
+    fail "an unknown resolution mode authorized terminal readiness"
+  fi
+
+  cp "$pristine" "$home/data/backlog.md"
+  sed -i.bak '/Resolution mode: answered/d' "$home/data/backlog.md"
+  rm -f "$home/data/backlog.md.bak"
+  if run_captain "$home" terminal-ready "$id" "$call" \
+    > "$home/missing.out" 2> "$home/missing.err"; then
+    fail "a missing resolution mode authorized terminal readiness"
+  fi
+  cp "$pristine" "$home/data/backlog.md"
+  run_captain "$home" terminal-ready "$id" "$call" >/dev/null \
+    || fail "restoring the supported answered mode did not restore readiness"
+  pass "terminal readiness accepts only supported captain resolution modes"
+}
+
 # A post-teardown visual review completes against the surviving report and
 # durable tasks, with no volatile task metadata and no second decision database.
 test_visual_review_uses_shared_completion_owner() {
@@ -1636,6 +1678,12 @@ case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
     test_terminal_status_requires_explicit_resolution_or_transfer
     exit 0
     ;;
+  resolution-mode-validation)
+    test_terminal_resolution_mode_is_whitelisted
+    test_out_of_band_close_is_recordable
+    test_release_uses_existing_terminal_evidence_only
+    exit 0
+    ;;
   review-recovery)
     test_rehold_cycle_is_interruption_safe
     test_visual_review_uses_shared_completion_owner
@@ -1655,6 +1703,7 @@ test_answer_markers_cannot_replace_hold_cycle
 test_rehold_cycle_is_interruption_safe
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
+test_terminal_resolution_mode_is_whitelisted
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_status_requires_explicit_resolution_or_transfer

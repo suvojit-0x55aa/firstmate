@@ -1329,7 +1329,7 @@ teardown_treehouse_return() {
   local out lock attempt=0 max_retries lock_desc
 
   if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
-    echo "teardown: $label return aborted because current landing and safety checks failed" >&2
+    echo "teardown: $label return aborted because current removal checks failed" >&2
     return 1
   fi
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
@@ -1360,7 +1360,7 @@ teardown_treehouse_return() {
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
     if [ -n "$post_cleanup_check" ] && ! "$post_cleanup_check"; then
-      echo "teardown: $label return aborted before retry because current landing and safety checks failed" >&2
+      echo "teardown: $label return aborted before retry because current removal checks failed" >&2
       return 1
     fi
     if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
@@ -1486,6 +1486,9 @@ validate_current_worktree_removal() {
     else
       return 1
     fi
+  fi
+  if [ "$KIND" != secondmate ] && [ "$FORCE" != --force ]; then
+    verify_captain_call_completion || return 1
   fi
   [ "$KIND" = ship ] && [ "$FORCE" != --force ] || return 0
   if [ -z "${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}" ]; then

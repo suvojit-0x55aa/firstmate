@@ -502,7 +502,11 @@ terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <ori
   fi
   body_has_current_resolution "$1" || return 1
   mode=$(recorded_resolution_mode "$1" || true)
-  [ "$mode" = released ] || return 0
+  case "$mode" in
+    answered|repaired) return 0 ;;
+    released) ;;
+    *) return 1 ;;
+  esac
   [ "$2" != captain ] || return 1
   release_receipt=$(recorded_release_receipt "$1" || true)
   [ -n "$release_receipt" ] || return 1
