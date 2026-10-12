@@ -497,6 +497,7 @@ tests/fm-task-delivery.test.sh 2247
 tests/fm-task-inbox.test.sh 24460
 tests/fm-teardown-endpoint-safety.test.sh 3321
 tests/fm-teardown.test.sh 86477
+tests/fm-terminal-reconcile.test.sh 650000
 tests/fm-test-fixture-cleanup.test.sh 507
 tests/fm-test-isolation-proof.test.sh 489
 tests/fm-tmux-agent-liveness.test.sh 1512

@@ -1891,6 +1891,7 @@ test_obligation_namespace_compatibility() {
   printf 'legacy quarantined bytes\n' \
     > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
   chmod 0600 "$state/.pr-check-quarantine/"*
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" _noncanonical
   fm_write_meta "$state/_noncanonical.meta" \
     'window=firstmate:fm-_noncanonical' \
     'endpoint_task_id=_noncanonical' \
@@ -1929,7 +1930,7 @@ SH
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
     "$TEARDOWN" _noncanonical --force > "$dir/teardown-2.out" 2> "$dir/teardown-2.err" \
-    || fail "task teardown did not recover after legacy namespace migration"
+    || fail "task teardown did not recover after legacy namespace migration: $(cat "$dir/teardown-2.err")"
   [ ! -e "$state/_noncanonical.meta" ] \
     || fail "recovered task teardown retained lifecycle metadata"
   [ -f "$state/.pr-check-quarantine/!noncanonical.check.abc123" ] \
@@ -3730,6 +3731,10 @@ case "${FM_PR_CHECK_SECURITY_FOCUSED_TEST:-}" in
   '') ;;
   different-merged-pr)
     test_different_merged_pr_for_same_task_is_not_absorbed
+    exit
+    ;;
+  obligation-namespace-compatibility)
+    test_obligation_namespace_compatibility
     exit
     ;;
   *) fail "unknown focused PR check security test: $FM_PR_CHECK_SECURITY_FOCUSED_TEST" ;;

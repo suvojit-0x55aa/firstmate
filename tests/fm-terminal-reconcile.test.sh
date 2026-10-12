@@ -226,6 +226,14 @@ run_transferred_release_resume_case() {
     "$owner" manual-complete "$key"
     rc=$?
     set -e
+  elif [ "$expected" = progressed ]; then
+    reconcile_limit=$(( $(find "$FM_HOME/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d '[:space:]') + 1 ))
+    reconcile_attempt=0
+    while [ "$reconcile_attempt" -lt "$reconcile_limit" ]; do
+      "$owner" reconcile
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$key.json")" != true ] || break
+      reconcile_attempt=$((reconcile_attempt + 1))
+    done
   else
     "$owner" reconcile
     "$owner" reconcile
@@ -1274,7 +1282,7 @@ run_archived_captain_answer_case() {
   call="$id-call"
   tx add "$call" "$call" --json >/dev/null
   hold_captain_task "$call"
-  printf '%s\n' 'decisions_reviewed=1' "decision_keys=$call" >> "$FM_HOME/state/$id.meta"
+  captain complete "$id" "$call" >/dev/null
   answer_captain_task "$call"
   for filler in $(seq 1 11); do
     tx add "$id-filler-$filler" "$id filler $filler" --json >/dev/null
@@ -1307,7 +1315,8 @@ run_archived_captain_answer_case() {
 test_corrupt_captain_answer_blocks_receipt_completion() {
   local id=corrupt-answer-receipt call key record
   local valid_body="$FM_HOME/$id.valid" invalid_body="$FM_HOME/$id.invalid"
-  local valid_cycle invalid_cycle valid_digest invalid_digest before_task
+  local valid_cycle invalid_cycle valid_digest invalid_digest
+  local before_task_custody after_task_custody before_receipt after_receipt
   call="$id-call"
   printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
   make_task "$id"
@@ -1337,13 +1346,28 @@ test_corrupt_captain_answer_blocks_receipt_completion() {
     "$FM_HOME/state/terminal-delivery/"*.json)
   record="$FM_HOME/state/terminal-delivery/$key.json"
   tx update "$call" --body-file "$invalid_body" --archive-body >/dev/null
-  before_task=$(tx show "$id" --full)
+  before_task_custody=$(tx show "$id" --full | awk \
+    '$1 ~ /^(id:|state:|blocked:|blocked_by:|held:|hold_reason:|hold_kind:|hold_until:|kind:|body:)$/ { print }')
+  assert_contains "$before_task_custody" 'state: in_flight' \
+    'corrupt-answer custody snapshot omitted the live task state'
+  assert_contains "$before_task_custody" "body: \"Firstmate terminal receipt: $key\"" \
+    'corrupt-answer custody snapshot omitted the authenticated receipt binding'
+  before_receipt=$(jq -c \
+    '{key,id,incarnation,incarnation_kind,backlog_binding,backlog_attested,backlog_evidence,merged,retired,discarded,backlog,refill,reviewed,superseded_by,captain_keys,captain_calls,origin_captain_cycle,captain_obligations,decisions_reviewed}' \
+    "$record")
 
   "$owner" reconcile >/dev/null
   [ "$(jq -r .backlog "$record")" = false ] \
     || fail 'corrupt captain answer advanced receipt completion'
-  [ "$(tx show "$id" --full)" = "$before_task" ] \
+  after_task_custody=$(tx show "$id" --full | awk \
+    '$1 ~ /^(id:|state:|blocked:|blocked_by:|held:|hold_reason:|hold_kind:|hold_until:|kind:|body:)$/ { print }')
+  [ "$after_task_custody" = "$before_task_custody" ] \
     || fail 'corrupt captain answer changed backlog work custody'
+  after_receipt=$(jq -c \
+    '{key,id,incarnation,incarnation_kind,backlog_binding,backlog_attested,backlog_evidence,merged,retired,discarded,backlog,refill,reviewed,superseded_by,captain_keys,captain_calls,origin_captain_cycle,captain_obligations,decisions_reviewed}' \
+    "$record")
+  [ "$after_receipt" = "$before_receipt" ] \
+    || fail 'corrupt captain answer changed authenticated receipt evidence or completion state'
   jq -e '.retired == true and ((.superseded_by // "") == "")' "$record" >/dev/null \
     || fail 'corrupt captain answer lost active receipt custody'
 

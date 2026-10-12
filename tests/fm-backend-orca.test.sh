@@ -30,6 +30,10 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
   exit 0
 fi
+if [ -f "$RESP/always-worktree-not-found" ] && [ "${1:-}" = worktree ] && [ "${2:-}" = show ]; then
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n'
+  exit 0
+fi
 if [ -f "$RESP/use-show-sequence" ] && [ "${1:-}" = worktree ] && [ "${2:-}" = show ]; then
   SHOW_COUNT_FILE="$RESP/.show-count"
   show_next=$(( $(cat "$SHOW_COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
@@ -925,6 +929,7 @@ test_teardown_removes_orca_worktree_when_path_missing() {
   config="$TMP_ROOT/missing-path-config"
   mkdir -p "$data/$id" "$state" "$config"
   printf 'report\n' > "$data/$id/report.md"
+  fm_test_seed_manual_task "$data" "$config" "$id"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-missing-path" "worktree=$wt" "project=$proj" \
@@ -932,9 +937,8 @@ test_teardown_removes_orca_worktree_when_path_missing() {
     "backend=orca" "orca_worktree_id=wt-missing-path" \
     "decisions_reviewed=1" "decision_keys="
   orca_case missing-path
-  for response in 1 2 3; do
-    printf '{"ok":false,"error":{"code":"worktree_not_found","message":"worktree not found"}}\n' > "$RESP/$response.out"
-  done
+  : > "$RESP/always-worktree-not-found"
+  add_teardown_side_effect_fakes "$FB"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1986,6 +1990,10 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     ;;
   teardown-scout)
     test_scout_teardown_removes_orca_worktree_via_helper
+    exit
+    ;;
+  teardown-missing-path)
+    test_teardown_removes_orca_worktree_when_path_missing
     exit
     ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;

@@ -342,9 +342,10 @@ commit_tree_from_wt_head() {
 }
 
 land_equivalent_patch_on_origin_branch() {
-  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 tmp
+  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 base=${6:-} tmp
   tmp="$case_dir/_equiv"
   git clone -q "$case_dir/origin.git" "$tmp"
+  [ -z "$base" ] || git -C "$tmp" checkout -q --detach "$base"
   printf '%s\n' "$content" > "$tmp/$file"
   git -C "$tmp" add -- "$file"
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
@@ -1046,7 +1047,8 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   git -C "$case_dir/project" fetch -q origin fm/task-x1
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_url "$case_dir"
-  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+  pr_head=$(land_equivalent_patch_on_origin_branch \
+    "$case_dir" pr-head feature.txt hello "replay feature" origin/fm/task-x1)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
@@ -1054,7 +1056,7 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
+  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"$'\n'"$(cat "$case_dir/stderr")"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
 }
@@ -3468,6 +3470,10 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
     test_merged_pr_refuses_fork_pushed_unlanded_patch
     test_merged_pr_refuses_replayed_patch_set_with_different_final_tree
     test_merged_pr_allows_replayed_history_with_matching_final_tree
+    exit
+    ;;
+  squash-replayed-patch)
+    test_squash_merged_pr_allows_replayed_unpushed_patch
     exit
     ;;
   late-captain-removal)
