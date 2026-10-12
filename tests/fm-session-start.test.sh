@@ -231,6 +231,10 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  *"lstart="*)
+    /bin/ps "$@"
+    exit $?
+    ;;
   *"comm="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
       || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then

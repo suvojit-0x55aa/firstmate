@@ -86,7 +86,7 @@ state/               runtime records and signals; gitignored
   .fm-inherited-config-reread.* .fm-inherited-config-reread.*.pending  private generation-stamped secondmate config-reread instructions and their pending-delivery markers
   .fm-inherited-config-reread-retry/  private source-home retry stages, reports, and sequence state for config-reread delivery
   .fm-inherited-config-reread-quarantine/  bounded private preservation of config-reread generations whose cleanup failed; bin/fm-config-inherit-lib.sh owns these three config-reread record families
-  .startup-network.*  status, report, per-step elapsed timings, inline-print claim, and lock for the deferred network stage session start runs off its blocking path; bin/fm-startup-network.sh
+  .startup-network.*  status, report, per-step elapsed timings, inline-print claim, stronger-phase request, delivery acknowledgement, and lock for the deferred network stage session start runs off its blocking path; bin/fm-startup-network.sh
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .watcher-down .watcher-down.announced-session  private recovery marker and announcing-session identity sidecar; docs/watcher-continuity.md owns the contract; never touch
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
