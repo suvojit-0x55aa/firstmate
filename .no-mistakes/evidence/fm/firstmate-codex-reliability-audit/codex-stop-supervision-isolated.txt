@@ -1,0 +1,13 @@
+ok - quiet expiry requests the next Codex turn rather than silently ending supervision
+ok - an event after Stop reaches continuation once; duplicate Stop preserves singleton ownership
+ok - replacement Stop takes over after predecessor lock contention
+ok - deliberate Stop cancellation reaps only its owned watcher and emits no continuation
+ok - session replacement stands down without touching the successor session
+ok - public Stop rejects duplicate successor evidence before arming
+ok - expired Stop successor fails closed until a replacement generation
+ok - away handoff clears only its owned Stop successor claim
+ok - final-source and queued wakes retain exactly one cancellable continuation
+not-autohandled: final-source (left for the handler; still unacknowledged)
+ok - configured Codex Stop dispatches pending queues through one owner
+ok - configured Codex Stop retires only its owned claim during away handoff
+ok - cleanup cancellation revokes only its owner handling successor

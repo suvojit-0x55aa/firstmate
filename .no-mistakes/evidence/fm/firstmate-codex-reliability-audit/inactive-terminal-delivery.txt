@@ -1,0 +1,25 @@
+actionable: inactive terminal outcome awaiting captain presentation: child=child state=done pr=https://example.test/owner/repo/pull/1
+ok - main presentation acknowledgement retains an independent delivery obligation
+ok - secondmate reports its own inactive terminal child
+actionable: inactive terminal outcome needs parent report: child=child state=failed (missing or unreadable parent binding .fm-secondmate-parent)
+ok - relative local parent homes fail closed
+ok - invalid secondmate markers block routing and surface the obligation
+ok - remote parent-replies mirror input is durable and idempotent
+ok - reused task ids retain per-incarnation terminal receipts
+ok - legacy metadata rewrites preserve terminal receipt identity
+ok - relaunch cannot replace metadata during terminal snapshot
+actionable: inactive terminal outcome awaiting captain presentation: child=child state=done pr=https://example.test/owner/repo/pull/1
+ok - terminal reconciliation ignores heartbeat backoff state
+actionable: inactive terminal outcome awaiting captain presentation: child=child state=done pr=https://example.test/owner/repo/pull/1
+ok - scan marker replaces a symlink without overwriting its target
+ok - nonterminal and captain-held workers remain outside inactive terminal reporting
+ok - watcher hook wakes for terminal loss and preserves idle secondmate exemption
+actionable: inactive terminal outcome awaiting captain presentation: child=b state=done pr=https://example.test/owner/repo/pull/1
+ok - stalled state reads are bounded without starving later children
+ok - aggregate scan budget includes durable wake operations
+actionable: inactive terminal outcome needs parent report: child=child state=failed (missing or unreadable parent binding .fm-secondmate-parent)
+ok - notice recovery remains idempotent across queue acknowledgement
+ok - a secondmate home with no parent binding names the missing binding instead of failing quietly
+actionable: inactive terminal outcome awaiting captain presentation: child=child state=done pr=https://example.test/owner/repo/pull/1
+ok - reconciliation makes zero forge or PR API calls
+all inactive reconciliation tests passed

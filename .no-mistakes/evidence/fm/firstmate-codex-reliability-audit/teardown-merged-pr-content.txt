@@ -1,0 +1,3 @@
+ok - merged PR proof checks fork-pushed current content before teardown
+ok - merged PR patch membership cannot replace final-tree containment
+ok - matching final PR content accepts replayed commit history
