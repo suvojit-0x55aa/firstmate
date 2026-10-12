@@ -1093,6 +1093,82 @@ test_merged_pr_refuses_fork_pushed_unlanded_patch() {
   pass "merged PR proof checks fork-pushed current content before teardown"
 }
 
+test_merged_pr_refuses_replayed_patch_set_with_different_final_tree() {
+  local case_dir rc pr_dir pr_head
+  case_dir=$(make_case replayed-patch-set-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "add feature"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t revert --no-edit HEAD >/dev/null
+  wt_commit_file "$case_dir" feature.txt landed "add feature again"
+  add_fork_with_pushed_branch "$case_dir"
+  append_pr_meta_url "$case_dir"
+
+  pr_dir="$case_dir/_pr"
+  git clone -q "$case_dir/origin.git" "$pr_dir"
+  printf '%s\n' landed > "$pr_dir/feature.txt"
+  git -C "$pr_dir" add -- feature.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t revert --no-edit HEAD >/dev/null
+  git -C "$pr_dir" push -q origin HEAD:refs/heads/pr-head
+  git -C "$case_dir/project" fetch -q origin pr-head
+  pr_head=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/pr-head)
+  rm -rf "$pr_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "replayed-patch-set-unlanded: teardown should refuse a different final tree"
+  git -C "$case_dir/wt" merge-base --is-ancestor HEAD refs/remotes/fork/fm/task-x1 \
+    || fail "replayed-patch-set-unlanded: fixture did not push every current commit"
+  git -C "$case_dir/wt" cat-file -e "$pr_head:feature.txt" 2>/dev/null \
+    && fail "replayed-patch-set-unlanded: merged PR unexpectedly contains the final feature"
+  assert_present "$case_dir/wt" \
+    "replayed-patch-set-unlanded: teardown removed the unlanded worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "replayed-patch-set-unlanded: teardown removed custody metadata"
+  pass "merged PR patch membership cannot replace final-tree containment"
+}
+
+test_merged_pr_allows_replayed_history_with_matching_final_tree() {
+  local case_dir rc pr_dir pr_head
+  case_dir=$(make_case replayed-history-landed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "add feature"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t revert --no-edit HEAD >/dev/null
+  wt_commit_file "$case_dir" feature.txt landed "add feature again"
+  add_fork_with_pushed_branch "$case_dir"
+  append_pr_meta_url "$case_dir"
+
+  pr_dir="$case_dir/_pr"
+  git clone -q "$case_dir/origin.git" "$pr_dir"
+  printf '%s\n' landed > "$pr_dir/feature.txt"
+  git -C "$pr_dir" add -- feature.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "land final feature"
+  git -C "$pr_dir" push -q origin HEAD:refs/heads/pr-head
+  git -C "$case_dir/project" fetch -q origin pr-head
+  pr_head=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/pr-head)
+  rm -rf "$pr_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "replayed-history-landed: matching final PR content should allow teardown"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "replayed-history-landed: successful teardown retained task metadata"
+  assert_contains "$(cat "$case_dir/stdout")" \
+    'pr=https://github.com/example/repo/pull/7 merge_proven=true' \
+    "replayed-history-landed: teardown lost authenticated merge proof"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "replayed-history-landed: teardown printed a false refusal"
+  pass "matching final PR content accepts replayed commit history"
+}
+
 test_merged_pr_with_later_local_commit_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case stale-pr-head)
@@ -3380,6 +3456,8 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
     ;;
   merged-pr-current-content)
     test_merged_pr_refuses_fork_pushed_unlanded_patch
+    test_merged_pr_refuses_replayed_patch_set_with_different_final_tree
+    test_merged_pr_allows_replayed_history_with_matching_final_tree
     exit
     ;;
   late-captain-removal)
@@ -3421,6 +3499,8 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_no_pr_recorded_open_pr_retains_reconciliation_custody
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_refuses_fork_pushed_unlanded_patch
+test_merged_pr_refuses_replayed_patch_set_with_different_final_tree
+test_merged_pr_allows_replayed_history_with_matching_final_tree
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags

@@ -1038,36 +1038,13 @@ ensure_commit_object() {
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
-patch_id_for_commit() {
-  local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
-    | git patch-id --stable 2>/dev/null \
-    | awk 'NR == 1 { print $1 }'
-}
-
-current_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id current_commits
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
-  pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
-      | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
-        done \
-      | sed '/^$/d' \
-      | sort -u
-  ) || return 1
-  [ -n "$pr_patch_ids" ] || return 1
-  current_commits=$(git -C "$WT" log --format=%H "$base..$current" -- 2>/dev/null) || return 1
-  [ -n "$current_commits" ] || return 1
-  while IFS= read -r commit; do
-    [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
-    [ -n "$patch_id" ] || return 1
-    printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
-  done <<EOF
-$current_commits
-EOF
+current_content_is_in_ref() {
+  local ref=$1 ref_tree merged_tree
+  ref_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$ref_tree" ] || return 1
+  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  [ "$merged_tree" = "$ref_tree" ]
 }
 
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
@@ -1094,7 +1071,7 @@ pr_is_merged() {
   ensure_commit_object "$target" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null \
-    || current_patches_are_in_pr_head "$head"; then
+    || current_content_is_in_ref "$head"; then
     TEARDOWN_VERIFIED_MERGED_PR=$url
     return 0
   fi
@@ -1109,7 +1086,7 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -1119,11 +1096,7 @@ content_in_default() {
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
-  [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
-  [ "$merged_tree" = "$default_tree" ] || return 1
+  current_content_is_in_ref "$ref" || return 1
   TEARDOWN_VERIFIED_DEFAULT_HEAD=$(git -C "$WT" rev-parse --verify "$ref^{commit}" 2>/dev/null) || return 1
 }
 
