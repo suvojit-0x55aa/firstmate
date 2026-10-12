@@ -126,7 +126,7 @@ cleanup() {
   if [ -n "$watch_pid" ] && [ -n "$watch_identity" ] \
     && [ "$watch_home" = "$FM_HOME" ] && [ "$watch_path" = "$SCRIPT_DIR/fm-watch.sh" ] \
     && [ "$(fm_pid_identity "$watch_pid")" != "$watch_identity" ]; then
-    fm_recovery_transition "$STATE/.watcher-down" release-lock "$STATE/.watch.lock" downtime \
+    fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$STATE/.watch.lock" downtime \
       || true
   fi
   if [ "$STOP_RECORD_OWNED" = 1 ] && [ "$CONTINUATION_READY" != 1 ]; then

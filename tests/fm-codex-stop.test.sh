@@ -72,6 +72,13 @@ run_stop_trappable() {
     perl -e '$SIG{HUP}="DEFAULT"; $SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
       "$ROOT/bin/fm-codex-stop.sh"
 }
+run_frozen_stop() {
+  local dir=$1
+  PATH="$dir/fakebin:$PATH" FM_TEST_CODEX_OWNER=$$ FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_PROCEVENT_CLAIM_ROOT="$dir/claims" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_ARM_CONFIRM_TIMEOUT=3 \
+    FM_CODEX_WATCH_CHECKPOINT="${TEST_BUDGET:-3}" "$dir/bin/fm-codex-stop.sh"
+}
 freeze_configured_stop_runtime() {
   local dir=$1
   if [ -L "$dir/bin" ]; then
@@ -415,6 +422,51 @@ test_cleanup_cancellation_revokes_handling() {
   wait "$STOP_PID_TWO" 2>/dev/null || true
   STOP_PID_TWO=
   pass 'cleanup cancellation revokes only its owner handling successor'
+}
+
+test_hard_killed_watcher_releases_only_its_stale_lock() {
+  local dir stop_owner watch_pid arm_pid rc=0 n=0
+  dir=$(make_home hard-kill-stale-lock)
+  freeze_configured_stop_runtime "$dir"
+
+  sleep 30 &
+  STOP_PID_TWO=$!
+  mkdir "$dir/state/.unrelated.lock"
+  printf '%s\n' "$STOP_PID_TWO" > "$dir/state/.unrelated.lock/pid"
+  printf '%s\n' "$(FM_HOME="$dir" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$STOP_PID_TWO")" \
+    > "$dir/state/.unrelated.lock/pid-identity"
+
+  TEST_BUDGET=12 run_frozen_stop "$dir" > "$dir/out" 2>&1 &
+  STOP_PID=$!
+  while [ "$n" -lt 100 ]; do
+    watch_pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$watch_pid" ] && kill -0 "$watch_pid" 2>/dev/null \
+      && [ -s "$dir/state/.watch.lock/pid-identity" ] \
+      && [ -e "$dir/state/.last-watcher-beat" ]; then
+      break
+    fi
+    sleep 0.05
+    n=$((n + 1))
+  done
+  [ "$n" -lt 100 ] || fail "real watcher never became ready: $(cat "$dir/out" 2>/dev/null || true)"
+  watch_pid=$(cat "$dir/state/.watch.lock/pid")
+  stop_owner=$(cat "$dir/state/.codex-stop.lock/pid")
+  await_arm_child "$stop_owner"
+  arm_pid=$AWAIT_ARM_PID
+  kill -STOP "$watch_pid"
+  kill -TERM "$stop_owner"
+  await_cleanup_wait "$stop_owner"
+  kill -KILL "$watch_pid"
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  expect_code 0 "$rc" 'cancelled Stop with TERM-resistant watcher returned continuation'
+  assert_absent "$dir/state/.watch.lock/pid" "hard-killed watcher retained its exact stale lock: $(cat "$dir/out") lock-pid=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true) watch-pid=$watch_pid arm-pid=$arm_pid"
+  [ -e "$dir/state/.unrelated.lock/pid" ] || fail 'hard-kill cleanup removed an unrelated live lock'
+  kill -0 "$STOP_PID_TWO" 2>/dev/null || fail 'hard-kill cleanup signalled an unrelated live owner'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'hard-killed Stop watcher clears only its authenticated stale lock'
 }
 
 test_expired_successor_requires_replacement_generation() {
@@ -1021,6 +1073,10 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   cleanup-cancellation)
     test_cleanup_cancellation_revokes_handling
+    exit 0
+    ;;
+  hard-kill-lock)
+    test_hard_killed_watcher_releases_only_its_stale_lock
     exit 0
     ;;
   afk-handoff)

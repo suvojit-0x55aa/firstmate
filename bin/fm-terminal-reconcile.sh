@@ -16,7 +16,7 @@
 #        fm-terminal-reconcile.sh reconcile | report
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
 #        fm-terminal-reconcile.sh captain-review-state <id> <receipt-key>
-#        fm-terminal-reconcile.sh captain-reviewed <id> <receipt-key> <captain-task-ids>
+#        fm-terminal-reconcile.sh captain-reviewed <id> <receipt-key> <captain-task-ids> <captain-cycles-json>
 #        fm-terminal-reconcile.sh predecessor-reviewed <id> <receipt-key> (--none | <task-id>...)
 #        fm-terminal-reconcile.sh backlog-reviewed <receipt-key>
 #        fm-terminal-reconcile.sh discard-reviewed <receipt-key>
@@ -177,6 +177,41 @@ EOF
     FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
     normalize-inventory "${args[@]}"
 }
+resolve_captain_calls() {
+  local origin=$1 input=$2 key
+  local -a args
+  args=("$origin")
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    valid "$key" || return 1
+    args+=("$key")
+  done <<EOF
+$(printf '%s\n' "$input" | tr ',' '\n')
+EOF
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
+    normalize-inventory-cycles "${args[@]}"
+}
+normalize_captain_calls() {
+  local keys=$1 calls=$2
+  printf '%s\n' "$calls" | jq -ce --arg keys "$keys" '
+    . as $calls
+    | (type == "array" and
+       all(type == "object" and
+           (.id | type == "string" and test("^[A-Za-z0-9._-]+$")) and
+           (.cycle | type == "string" and test("^[0-9a-f]{64}$"))) and
+       ((map(.id) | unique | sort) == ($keys | split(",") | map(select(length > 0)) | unique | sort))) as $valid
+    | if $valid then ($calls | sort_by(.id,.cycle) | unique_by([.id,.cycle])) else error("invalid captain-call cycles") end
+  '
+}
+metadata_captain_calls() {
+  local id=$1 keys=$2 calls
+  calls=$(field "$STATE/$id.meta" decision_call_cycles)
+  if [ -z "$calls" ] && [ -z "$keys" ]; then
+    calls='[]'
+  fi
+  normalize_captain_calls "$keys" "${calls:-null}"
+}
 origin_captain_obligation() {
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
@@ -194,19 +229,31 @@ receipt_captain_obligations() {
     def valid_keys: type == "string" and (split(",") | all(test("^[A-Za-z0-9._-]+$") or . == ""));
     def normalized_keys:
       split(",") | map(select(length > 0)) | unique | join(",");
+    def valid_calls($keys):
+      (($keys | split(",") | map(select(length > 0)) | unique | sort) as $key_list
+       | if ($key_list | length) == 0 then . == null or . == []
+         else type == "array" and
+           all(type == "object" and
+               (.id | type == "string" and test("^[A-Za-z0-9._-]+$")) and
+               (.cycle | type == "string" and test("^[0-9a-f]{64}$"))) and
+           ((map(.id) | unique | sort) == $key_list)
+         end);
     (if has("captain_obligations") then
        .captain_obligations
        | select(type == "array" and length > 0)
      else
        select((.captain_keys | type) == "string")
        | select(.origin_captain_cycle | valid_cycle)
-       | [{receipt:.key,origin_cycle:.origin_captain_cycle,captain_keys:.captain_keys,origin_resolved:false}]
+       | .captain_keys as $keys
+       | select((.captain_calls // null) | valid_calls($keys))
+       | [{receipt:.key,origin_cycle:.origin_captain_cycle,captain_keys:.captain_keys,captain_calls:(.captain_calls // []),origin_resolved:false}]
      end)
     | select(all(
         type == "object" and
         (.receipt | type == "string" and test("^[0-9a-f]{64}$")) and
         (.origin_cycle | valid_cycle) and
         (.captain_keys | valid_keys) and
+        (.captain_keys as $keys | (.captain_calls // null) | valid_calls($keys)) and
         (.origin_resolved | type == "boolean")
       ))
     | sort_by(.receipt,.origin_cycle)
@@ -216,12 +263,13 @@ receipt_captain_obligations() {
         receipt:.[0].receipt,
         origin_cycle:.[0].origin_cycle,
         captain_keys:(map(.captain_keys) | join(",") | normalized_keys),
+        captain_calls:([.[].captain_calls[]?] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)),
         origin_resolved:.[0].origin_resolved
       })
   ' "$record"
 }
 set_current_captain_obligation() {
-  local keys=$1 cycle=$2 reviewed=${3:-} obligations merged current_receipt
+  local keys=$1 calls=$2 cycle=$3 reviewed=${4:-} obligations merged merged_calls current_receipt
   case "$reviewed" in ''|true|false) ;; *) return 1 ;; esac
   valid_origin_captain_cycle "$cycle" || return 1
   current_receipt=$(jq -r .key "$RECORD") || return 1
@@ -233,7 +281,7 @@ set_current_captain_obligation() {
     obligations='[]'
   fi
   obligations=$(printf '%s\n' "$obligations" | jq -ce \
-    --arg receipt "$current_receipt" --arg keys "$keys" --arg cycle "$cycle" '
+    --arg receipt "$current_receipt" --arg keys "$keys" --argjson calls "$calls" --arg cycle "$cycle" '
       ([.[] | select(.receipt == $receipt and .origin_cycle == $cycle)] | length) as $matches
       | ([.[] | select(.receipt == $receipt and .origin_cycle == "none" and .origin_resolved == false)]) as $absence
       | ([.[] | select(.receipt != $receipt and .origin_cycle == "none" and .origin_resolved == false)] | length) as $foreign_absence
@@ -245,6 +293,7 @@ set_current_captain_obligation() {
             map(if .receipt == $receipt and .origin_cycle == $cycle
                 then if .origin_resolved == false
                      then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                       | .captain_calls=([.captain_calls[],$calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle))
                      else error("current captain obligation is already resolved") end
                 else . end)
           end
@@ -252,6 +301,7 @@ set_current_captain_obligation() {
           if $cycle != "none" and ($resolved_cycle | length) == 1 then
             map(if .origin_cycle == $cycle and .origin_resolved == true
                 then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                  | .captain_calls=([.captain_calls[],$calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle))
                 else . end)
           elif $cycle != "none" and ($resolved_cycle | length) > 1 then
             error("ambiguous resolved captain obligation")
@@ -261,23 +311,24 @@ set_current_captain_obligation() {
             ([($absence[0].captain_keys),$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(",")) as $transitioned_keys
             | map(if .receipt == $receipt and .origin_cycle == "none" and .origin_resolved == false
                   then .origin_resolved=true else . end)
-            + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$transitioned_keys,origin_resolved:false}]
+            + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$transitioned_keys,captain_calls:([($absence[0].captain_calls[]),$calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)),origin_resolved:false}]
           elif ($absence | length) > 1 then
             error("ambiguous origin absence obligation")
           else
-            . + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,origin_resolved:false}]
+            . + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,captain_calls:$calls,origin_resolved:false}]
           end
         else error("ambiguous current captain obligation") end
     ') || return 1
   merged=$(printf '%s\n' "$obligations" | jq -r 'map(.captain_keys) | join(",")') || return 1
   merged=$(normalize_captain_keys "$merged") || return 1
+  merged_calls=$(printf '%s\n' "$obligations" | jq -c '[.[].captain_calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') || return 1
   if [ -n "$reviewed" ]; then
-    put --arg keys "$merged" --arg cycle "$cycle" --argjson obligations "$obligations" \
+    put --arg keys "$merged" --argjson calls "$merged_calls" --arg cycle "$cycle" --argjson obligations "$obligations" \
       --argjson reviewed "$reviewed" \
-      '.captain_keys=$keys | .origin_captain_cycle=$cycle | .captain_obligations=$obligations | .decisions_reviewed=$reviewed'
+      '.captain_keys=$keys | .captain_calls=$calls | .origin_captain_cycle=$cycle | .captain_obligations=$obligations | .decisions_reviewed=$reviewed'
   else
-    put --arg keys "$merged" --arg cycle "$cycle" --argjson obligations "$obligations" \
-      '.captain_keys=$keys | .origin_captain_cycle=$cycle | .captain_obligations=$obligations'
+    put --arg keys "$merged" --argjson calls "$merged_calls" --arg cycle "$cycle" --argjson obligations "$obligations" \
+      '.captain_keys=$keys | .captain_calls=$calls | .origin_captain_cycle=$cycle | .captain_obligations=$obligations'
   fi
 }
 put() {
@@ -296,8 +347,8 @@ select_record_path() {
   [ ! -L "$RECORD" ] || return 1
 }
 supersede_prior_records() {
-  local id=$1 current=$RECORD candidate prior_keys prior_cycle prior_receipt prior_resolved
-  local inherited_keys current_cycle obligations prior_obligations entry existing
+  local id=$1 current=$RECORD candidate prior_keys prior_calls prior_cycle prior_receipt prior_resolved
+  local inherited_keys current_cycle obligations prior_obligations entry existing merged_calls
   local -a candidates=()
   jq -e '.captain_keys | type == "string"' "$current" >/dev/null || return 1
   inherited_keys=$(normalize_captain_keys "$(jq -r .captain_keys "$current")") || return 1
@@ -315,15 +366,16 @@ supersede_prior_records() {
     prior_keys=$(normalize_captain_keys "$(jq -r .captain_keys "$candidate")") || return 1
     inherited_keys=$(normalize_captain_keys "$inherited_keys,$prior_keys") || return 1
     prior_obligations=$(receipt_captain_obligations "$candidate") || return 1
-    while IFS='|' read -r prior_receipt prior_cycle prior_keys prior_resolved; do
+    while IFS='|' read -r prior_receipt prior_cycle prior_keys prior_resolved prior_calls; do
       [ -n "$prior_receipt" ] || continue
       existing=$(printf '%s\n' "$obligations" | jq -r --arg receipt "$prior_receipt" --arg cycle "$prior_cycle" \
         '[.[] | select(.receipt == $receipt and .origin_cycle == $cycle)] | length') || return 1
       if [ "$existing" -gt 0 ]; then
         obligations=$(printf '%s\n' "$obligations" | jq -ce \
-          --arg receipt "$prior_receipt" --arg cycle "$prior_cycle" --arg keys "$prior_keys" '
+          --arg receipt "$prior_receipt" --arg cycle "$prior_cycle" --arg keys "$prior_keys" --argjson calls "$prior_calls" '
           map(if .receipt == $receipt and .origin_cycle == $cycle
               then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                | .captain_calls=([.captain_calls[],$calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle))
               else . end)
         ') || return 1
         continue
@@ -339,24 +391,27 @@ supersede_prior_records() {
               terminal-ready "$id" --receipt "$prior_receipt" --origin-cycle "$prior_cycle" \
               --origin-resolved >/dev/null 2>&1; then
             obligations=$(printf '%s\n' "$obligations" | jq -ce \
-              --arg receipt "$prior_receipt" --arg cycle "$prior_cycle" --arg keys "$prior_keys" '
+              --arg receipt "$prior_receipt" --arg cycle "$prior_cycle" --arg keys "$prior_keys" --argjson calls "$prior_calls" '
               map(if .origin_cycle == $cycle and .origin_resolved == false
                   then .receipt=$receipt
                     | .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                    | .captain_calls=([.captain_calls[],$calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle))
                     | .origin_resolved=true
                   else . end)
             ') || return 1
           else
-            obligations=$(printf '%s\n' "$obligations" | jq -ce --arg cycle "$prior_cycle" --arg keys "$prior_keys" '
+            obligations=$(printf '%s\n' "$obligations" | jq -ce --arg cycle "$prior_cycle" --arg keys "$prior_keys" --argjson calls "$prior_calls" '
               map(if .origin_cycle == $cycle and .origin_resolved == false
                   then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                    | .captain_calls=([.captain_calls[],$calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle))
                   else . end)
             ') || return 1
           fi
         else
-          obligations=$(printf '%s\n' "$obligations" | jq -ce --arg cycle "$prior_cycle" --arg keys "$prior_keys" '
+          obligations=$(printf '%s\n' "$obligations" | jq -ce --arg cycle "$prior_cycle" --arg keys "$prior_keys" --argjson calls "$prior_calls" '
             map(if .origin_cycle == $cycle and .origin_resolved == false
                 then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                  | .captain_calls=([.captain_calls[],$calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle))
                 else . end)
           ') || return 1
         fi
@@ -368,17 +423,18 @@ supersede_prior_records() {
           terminal-ready "$id" --receipt "$prior_receipt" --origin-cycle "$prior_cycle" \
           --origin-resolved >/dev/null 2>&1 || return 1
       fi
-      entry=$(jq -cn --arg receipt "$prior_receipt" --arg cycle "$prior_cycle" --arg keys "$prior_keys" \
-        '{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,origin_resolved:true}') || return 1
+      entry=$(jq -cn --arg receipt "$prior_receipt" --arg cycle "$prior_cycle" --arg keys "$prior_keys" --argjson calls "$prior_calls" \
+        '{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,captain_calls:$calls,origin_resolved:true}') || return 1
       obligations=$(printf '%s\n' "$obligations" | jq -ce --argjson entry "$entry" '. + [$entry]') || return 1
     done <<EOF
-$(printf '%s\n' "$prior_obligations" | jq -r '.[] | [.receipt,.origin_cycle,.captain_keys,(.origin_resolved|tostring)] | join("|")')
+$(printf '%s\n' "$prior_obligations" | jq -c -r '.[] | [.receipt,.origin_cycle,.captain_keys,(.origin_resolved|tostring),(.captain_calls|tojson)] | join("|")')
 EOF
     candidates+=("$candidate")
   done
   RECORD=$current
-  put --arg keys "$inherited_keys" --argjson obligations "$obligations" \
-    '.captain_keys=$keys | .captain_obligations=$obligations' || return 1
+  merged_calls=$(printf '%s\n' "$obligations" | jq -c '[.[].captain_calls[]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') || return 1
+  put --arg keys "$inherited_keys" --argjson calls "$merged_calls" --argjson obligations "$obligations" \
+    '.captain_keys=$keys | .captain_calls=$calls | .captain_obligations=$obligations' || return 1
   for candidate in ${candidates[@]+"${candidates[@]}"}; do
     RECORD=$candidate
     put --arg key "$KEY" '.superseded_by=$key' || { RECORD=$current; return 1; }
@@ -467,7 +523,7 @@ select_predecessor_review_receipt() {
   PREDECESSOR_CURRENT_KEY=$current_key
 }
 select_record() {
-  local id=$1 meta="$STATE/$1.meta" tmp captain_keys origin_captain_cycle decisions_reviewed=false
+  local id=$1 meta="$STATE/$1.meta" tmp captain_keys captain_calls origin_captain_cycle decisions_reviewed=false
   local backlog_binding=false backlog_evidence=
   select_record_path "$id" || return $?
   if [ -e "$RECORD" ] || [ -L "$RECORD" ]; then
@@ -476,6 +532,7 @@ select_record() {
     return $?
   fi
   captain_keys=$(resolve_captain_keys "$id" "$(field "$meta" decision_keys)") || return 1
+  captain_calls=$(metadata_captain_calls "$id" "$captain_keys") || return 1
   origin_captain_cycle=$(origin_captain_obligation "$id") || return 1
   valid_origin_captain_cycle "$origin_captain_cycle" || return 1
   [ "$(field "$meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
@@ -487,9 +544,9 @@ select_record() {
     --arg incarnation_kind "$INCARNATION_KIND" --argjson backlog_binding "$backlog_binding" \
     --arg backlog_evidence "$backlog_evidence" \
     --arg kind "$(field "$meta" kind)" --arg mode "$(field "$meta" mode)" --arg pr "$(field "$meta" pr)" \
-    --arg captain_keys "$captain_keys" --arg origin_captain_cycle "$origin_captain_cycle" \
+    --arg captain_keys "$captain_keys" --argjson captain_calls "$captain_calls" --arg origin_captain_cycle "$origin_captain_cycle" \
     --argjson decisions_reviewed "$decisions_reviewed" \
-    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,incarnation_kind:$incarnation_kind,backlog_binding:$backlog_binding,backlog_attested:false,backlog_evidence:$backlog_evidence,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,superseded_by:"",captain_keys:$captain_keys,origin_captain_cycle:$origin_captain_cycle,captain_obligations:[{receipt:$key,origin_cycle:$origin_captain_cycle,captain_keys:$captain_keys,origin_resolved:false}],decisions_reviewed:$decisions_reviewed}' > "$tmp" \
+    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,incarnation_kind:$incarnation_kind,backlog_binding:$backlog_binding,backlog_attested:false,backlog_evidence:$backlog_evidence,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,superseded_by:"",captain_keys:$captain_keys,captain_calls:$captain_calls,origin_captain_cycle:$origin_captain_cycle,captain_obligations:[{receipt:$key,origin_cycle:$origin_captain_cycle,captain_keys:$captain_keys,captain_calls:$captain_calls,origin_resolved:false}],decisions_reviewed:$decisions_reviewed}' > "$tmp" \
     && mv "$tmp" "$RECORD" \
     && supersede_prior_records "$id"
 }
@@ -637,25 +694,25 @@ terminal_completed_exact() {
   delivery_proven
 }
 captain_calls_resolved() {
-  local id obligations obligation_receipt captain_keys captain_key origin_captain_cycle origin_resolved
+  local id obligations obligation_receipt captain_calls captain_call origin_captain_cycle origin_resolved
   jq -e '.decisions_reviewed == true' "$RECORD" >/dev/null || return 1
   id=$(jq -r .id "$RECORD") || return 1
   obligations=$(receipt_captain_obligations "$RECORD") || return 1
-  while IFS='|' read -r obligation_receipt origin_captain_cycle captain_keys origin_resolved; do
+  while IFS='|' read -r obligation_receipt origin_captain_cycle origin_resolved captain_calls; do
     [ -n "$obligation_receipt" ] || continue
     set -- "$id" --receipt "$obligation_receipt" --origin-cycle "$origin_captain_cycle"
     [ "$origin_resolved" != true ] || set -- "$@" --origin-resolved
-    while IFS= read -r captain_key; do
-      [ -n "$captain_key" ] || continue
-      set -- "$@" "$captain_key"
+    while IFS= read -r captain_call; do
+      [ -n "$captain_call" ] || continue
+      set -- "$@" "$captain_call"
     done <<EOF
-$(printf '%s\n' "$captain_keys" | tr ',' '\n')
+$(printf '%s\n' "$captain_calls" | jq -r '.[] | "\(.id):\(.cycle)"')
 EOF
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" \
       terminal-ready "$@" >/dev/null 2>&1 || return 1
   done <<EOF
-$(printf '%s\n' "$obligations" | jq -r '.[] | [.receipt,.origin_cycle,.captain_keys,(.origin_resolved|tostring)] | join("|")')
+$(printf '%s\n' "$obligations" | jq -r '.[] | [.receipt,.origin_cycle,(.origin_resolved|tostring),(.captain_calls|tojson)] | join("|")')
 EOF
 }
 reconcile_record() {
@@ -791,7 +848,8 @@ case "$mode" in
           :
         else
           captain_keys=$(resolve_captain_keys "$2" "$retirement_decision_keys") || exit 1
-          set_current_captain_obligation "$captain_keys" "$origin_captain_cycle" || exit 1
+          captain_calls=$(metadata_captain_calls "$2" "$captain_keys") || exit 1
+          set_current_captain_obligation "$captain_keys" "$captain_calls" "$origin_captain_cycle" || exit 1
           put --arg raw "$retirement_decision_keys" --argjson reviewed "$decisions_reviewed" \
             '.decisions_reviewed=$reviewed | .retirement_prepared=true | .retirement_decision_keys=$raw' \
             || exit 1
@@ -808,7 +866,8 @@ case "$mode" in
           captain_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
         else
           captain_keys=$(resolve_captain_keys "$2" "$retirement_decision_keys") || exit 1
-          set_current_captain_obligation "$captain_keys" "$origin_captain_cycle" || exit 1
+          captain_calls=$(metadata_captain_calls "$2" "$captain_keys") || exit 1
+          set_current_captain_obligation "$captain_keys" "$captain_calls" "$origin_captain_cycle" || exit 1
         fi
         case "$3" in
           normal) put --argjson reviewed "$decisions_reviewed" \
@@ -928,12 +987,13 @@ case "$mode" in
   captain-review-state)
     [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
     select_captain_review_receipt "$2" "$3" || exit 1
-    jq -c '{captain_keys:(.captain_keys // ""),origin_captain_cycle:(.origin_captain_cycle // ""),decisions_reviewed:(.decisions_reviewed == true),complete:(.backlog == true or .refill == true or .reviewed == true)}' \
+    jq -c '{captain_keys:(.captain_keys // ""),captain_calls:(.captain_calls // null),origin_captain_cycle:(.origin_captain_cycle // ""),decisions_reviewed:(.decisions_reviewed == true),complete:(.backlog == true or .refill == true or .reviewed == true)}' \
       "$RECORD" ;;
   captain-reviewed)
-    [ "$#" -eq 4 ] && valid "$2" && valid "$3" || exit 2
+    [ "$#" -eq 5 ] && valid "$2" && valid "$3" || exit 2
     select_captain_review_receipt "$2" "$3" || exit 1
     captain_keys=$(resolve_captain_keys "$2" "$4") || exit 1
+    captain_calls=$(normalize_captain_calls "$captain_keys" "$5") || exit 1
     origin_captain_cycle=$(origin_captain_obligation "$2") || exit 1
     valid_origin_captain_cycle "$origin_captain_cycle" || exit 1
     previous_keys=$(normalize_captain_keys "$(jq -r '.captain_keys // ""' "$RECORD")") || exit 1
@@ -943,6 +1003,11 @@ case "$mode" in
         printf 'Terminal receipt %s is complete; keep its captain inventory unchanged and register new calls against active originating work through fm-captain-hold.sh hold/complete.\n' "$3" >&2
         exit 1
       fi
+      previous_calls=$(jq -c '.captain_calls // null' "$RECORD") || exit 1
+      [ "$previous_calls" = "$captain_calls" ] || {
+        printf 'Terminal receipt %s is complete; keep its captain hold-cycle identities unchanged.\n' "$3" >&2
+        exit 1
+      }
       if ! valid_origin_captain_cycle "$previous_origin_captain_cycle" \
         || [ "$previous_origin_captain_cycle" != "$origin_captain_cycle" ]; then
         printf 'Terminal receipt %s is complete; keep its origin captain-cycle evidence unchanged.\n' "$3" >&2
@@ -953,12 +1018,12 @@ case "$mode" in
     combined_keys=$(normalize_captain_keys "$previous_keys,$captain_keys") || exit 1
     [ "$combined_keys" = "$captain_keys" ] || exit 1
     if [ "$(jq -r '.decisions_reviewed // false' "$RECORD")" = true ]; then
-      set_current_captain_obligation "$captain_keys" "$origin_captain_cycle"
+      set_current_captain_obligation "$captain_keys" "$captain_calls" "$origin_captain_cycle"
       exit
     fi
     jq -e '.backlog != true and .refill != true and .reviewed != true' \
       "$RECORD" >/dev/null || exit 1
-    set_current_captain_obligation "$captain_keys" "$origin_captain_cycle" true ;;
+    set_current_captain_obligation "$captain_keys" "$captain_calls" "$origin_captain_cycle" true ;;
   predecessor-reviewed)
     [ "$#" -ge 4 ] && valid "$2" && valid "$3" || exit 2
     predecessor_id=$2
@@ -977,6 +1042,7 @@ case "$mode" in
     select_predecessor_review_receipt "$predecessor_id" "$predecessor_key" || exit 1
     previous_keys=$(normalize_captain_keys "$(jq -r '.captain_keys // ""' "$RECORD")") || exit 1
     captain_keys=$(resolve_captain_keys "$predecessor_id" "$predecessor_supplied") || exit 1
+    captain_calls=$(resolve_captain_calls "$predecessor_id" "$captain_keys") || exit 1
     combined_keys=$(normalize_captain_keys "$previous_keys,$captain_keys") || exit 1
     [ "$combined_keys" = "$captain_keys" ] || exit 1
     predecessor_superseded=$(jq -r '.superseded_by // ""' "$RECORD") || exit 1
@@ -987,7 +1053,7 @@ case "$mode" in
     fi
     origin_captain_cycle=$(jq -r '.origin_captain_cycle // ""' "$RECORD") || exit 1
     valid_origin_captain_cycle "$origin_captain_cycle" || exit 1
-    set_current_captain_obligation "$captain_keys" "$origin_captain_cycle" true || exit 1
+    set_current_captain_obligation "$captain_keys" "$captain_calls" "$origin_captain_cycle" true || exit 1
     select_record "$predecessor_id" || exit 1
     [ "$KEY" = "$PREDECESSOR_CURRENT_KEY" ] || exit 1 ;;
   discard-reviewed)

@@ -1576,6 +1576,62 @@ EOF
   test_unknown_origin_obligation_recovers_through_captain_owner
   pass 'archived captain answers and releases retain exact cycle-aware terminal evidence'
 }
+
+run_reused_captain_call_receipt_case() {
+  local shape=$1 id="receipt-cycle-$1" call="receipt-cycle-$1-call" key record filler backlog
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$call"
+  captain complete "$id" "$call" >/dev/null
+  case "$shape" in
+    unresolved-reused) tx 'done' "$call" --no-prune --json >/dev/null ;;
+    answered-reused|legacy-missing) answer_captain_task "$call" ;;
+    *) fail "unknown reused captain-call receipt shape: $shape" ;;
+  esac
+  archive_done_task "$call" "$id-call-archive"
+  if [ "$shape" != legacy-missing ]; then
+    tx add "$call" "$call replacement" --json >/dev/null
+    hold_captain_task "$call"
+    answer_captain_task "$call"
+  fi
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  key=$("$owner" receipt-key "$id")
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  jq -e --arg call "$call" '
+    .captain_calls == [.captain_calls[0]] and
+    .captain_calls[0].id == $call and
+    (.captain_calls[0].cycle | test("^[0-9a-f]{64}$"))
+  ' "$record" >/dev/null || fail "$shape receipt omitted the authenticated captain hold cycle"
+  if [ "$shape" = legacy-missing ]; then
+    jq 'del(.captain_calls) | .captain_obligations |= map(del(.captain_calls))' \
+      "$record" > "$record.tmp"
+    mv "$record.tmp" "$record"
+  fi
+  rm "$FM_HOME/state/$id.meta"
+  "$owner" reconcile >/dev/null
+  "$owner" reconcile >/dev/null
+  backlog=$(jq -r .backlog "$record")
+  case "$shape" in
+    answered-reused)
+      [ "$backlog" = true ] || fail 'the exact answered archived hold cycle was not accepted'
+      ;;
+    unresolved-reused)
+      [ "$backlog" = false ] || fail 'a new same-id answer substituted for the archived unresolved call'
+      ;;
+    legacy-missing)
+      [ "$backlog" = false ] || fail 'a receipt missing captain hold-cycle identity advanced completion'
+      ;;
+  esac
+}
+
+test_receipt_inventory_is_bound_to_hold_cycles() {
+  run_reused_captain_call_receipt_case unresolved-reused
+  run_reused_captain_call_receipt_case answered-reused
+  run_reused_captain_call_receipt_case legacy-missing
+  pass 'terminal receipts bind captain inventory to authenticated hold cycles'
+}
 test_merge_observation_stays_bound_to_exact_receipt() {
   local id=merge-observed-reuse p1=https://github.com/o/r/pull/101 p2=https://github.com/o/r/pull/202
   local p3=https://github.com/o/r/pull/303 key_a key_b record_a record_b before_b current_key
@@ -2580,6 +2636,10 @@ EOF
     ;;
   archived-captain-answer)
     test_archived_captain_answers_remain_exact_terminal_evidence
+    exit
+    ;;
+  captain-call-cycle-identity)
+    test_receipt_inventory_is_bound_to_hold_cycles
     exit
     ;;
   merge-observed-identity)

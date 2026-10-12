@@ -28,6 +28,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> [--receipt <receipt-key>] (--none | <task-id>...)
 #   fm-captain-hold.sh normalize-inventory <origin-id> [<task-id>...]
+#   fm-captain-hold.sh normalize-inventory-cycles <origin-id> [<task-id>...]
 #   fm-captain-hold.sh origin-obligation <origin-id>
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [--origin-cycle <cycle|none>] [--origin-resolved] [<captain-task-id>...]
@@ -287,6 +288,63 @@ archived_task_show() {  # <id>
   ' "$1" "$archive"
 }
 
+archived_task_show_cycle() {  # <id> <hold-cycle>
+  local archive="$DATA/done-archive.md"
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 3
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    use open qw(:encoding(UTF-8));
+    my ($wanted, $cycle, $path) = @ARGV;
+    open my $fh, "<", $path or exit 3;
+    my (@matches, $current_id, $tail, @body);
+    my $finish = sub {
+      return unless defined $current_id;
+      if ($current_id eq $wanted) {
+        pop @body while @body && $body[-1] eq "";
+        my $body = join("\n", @body);
+        my ($found);
+        if ($body =~ /^Captain hold opened by fm-captain-hold\.\nHold cycle: ([0-9a-f]{64})\nCaptain hold marker end\./) {
+          $found = $1;
+        } elsif ($body =~ /^Resolution recorded by fm-(?:captain|decision)-hold\.\n(?:(?!\nCaptain decision:\n)[\s\S])*?^Hold cycle: ([0-9a-f]{64})$/m) {
+          $found = $1;
+        }
+        push @matches, [$tail, $body] if defined $found && $found eq $cycle;
+      }
+      undef $current_id;
+      $tail = "";
+      @body = ();
+    };
+    while (my $line = <$fh>) {
+      $line =~ s/\r?\n\z//;
+      if ($line =~ /^- \[x\] ([A-Za-z0-9][A-Za-z0-9._-]*) - (.*)\z/) {
+        $finish->();
+        ($current_id, $tail) = ($1, $2);
+      } elsif ($line =~ /^## Archived /) {
+        $finish->();
+      } elsif (defined $current_id) {
+        if ($line =~ /^  (.*)\z/) {
+          push @body, $1;
+        } elsif ($line eq "") {
+          push @body, "";
+        }
+      }
+    }
+    $finish->();
+    exit 3 unless @matches;
+    exit 1 unless @matches == 1;
+    my ($matched_tail, $matched_body) = @{$matches[0]};
+    my @hold_kinds = ($matched_tail =~ /(?:^|\s)\(hold-kind:\s*([^)]+)\)/g);
+    exit 1 if @hold_kinds > 1;
+    exit 1 if @hold_kinds == 1 && $hold_kinds[0] ne "captain";
+    print "  id: $wanted\n";
+    print "  title: -\n";
+    print "  state: done\n";
+    print "  hold_kind: ", (@hold_kinds ? "captain" : "-"), "\n";
+    print "  body: ", JSON::PP->new->encode($matched_body), "\n";
+  ' "$1" "$2" "$archive"
+}
+
 task_evidence_show() {  # <id>
   local id=$1 show rc
   if show=$(task_show "$id"); then
@@ -310,6 +368,29 @@ task_evidence_show() {  # <id>
   fi
   [ "$rc" -eq 3 ] || return 1
   printf '%s\n' "$show"
+}
+
+task_cycle_evidence_show() {  # <id> <hold-cycle>
+  local id=$1 cycle=$2 active='' archived='' active_match=0 archived_match=0 body rc
+  if active=$(task_show "$id"); then
+    body=$(show_field "$active" body)
+    [ "$(current_hold_cycle "$body" || true)" != "$cycle" ] || active_match=1
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || return 1
+  fi
+  if archived=$(archived_task_show_cycle "$id" "$cycle"); then
+    archived_match=1
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || return 1
+  fi
+  [ $((active_match + archived_match)) -eq 1 ] || return 1
+  if [ "$active_match" -eq 1 ]; then
+    printf '%s\n' "$active"
+  else
+    printf '%s\n' "$archived"
+  fi
 }
 
 manual_task_show() {  # <id>
@@ -1135,8 +1216,9 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta receipt='' receipt_state='' receipt_previous='' receipt_reviewed=false
-  local receipt_complete=false previous='' supplied='' keys='' entry key status_file raw_open has_meta=0 transfer_rc origin_rc
+  local origin=${1:-} meta receipt='' receipt_state='' receipt_previous='' receipt_calls='[]' receipt_reviewed=false
+  local receipt_complete=false previous='' previous_calls='' supplied='' supplied_keys='' supplied_calls='[]' calls='[]'
+  local keys='' entry key status_file raw_open has_meta=0 transfer_rc origin_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1184,6 +1266,11 @@ command_complete() {
   fi
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
+    previous_calls=$(meta_value "$meta" decision_call_cycles)
+    if ! inventory_cycles_valid_for_keys "$previous" "${previous_calls:-null}"; then
+      previous_calls=$(normalized_inventory_cycles "$origin" "$previous") \
+        || fail "cannot authenticate the previously reviewed captain-call cycles for $origin"
+    fi
   fi
   if [ -n "$receipt" ]; then
     receipt_state=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
@@ -1192,6 +1279,10 @@ command_complete() {
       || fail "cannot authenticate terminal receipt $receipt for captain-call review"
     receipt_previous=$(printf '%s\n' "$receipt_state" | jq -r '.captain_keys') \
       || fail "cannot read preserved captain-call inventory from terminal receipt $receipt"
+    receipt_calls=$(printf '%s\n' "$receipt_state" | jq -c '.captain_calls') \
+      || fail "cannot read preserved captain-call cycles from terminal receipt $receipt"
+    inventory_cycles_valid_for_keys "$receipt_previous" "$receipt_calls" \
+      || fail "terminal receipt $receipt has no authenticated captain-call cycle inventory"
     receipt_reviewed=$(printf '%s\n' "$receipt_state" | jq -r '.decisions_reviewed') \
       || fail "cannot read captain-call review state from terminal receipt $receipt"
     receipt_complete=$(printf '%s\n' "$receipt_state" | jq -r '.complete') \
@@ -1201,10 +1292,24 @@ command_complete() {
       fail "reviewed inventory must include every captain task preserved by terminal receipt $receipt"
     fi
     previous=$(sorted_key_union "$previous" "$receipt_previous")
+    previous_calls=$(printf '%s\n%s\n' "${previous_calls:-[]}" "$receipt_calls" | jq -sc \
+      '[.[][]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') \
+      || fail "cannot combine preserved captain-call cycles"
   fi
-  keys=$(normalized_inventory "$origin" "$(sorted_key_union "$previous" "$supplied")")
+  supplied_keys=$(normalized_inventory "$origin" "$(sorted_key_union '' "$supplied")")
+  supplied_calls=$(normalized_inventory_cycles "$origin" "$supplied_keys") \
+    || fail "cannot authenticate the reviewed captain-call cycles for $origin"
+  keys=$(sorted_key_union "$previous" "$supplied_keys")
+  calls=$(printf '%s\n%s\n' "${previous_calls:-[]}" "$supplied_calls" | jq -sc \
+    '[.[][]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') \
+    || fail "cannot normalize the reviewed captain-call cycles for $origin"
+  inventory_cycles_valid_for_keys "$keys" "$calls" \
+    || fail "reviewed captain-call cycles do not match the normalized inventory for $origin"
   if [ "$receipt_complete" = true ] && [ "$keys" != "$receipt_previous" ]; then
     fail "terminal receipt $receipt is complete; keep its captain inventory unchanged and register new calls against active originating work through fm-captain-hold.sh hold/complete"
+  fi
+  if [ "$receipt_complete" = true ] && [ "$calls" != "$receipt_calls" ]; then
+    fail "terminal receipt $receipt is complete; keep its captain hold-cycle identities unchanged"
   fi
   if [ -n "$keys" ]; then
     while IFS= read -r entry; do
@@ -1222,8 +1327,9 @@ EOF
   fi
 
   if [ "$has_meta" = 1 ]; then
-    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ] \
+      || [ "$(meta_value "$meta" decision_call_cycles)" != "$calls" ]; then
+      printf 'decisions_reviewed=1\ndecision_keys=%s\ndecision_call_cycles=%s\n' "$keys" "$calls" >> "$meta"
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
@@ -1232,7 +1338,7 @@ EOF
   if [ -n "$receipt" ]; then
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
-      captain-reviewed "$origin" "$receipt" "$keys" >/dev/null \
+      captain-reviewed "$origin" "$receipt" "$keys" "$calls" >/dev/null \
       || fail "cannot persist the reviewed captain-call inventory to terminal receipt $receipt"
   fi
 
@@ -1268,6 +1374,50 @@ command_normalize_inventory() {
     supplied="${supplied}${supplied:+ }$entry"
   done
   normalized_inventory "$origin" "$(sorted_key_union '' "$supplied")"
+}
+
+normalized_inventory_cycles() {  # <origin> <comma-list>
+  local origin=$1 input=$2 entry id show body cycle calls='[]'
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    validate_slug task-id "$entry"
+    id=$(resolve_entry "$origin" "$entry") || return 1
+    verify_hold_durable "$id"
+    show=$(task_evidence_show "$id") || return 1
+    body=$(show_field "$show" body)
+    cycle=$(current_hold_cycle "$body" || true)
+    [ -n "$cycle" ] || fail "captain-held task $id has no authenticated hold-cycle identity"
+    calls=$(printf '%s\n' "$calls" | jq -c --arg id "$id" --arg cycle "$cycle" \
+      '. + [{id:$id,cycle:$cycle}] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') \
+      || return 1
+  done <<EOF
+$(printf '%s\n' "$input" | tr ',' '\n')
+EOF
+  printf '%s\n' "$calls"
+}
+
+inventory_cycles_valid_for_keys() {  # <comma-list> <json-array>
+  printf '%s\n' "$2" | jq -e --arg keys "$1" '
+    type == "array" and
+    all(type == "object" and
+        (.id | type == "string" and test("^[A-Za-z0-9._-]+$")) and
+        (.cycle | type == "string" and test("^[0-9a-f]{64}$"))) and
+    ((map(.id) | unique | sort) == ($keys | split(",") | map(select(length > 0)) | unique | sort))
+  ' >/dev/null
+}
+
+command_normalize_inventory_cycles() {
+  local origin=${1:-} supplied='' entry
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  shift
+  require_task_reader
+  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  for entry in "$@"; do
+    validate_slug task-id "$entry"
+    supplied="${supplied}${supplied:+,}$entry"
+  done
+  normalized_inventory_cycles "$origin" "$supplied"
 }
 
 command_verify() {
@@ -1338,7 +1488,7 @@ command_origin_obligation() {
 }
 
 command_terminal_ready() {
-  local origin=${1:-} receipt='' origin_cycle='' origin_resolved=0 entry id resolved seen show state hold_kind body rc cycle
+  local origin=${1:-} receipt='' origin_cycle='' origin_resolved=0 entry id resolved seen show state hold_kind body rc cycle expected_cycle
   local -a resolved_ids=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
@@ -1397,17 +1547,36 @@ command_terminal_ready() {
   fi
   resolved_ids+=("$origin")
   for entry in "$@"; do
-    validate_slug captain-task-id "$entry"
-    id=$(resolve_entry "$origin" "$entry") || return 1
+    expected_cycle=''
+    case "$entry" in
+      *:*)
+        id=${entry%%:*}
+        expected_cycle=${entry#*:}
+        validate_slug captain-task-id "$id"
+        [ "${#expected_cycle}" -eq 64 ] || return 1
+        case "$expected_cycle" in *[!0-9a-f]*) return 1 ;; esac
+        ;;
+      *)
+        [ -z "$receipt" ] || return 1
+        validate_slug captain-task-id "$entry"
+        id=$(resolve_entry "$origin" "$entry") || return 1
+        ;;
+    esac
     seen=0
     for resolved in "${resolved_ids[@]}"; do
-      [ "$resolved" != "$id" ] || seen=1
+      [ "$resolved" != "$id:$expected_cycle" ] || seen=1
     done
-    [ "$seen" = 1 ] || resolved_ids+=("$id")
+    [ "$seen" = 1 ] || resolved_ids+=("$id:$expected_cycle")
   done
-  for id in "${resolved_ids[@]}"; do
-    [ "$id" != "$origin" ] || continue
-    show=$(task_evidence_show "$id") || return 1
+  for entry in "${resolved_ids[@]}"; do
+    [ "$entry" != "$origin" ] || continue
+    id=${entry%%:*}
+    expected_cycle=${entry#*:}
+    if [ -n "$expected_cycle" ]; then
+      show=$(task_cycle_evidence_show "$id" "$expected_cycle") || return 1
+    else
+      show=$(task_evidence_show "$id") || return 1
+    fi
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
@@ -1545,6 +1714,7 @@ case "${1:-}" in
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
   normalize-inventory) shift; command_normalize_inventory "$@" ;;
+  normalize-inventory-cycles) shift; command_normalize_inventory_cycles "$@" ;;
   origin-obligation) shift; command_origin_obligation "$@" ;;
   verify) shift; command_verify "$@" ;;
   terminal-ready) shift; command_terminal_ready "$@" ;;
