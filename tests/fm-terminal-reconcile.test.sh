@@ -1294,6 +1294,59 @@ run_archived_captain_answer_case() {
   ARCHIVED_CALL=$call
 }
 
+test_corrupt_captain_answer_blocks_receipt_completion() {
+  local id=corrupt-answer-receipt call key record
+  local valid_body="$FM_HOME/$id.valid" invalid_body="$FM_HOME/$id.invalid"
+  local valid_cycle invalid_cycle valid_digest invalid_digest before_task
+  call="$id-call"
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$call"
+  captain complete "$id" "$call" >/dev/null
+  answer_captain_task "$call"
+  tx show "$call" --full | sed -n 's/^  body: //p' | jq -r . > "$valid_body"
+  sed "s/Captain answered $call\./Captain answer text was altered./" \
+    "$valid_body" > "$invalid_body"
+  cmp -s "$valid_body" "$invalid_body" \
+    && fail 'corrupt-answer fixture did not alter the serialized decision text'
+  valid_cycle=$(sed -n 's/^Hold cycle: //p' "$valid_body")
+  invalid_cycle=$(sed -n 's/^Hold cycle: //p' "$invalid_body")
+  valid_digest=$(sed -n 's/^Decision digest: //p' "$valid_body")
+  invalid_digest=$(sed -n 's/^Decision digest: //p' "$invalid_body")
+  [ -n "$valid_cycle" ] && [ "$invalid_cycle" = "$valid_cycle" ] \
+    || fail 'corrupt-answer fixture did not retain the genuine hold cycle'
+  [ -n "$valid_digest" ] && [ "$invalid_digest" = "$valid_digest" ] \
+    || fail 'corrupt-answer fixture did not retain the stale decision digest'
+
+  "$owner" merged "$id" https://github.com/o/r/pull/1 >/dev/null
+  "$owner" retired "$id" normal >/dev/null
+  rm "$FM_HOME/state/$id.meta"
+  key=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == ""))|.key' \
+    "$FM_HOME/state/terminal-delivery/"*.json)
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  tx update "$call" --body-file "$invalid_body" --archive-body >/dev/null
+  before_task=$(tx show "$id" --full)
+
+  "$owner" reconcile >/dev/null
+  [ "$(jq -r .backlog "$record")" = false ] \
+    || fail 'corrupt captain answer advanced receipt completion'
+  [ "$(tx show "$id" --full)" = "$before_task" ] \
+    || fail 'corrupt captain answer changed backlog work custody'
+  jq -e '.retired == true and ((.superseded_by // "") == "")' "$record" >/dev/null \
+    || fail 'corrupt captain answer lost active receipt custody'
+
+  tx update "$call" --body-file "$valid_body" --archive-body >/dev/null
+  "$owner" reconcile >/dev/null
+  "$owner" reconcile >/dev/null
+  [ "$(jq -r .backlog "$record")" = true ] \
+    || fail 'restored authentic captain answer did not complete its receipt'
+  assert_contains "$(tx show "$id")" 'state: done' \
+    'restored authentic captain answer did not advance ordinary backlog progress'
+  pass 'receipt completion authenticates exact captain answer text'
+}
+
 archive_done_task() {
   local id=$1 prefix=$2 filler
   for filler in $(seq 1 11); do
@@ -2679,6 +2732,12 @@ EOF
     ;;
   archived-captain-answer)
     test_archived_captain_answers_remain_exact_terminal_evidence
+    exit
+    ;;
+  receipt-resolution-authentication)
+    test_corrupt_captain_answer_blocks_receipt_completion
+    run_archived_captain_answer_case auto
+    run_archived_captain_answer_case manual
     exit
     ;;
   captain-call-cycle-identity)

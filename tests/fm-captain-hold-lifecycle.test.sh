@@ -120,7 +120,7 @@ archive_done_task_in_home() {  # <home> <task-id> <prefix>
   local home=$1 id=$2 prefix=$3 filler
   for filler in $(seq 1 11); do
     tasks_in "$home" add "$prefix-filler-$filler" "$prefix filler $filler" >/dev/null
-    tasks_in "$home" done "$prefix-filler-$filler" >/dev/null
+    tasks_in "$home" 'done' "$prefix-filler-$filler" >/dev/null
   done
   if tasks_in "$home" show "$id" --full >/dev/null 2>&1; then
     fail "$id did not cross the configured Done archive boundary"
@@ -168,7 +168,7 @@ run_reused_cycle_teardown_refusal() {  # <backend>
   run_captain "$home" complete "$id" "$call" >/dev/null
   saved_calls=$(sed -n 's/^decision_call_cycles=//p' "$meta" | tail -1)
   [ -n "$saved_calls" ] || fail "$backend reuse fixture omitted the original cycle"
-  tasks_in "$home" done "$call" --no-prune >/dev/null
+  tasks_in "$home" 'done' "$call" --no-prune >/dev/null
   archive_done_task_in_home "$home" "$call" "$id-archive"
   tasks_in "$home" add "$call" "$call replacement" >/dev/null
   run_captain "$home" hold "$call" --reason "captain replacement cycle pending" >/dev/null
