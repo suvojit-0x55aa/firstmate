@@ -56,6 +56,23 @@ RECONCILE_CANDIDATES=
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 valid() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1;; esac; }
 field() { sed -n "s/^$2=//p" "$1" | tail -1; }
+current_metadata_incarnation() {
+  local meta=$1 spawn_gen tasktmp worktree window
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    return 3
+  fi
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 1
+  spawn_gen=$(field "$meta" spawn_gen)
+  if [ -n "$spawn_gen" ]; then
+    INCARNATION=$spawn_gen
+  else
+    tasktmp=$(field "$meta" tasktmp)
+    worktree=$(field "$meta" worktree)
+    window=$(field "$meta" window)
+    INCARNATION="$tasktmp|$worktree|$window"
+  fi
+  [ -n "$INCARNATION" ] && [ "$INCARNATION" != '||' ]
+}
 normalize_captain_keys() {
   local input=$1 key normalized=''
   while IFS= read -r key; do
@@ -195,9 +212,7 @@ put() {
 select_record_path() {
   local id=$1 meta="$STATE/$1.meta"
   valid "$id" || return 2
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  INCARNATION=$(field "$meta" spawn_gen)
-  [ -n "$INCARNATION" ] || INCARNATION="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
+  current_metadata_incarnation "$meta" || return 1
   KEY=$(printf '%s' "$id|$INCARNATION" | shasum -a 256 | awk '{print $1}')
   RECORD="$DIR/$KEY.json"
   [ ! -L "$RECORD" ] || return 1
@@ -303,7 +318,7 @@ receipt_path_authenticated() {
   case "$name" in *.json) key=${name%.json} ;; *) return 1 ;; esac
   valid "$key" || return 1
   jq -e --arg key "$key" \
-    '.schema == "fm-terminal-delivery.v1" and .key == $key and (.id | type == "string" and length > 0) and (.incarnation | type == "string" and length > 0)' \
+    '.schema == "fm-terminal-delivery.v1" and .key == $key and (.id | type == "string" and length > 0) and (.incarnation | type == "string" and length > 0 and . != "||")' \
     "$candidate" >/dev/null || return 1
   id=$(jq -r .id "$candidate")
   incarnation=$(jq -r .incarnation "$candidate")
@@ -321,20 +336,20 @@ select_authenticated_receipt_key() {
   receipt_path_authenticated "$RECORD"
 }
 select_captain_review_receipt() {
-  local id=$1 key=$2 meta="$STATE/$1.meta" incarnation expected candidate active_key= count=0
+  local id=$1 key=$2 meta="$STATE/$1.meta" incarnation expected candidate active_key= count=0 metadata_status
   select_authenticated_receipt_key "$key" || return $?
   jq -e --arg id "$id" \
     '.id == $id and .incarnation != "||" and .retired == true and .discarded != true and ((.superseded_by // "") == "")' \
     "$RECORD" >/dev/null || return 1
-  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
-    incarnation=$(field "$meta" spawn_gen)
-    [ -n "$incarnation" ] || incarnation="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
-    [ -n "$incarnation" ] && [ "$incarnation" != '||' ] || return 1
+  if current_metadata_incarnation "$meta"; then
+    incarnation=$INCARNATION
     expected=$(printf '%s' "$id|$incarnation" | shasum -a 256 | awk '{print $1}')
     [ "$expected" = "$key" ] || return 1
     return 0
+  else
+    metadata_status=$?
   fi
-  [ ! -e "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$metadata_status" -eq 3 ] || return 1
   for candidate in "$DIR"/*.json; do
     receipt_path_authenticated "$candidate" || continue
     jq -e --arg id "$id" \
@@ -348,7 +363,6 @@ select_captain_review_receipt() {
 }
 select_predecessor_review_receipt() {
   local id=$1 key=$2 meta="$STATE/$1.meta" current current_key superseded
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   select_record_path "$id" || return $?
   current=$RECORD
   current_key=$KEY
@@ -448,12 +462,16 @@ select_merge_observation_record() {
   KEY=${KEY%.json}
 }
 record_matches_current_incarnation() {
-  local id meta incarnation
+  local id meta incarnation metadata_status
   id=$(jq -r .id "$RECORD") || return 1
   meta="$STATE/$id.meta"
-  [ -f "$meta" ] || return 0
-  incarnation=$(field "$meta" spawn_gen)
-  [ -n "$incarnation" ] || incarnation="$(field "$meta" tasktmp)|$(field "$meta" worktree)|$(field "$meta" window)"
+  if current_metadata_incarnation "$meta"; then
+    incarnation=$INCARNATION
+  else
+    metadata_status=$?
+    [ "$metadata_status" -eq 3 ] && return 0
+    return 1
+  fi
   [ "$incarnation" = "$(jq -r .incarnation "$RECORD")" ]
 }
 delivery_proven() {

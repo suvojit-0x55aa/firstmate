@@ -2002,6 +2002,122 @@ test_ambiguous_predecessor_identity_fails_closed() {
     || fail 'ambiguous predecessor recovery mutated retained evidence'
   pass 'predecessor recovery rejects ambiguous authenticated identity'
 }
+prepare_terminal_identity_case() {
+  local id=$1
+  make_task "$id"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  "$owner" receipt-key "$id"
+}
+assert_invalid_current_metadata_blocks_completion() {
+  local id=$1 key=$2 label=$3 rc=0
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+  "$owner" reconcile
+  [ "$(jq -r '.backlog|tostring' "$FM_HOME/state/terminal-delivery/$key.json")" = false ] \
+    || fail "$label advanced automatic backlog completion"
+  printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
+  set +e
+  "$owner" manual-complete "$key" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "$label advanced manual backlog completion"
+  jq -e '.backlog == false and .refill == false' \
+    "$FM_HOME/state/terminal-delivery/$key.json" >/dev/null \
+    || fail "$label mutated backlog or refill state"
+  assert_contains "$(tx show "$id")" 'state: in_flight' "$label completed the reused task id"
+}
+test_terminal_metadata_identity_boundary() {
+  local id key target empty_key rc=0
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+
+  id=empty-legacy-selection
+  tx add "$id" "$id" --start --json >/dev/null
+  printf 'tasktmp=\nworktree=\nwindow=\nkind=ship\nmode=no-mistakes\n' > "$FM_HOME/state/$id.meta"
+  set +e
+  "$owner" observe "$id" done >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'empty legacy identity created a terminal receipt'
+  [ -z "$(find "$FM_HOME/state/terminal-delivery" -type f -name '*.json' -exec jq -r --arg id "$id" 'select(.id==$id)|.key' {} +)" ] \
+    || fail 'empty legacy identity left durable terminal authority'
+
+  id=truncated-selection
+  tx add "$id" "$id" --start --json >/dev/null
+  printf 'kind=ship\nmode=no-mistakes\n' > "$FM_HOME/state/$id.meta"
+  set +e
+  "$owner" current-incarnation "$id" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'truncated metadata produced a current incarnation'
+
+  id=valid-meta-symlink
+  key=$(prepare_terminal_identity_case "$id")
+  target="$FM_HOME/state/$id.meta.target"
+  mv "$FM_HOME/state/$id.meta" "$target"
+  ln -s "$target" "$FM_HOME/state/$id.meta"
+  assert_invalid_current_metadata_blocks_completion "$id" "$key" 'valid metadata symlink'
+
+  id=broken-meta-symlink
+  key=$(prepare_terminal_identity_case "$id")
+  rm "$FM_HOME/state/$id.meta"
+  ln -s "$FM_HOME/state/missing-$id.meta" "$FM_HOME/state/$id.meta"
+  assert_invalid_current_metadata_blocks_completion "$id" "$key" 'broken metadata symlink'
+
+  id=nonregular-meta
+  key=$(prepare_terminal_identity_case "$id")
+  rm "$FM_HOME/state/$id.meta"
+  mkdir "$FM_HOME/state/$id.meta"
+  assert_invalid_current_metadata_blocks_completion "$id" "$key" 'non-regular metadata path'
+
+  id=unreadable-meta
+  key=$(prepare_terminal_identity_case "$id")
+  chmod 000 "$FM_HOME/state/$id.meta"
+  assert_invalid_current_metadata_blocks_completion "$id" "$key" 'unreadable metadata path'
+
+  id=reused-meta-id
+  key=$(prepare_terminal_identity_case "$id")
+  printf 'spawn_gen=%s-replacement\nkind=ship\nmode=no-mistakes\n' "$id" > "$FM_HOME/state/$id.meta"
+  assert_invalid_current_metadata_blocks_completion "$id" "$key" 'reused task identity'
+
+  id=legacy-window-identity
+  tx add "$id" "$id" --start --json >/dev/null
+  printf 'window=firstmate:fm-%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" > "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" https://github.com/o/r/pull/1
+  "$owner" retired "$id" normal
+  key=$("$owner" receipt-key "$id")
+  rm "$FM_HOME/state/$id.meta"
+  printf '%s\n' manual > "$FM_HOME/config/backlog-backend"
+  tx done "$id" --pr https://github.com/o/r/pull/1 --no-prune --json >/dev/null
+  "$owner" manual-complete "$key"
+  jq -e '.backlog == true and .refill == true' \
+    "$FM_HOME/state/terminal-delivery/$key.json" >/dev/null \
+    || fail 'valid legacy identity did not survive absent-metadata replay'
+
+  id=absent-auto-replay
+  printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend"
+  key=$(prepare_terminal_identity_case "$id")
+  rm "$FM_HOME/state/$id.meta"
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true' \
+    "$FM_HOME/state/terminal-delivery/$key.json" >/dev/null \
+    || fail 'true metadata absence did not replay automatic completion'
+
+  id=empty-incarnation-receipt
+  tx add "$id" "$id" --start --json >/dev/null
+  empty_key=$(printf '%s' "$id|||" | shasum -a 256 | awk '{print $1}')
+  jq -n --arg id "$id" --arg key "$empty_key" \
+    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:"||",kind:"ship",mode:"no-mistakes",state:"done",pr:"",merged:false,retired:true,discarded:false,backlog:true,refill:true,reviewed:false,superseded_by:"",captain_keys:"",origin_captain_cycle:"none",captain_obligations:[{receipt:$key,origin_cycle:"none",captain_keys:"",origin_resolved:false}],decisions_reviewed:true,default_head:"0123456789012345678901234567890123456789"}' \
+    > "$FM_HOME/state/terminal-delivery/$empty_key.json"
+  rm -f "$FM_HOME/state/$id.meta"
+  set +e
+  "$owner" completed-exact "$id" "$empty_key" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'empty incarnation receipt retained terminal authority'
+  pass 'terminal metadata identity rejects ambiguity and preserves exact absent replay'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -2097,6 +2213,10 @@ EOF
     test_none_cycle_transition_rejects_missing_identity
     test_unattested_predecessor_recovery
     test_ambiguous_predecessor_identity_fails_closed
+    exit
+    ;;
+  metadata-identity)
+    test_terminal_metadata_identity_boundary
     exit
     ;;
   resumed-origin)
@@ -2326,6 +2446,7 @@ test_report_batches_receipts_at_scale
 test_reconcile_streams_history_past_argv_limit
 test_reconcile_cursor_orders_streamed_candidates
 test_archived_captain_answers_remain_exact_terminal_evidence
+test_terminal_metadata_identity_boundary
 for identityless_backend in auto manual; do
   printf '%s\n' "$([ "$identityless_backend" = auto ] && printf tasks-axi || printf manual)" \
     > "$FM_HOME/config/backlog-backend"
