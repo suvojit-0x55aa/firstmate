@@ -64,6 +64,9 @@ run_stop_trappable() {
     FM_TEST_CODEX_FINAL_MARKER="${FM_TEST_CODEX_FINAL_MARKER:-}" \
     FM_TEST_CODEX_FINAL_RELEASE="${FM_TEST_CODEX_FINAL_RELEASE:-}" \
     FM_TEST_REAL_GREP="${FM_TEST_REAL_GREP:-}" \
+    FM_TEST_CODEX_HANDLING_MARKER="${FM_TEST_CODEX_HANDLING_MARKER:-}" \
+    FM_TEST_CODEX_HANDLING_RELEASE="${FM_TEST_CODEX_HANDLING_RELEASE:-}" \
+    FM_TEST_REAL_DATE="${FM_TEST_REAL_DATE:-}" \
     perl -e '$SIG{HUP}="DEFAULT"; $SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
       "$ROOT/bin/fm-codex-stop.sh"
 }
@@ -146,6 +149,28 @@ exec "$FM_TEST_REAL_GREP" "$@"
 SH
   chmod +x "$dir/fakebin/grep"
   printf '%s\n' "$real_grep" > "$dir/real-grep"
+}
+install_handling_transition_barrier() {
+  local dir=$1 real_date
+  real_date=$(command -v date)
+  cat > "$dir/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+record=${FM_HOME:?}/state/.codex-stop-health
+if [ -n "${FM_TEST_CODEX_HANDLING_MARKER:-}" ] \
+  && [ ! -e "$FM_TEST_CODEX_HANDLING_MARKER" ] \
+  && grep -Fqx 'phase=watching' "$record" 2>/dev/null; then
+  : > "$FM_TEST_CODEX_HANDLING_MARKER"
+  n=0
+  while [ ! -e "$FM_TEST_CODEX_HANDLING_RELEASE" ] && [ "$n" -lt 500 ]; do
+    sleep 0.01
+    n=$((n + 1))
+  done
+  [ -e "$FM_TEST_CODEX_HANDLING_RELEASE" ] || exit 124
+fi
+exec "$FM_TEST_REAL_DATE" "$@"
+SH
+  chmod +x "$dir/fakebin/date"
+  printf '%s\n' "$real_date" > "$dir/real-date"
 }
 await_file() {
   local path=$1 n=0
@@ -473,6 +498,93 @@ test_afk_handoff_clears_owned_successor() {
   wait "$STOP_PID_TWO" 2>/dev/null || true
   STOP_PID_TWO=
   pass 'away handoff clears only its owned Stop successor claim'
+}
+
+test_handoff_revalidates_session_generation() {
+  local boundary mutation dir marker release rc output replacement_pid replacement_identity replacement_before
+  local handling_marker handling_release real_date final_marker final_release real_grep
+  for boundary in handling final; do
+    for mutation in unchanged replacement away; do
+      dir=$(make_home "handoff-$boundary-$mutation")
+      printf 'check: pending handoff work\n' > "$dir/state/.wake-queue"
+      marker="$dir/$boundary.marker"
+      release="$dir/$boundary.release"
+      handling_marker=
+      handling_release=
+      real_date=
+      final_marker=
+      final_release=
+      real_grep=
+      case "$boundary" in
+        handling)
+          install_handling_transition_barrier "$dir"
+          handling_marker=$marker
+          handling_release=$release
+          real_date=$(cat "$dir/real-date")
+          ;;
+        final)
+          install_final_barrier "$dir"
+          final_marker=$marker
+          final_release=$release
+          real_grep=$(cat "$dir/real-grep")
+          ;;
+      esac
+      rc=0
+      TEST_BUDGET=1 \
+      FM_TEST_CODEX_HANDLING_MARKER="$handling_marker" \
+      FM_TEST_CODEX_HANDLING_RELEASE="$handling_release" \
+      FM_TEST_REAL_DATE="$real_date" \
+      FM_TEST_CODEX_FINAL_MARKER="$final_marker" \
+      FM_TEST_CODEX_FINAL_RELEASE="$final_release" \
+      FM_TEST_REAL_GREP="$real_grep" \
+        run_stop_trappable "$dir" > "$dir/out" 2>&1 &
+      STOP_PID=$!
+      await_file "$marker"
+      case "$mutation" in
+        unchanged) ;;
+        away) : > "$dir/state/.afk" ;;
+        replacement)
+          sleep 30 &
+          STOP_PID_TWO=$!
+          replacement_pid=$STOP_PID_TWO
+          replacement_identity=$(FM_HOME="$dir" bash -c \
+            '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$replacement_pid")
+          printf '%s\n' "$replacement_pid" > "$dir/state/.lock"
+          FM_HOME="$dir" bash -c \
+            '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$(( $(date +%s) + 300 ))" replacement-handoff' \
+            _ "$ROOT" "$dir" "$replacement_pid" "$replacement_identity"
+          replacement_before=$(cat "$dir/state/.codex-stop-health")
+          ;;
+      esac
+      : > "$release"
+      wait "$STOP_PID" || rc=$?
+      STOP_PID=
+      output=$(cat "$dir/out")
+      if [ "$mutation" = unchanged ]; then
+        expect_code 2 "$rc" "$boundary unchanged generation did not commit its continuation"
+        assert_contains "$output" 'Run bin/fm-wake-drain.sh' \
+          "$boundary unchanged generation omitted its continuation"
+        assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
+          "$boundary unchanged generation lost its handling claim"
+      else
+        expect_code 0 "$rc" "$boundary $mutation handoff revived an obsolete continuation"
+        assert_not_contains "$output" 'Run bin/fm-wake-drain.sh' \
+          "$boundary $mutation handoff emitted an obsolete continuation"
+        if [ "$mutation" = replacement ]; then
+          [ "$(cat "$dir/state/.codex-stop-health")" = "$replacement_before" ] \
+            || fail "$boundary replacement handoff changed the successor generation claim"
+          kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+          wait "$STOP_PID_TWO" 2>/dev/null || true
+          STOP_PID_TWO=
+        else
+          assert_present "$dir/state/.afk" "$boundary away handoff removed away ownership"
+          assert_absent "$dir/state/.codex-stop-health" \
+            "$boundary away handoff retained the obsolete generation claim"
+        fi
+      fi
+    done
+  done
+  pass 'Stop handoff commits only for the unchanged session generation'
 }
 
 install_terminal_source() {
@@ -856,6 +968,10 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   afk-handoff)
     test_afk_handoff_clears_owned_successor
+    exit 0
+    ;;
+  handoff-generation)
+    test_handoff_revalidates_session_generation
     exit 0
     ;;
   final-source-wake)

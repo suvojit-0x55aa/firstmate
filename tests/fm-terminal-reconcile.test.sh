@@ -1651,6 +1651,52 @@ test_merge_observation_stays_bound_to_exact_receipt() {
     || fail 'ambiguous exact PR evidence mutated one reused incarnation'
   pass 'merge observations persist or retry only exact authenticated receipts'
 }
+test_supersession_preserves_unresolved_captain_inventory() {
+  local id=supersession-inventory call=supersession-inventory-call
+  local old_key new_key old_record new_record cycle valid_cycle pr=https://github.com/o/r/pull/505
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$id"
+  hold_captain_task "$call"
+  printf 'decision_keys=%s\ndecisions_reviewed=1\n' "$call" >> "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" "$pr"
+  "$owner" retired "$id" normal
+  old_key=$("$owner" receipt-key "$id")
+  old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
+  cycle=$(jq -r .origin_captain_cycle "$old_record")
+  valid_cycle=$(printf '%s' "$cycle" | grep -Ec '^[0-9a-f]{64}$' || true)
+  [ "$valid_cycle" -eq 1 ] || fail 'supersession fixture did not retain an exact origin hold cycle'
+  release_captain_task "$id"
+  rm "$FM_HOME/state/$id.meta"
+  printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" "$pr" > "$FM_HOME/state/$id.meta"
+  "$owner" observe "$id" done "$pr"
+  new_key=$("$owner" receipt-key "$id")
+  new_record="$FM_HOME/state/terminal-delivery/$new_key.json"
+  [ "$old_key" != "$new_key" ] || fail 'supersession fixture did not create a replacement receipt'
+  jq -e --arg key "$new_key" '.superseded_by == $key' "$old_record" >/dev/null \
+    || fail 'replacement receipt did not supersede its exact predecessor'
+  jq -e --arg call "$call" --arg cycle "$cycle" \
+    '.captain_keys == $call and .origin_captain_cycle == $cycle' "$new_record" >/dev/null \
+    || fail 'receipt supersession dropped unresolved captain inventory or cycle'
+  "$owner" retired "$id" normal
+  if captain complete "$id" --receipt "$new_key" --none >/dev/null 2>&1; then
+    fail 'empty completion erased inherited unresolved captain inventory'
+  fi
+  jq -e --arg call "$call" --arg cycle "$cycle" \
+    '.captain_keys == $call and .origin_captain_cycle == $cycle and .backlog == false' \
+    "$new_record" >/dev/null || fail 'refused empty completion changed inherited evidence'
+  assert_contains "$(tx show "$call")" 'held: yes' \
+    'refused empty completion released the inherited captain call'
+  answer_captain_task "$call"
+  captain complete "$id" --receipt "$new_key" "$call" >/dev/null \
+    || fail 'explicit inherited captain inventory was not recoverable'
+  "$owner" reconcile
+  "$owner" reconcile
+  assert_contains "$(tx show "$id")" 'state: done' \
+    'answered inherited captain inventory did not unblock replacement completion'
+  pass 'receipt supersession preserves unresolved captain inventory and cycle'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -1725,6 +1771,10 @@ EOF
     ;;
   merge-observed-identity)
     test_merge_observation_stays_bound_to_exact_receipt
+    exit
+    ;;
+  supersession-inventory)
+    test_supersession_preserves_unresolved_captain_inventory
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;

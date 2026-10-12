@@ -236,6 +236,13 @@ fm_codex_stop_record_value() {  # <record> <key>
   sed -n "s/^$2=//p" "$1" | head -1
 }
 
+fm_codex_stop_generation_current() {  # <state> <session-pid> <identity>
+  local state=$1 session_pid=$2 identity=$3 lock="$1/.lock"
+  [ -f "$lock" ] && [ ! -L "$lock" ] && [ ! -e "$state/.afk" ] || return 1
+  [ "$(cat "$lock" 2>/dev/null)" = "$session_pid" ] || return 1
+  [ "$(fm_pid_identity "$session_pid")" = "$identity" ]
+}
+
 fm_codex_stop_record_write() {  # <state> <session-pid> <identity> <phase> <successors> <expires> [cycle]
   local state=$1 session_pid=$2 identity=$3 phase=$4 successors=$5 expires=$6
   local cycle=${7:-} record="$1/.codex-stop-health" tmp
@@ -310,10 +317,15 @@ fm_codex_stop_successor_begin() {  # <state> <session-pid> <identity>
 }
 
 fm_codex_stop_handling_open() {  # <state> <session-pid> <identity> <seconds>
-  local seconds=$4
+  local state=$1 session_pid=$2 identity=$3 seconds=$4 expires
   case "$seconds" in ''|*[!0-9]*|0) return 1 ;; esac
-  fm_codex_stop_record_write "$1" "$2" "$3" handling 0 \
-    "$(( $(date +%s) + seconds ))"
+  expires=$(( $(date +%s) + seconds ))
+  fm_codex_stop_generation_current "$state" "$session_pid" "$identity" || return 1
+  fm_codex_stop_record_write "$state" "$session_pid" "$identity" handling 0 "$expires" || return 1
+  if ! fm_codex_stop_generation_current "$state" "$session_pid" "$identity"; then
+    fm_codex_stop_record_clear "$state" "$session_pid" "$identity" || true
+    return 1
+  fi
 }
 
 fm_codex_stop_record_clear() {  # <state> <session-pid> <identity>

@@ -91,6 +91,18 @@ valid_origin_captain_cycle() {
   [ "${#1}" -eq 64 ] || return 1
   case "$1" in *[!0-9a-f]*) return 1 ;; esac
 }
+merge_origin_captain_cycles() {
+  local left=$1 right=$2
+  valid_origin_captain_cycle "$left" || return 1
+  valid_origin_captain_cycle "$right" || return 1
+  if [ "$left" = none ]; then
+    printf '%s\n' "$right"
+  elif [ "$right" = none ] || [ "$left" = "$right" ]; then
+    printf '%s\n' "$left"
+  else
+    return 1
+  fi
+}
 put() {
   local tmp
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
@@ -109,13 +121,31 @@ select_record_path() {
   [ ! -L "$RECORD" ] || return 1
 }
 supersede_prior_records() {
-  local id=$1 current=$RECORD candidate
+  local id=$1 current=$RECORD candidate prior_keys prior_cycle
+  local inherited_keys inherited_cycle
+  local -a candidates=()
+  jq -e '.captain_keys | type == "string"' "$current" >/dev/null || return 1
+  inherited_keys=$(normalize_captain_keys "$(jq -r .captain_keys "$current")") || return 1
+  inherited_cycle=$(jq -r '.origin_captain_cycle // ""' "$current") || return 1
+  valid_origin_captain_cycle "$inherited_cycle" || return 1
   for candidate in "$DIR"/*.json; do
     receipt_path_authenticated "$candidate" || continue
     [ "$candidate" != "$current" ] || continue
     jq -e --arg id "$id" \
       '.id == $id and .discarded != true and .backlog != true and .reviewed != true and ((.superseded_by // "") == "")' \
       "$candidate" >/dev/null || continue
+    jq -e '.decisions_reviewed == true and (.captain_keys | type == "string")' \
+      "$candidate" >/dev/null || return 1
+    prior_keys=$(normalize_captain_keys "$(jq -r .captain_keys "$candidate")") || return 1
+    inherited_keys=$(normalize_captain_keys "$inherited_keys,$prior_keys") || return 1
+    prior_cycle=$(jq -r '.origin_captain_cycle // ""' "$candidate") || return 1
+    inherited_cycle=$(merge_origin_captain_cycles "$inherited_cycle" "$prior_cycle") || return 1
+    candidates+=("$candidate")
+  done
+  RECORD=$current
+  put --arg keys "$inherited_keys" --arg cycle "$inherited_cycle" \
+    '.captain_keys=$keys | .origin_captain_cycle=$cycle' || return 1
+  for candidate in ${candidates[@]+"${candidates[@]}"}; do
     RECORD=$candidate
     put --arg key "$KEY" '.superseded_by=$key' || { RECORD=$current; return 1; }
   done
@@ -449,6 +479,10 @@ case "$mode" in
           :
         else
           captain_keys=$(resolve_captain_keys "$2" "$retirement_decision_keys") || exit 1
+          jq -e '.captain_keys | type == "string"' "$RECORD" >/dev/null || exit 1
+          captain_keys=$(normalize_captain_keys "$(jq -r .captain_keys "$RECORD"),$captain_keys") || exit 1
+          origin_captain_cycle=$(merge_origin_captain_cycles \
+            "$(jq -r '.origin_captain_cycle // ""' "$RECORD")" "$origin_captain_cycle") || exit 1
           put --arg keys "$captain_keys" --arg raw "$retirement_decision_keys" --arg cycle "$origin_captain_cycle" \
             --argjson reviewed "$decisions_reviewed" \
             '.captain_keys=$keys | .origin_captain_cycle=$cycle | .decisions_reviewed=$reviewed | .retirement_prepared=true | .retirement_decision_keys=$raw' \
@@ -466,6 +500,10 @@ case "$mode" in
           captain_keys=$(jq -r '.captain_keys // ""' "$RECORD") || exit 1
         else
           captain_keys=$(resolve_captain_keys "$2" "$retirement_decision_keys") || exit 1
+          jq -e '.captain_keys | type == "string"' "$RECORD" >/dev/null || exit 1
+          captain_keys=$(normalize_captain_keys "$(jq -r .captain_keys "$RECORD"),$captain_keys") || exit 1
+          origin_captain_cycle=$(merge_origin_captain_cycles \
+            "$(jq -r '.origin_captain_cycle // ""' "$RECORD")" "$origin_captain_cycle") || exit 1
         fi
         case "$3" in
           normal) put --arg keys "$captain_keys" --arg cycle "$origin_captain_cycle" --argjson reviewed "$decisions_reviewed" \

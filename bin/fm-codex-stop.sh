@@ -41,9 +41,7 @@ OWNER=$(cat "$STATE/.lock")
 OWNER_IDENTITY=$(fm_pid_identity "$OWNER")
 [ -n "$OWNER_IDENTITY" ] || exit 2
 session_generation_current() {
-  [ "$(cat "$STATE/.lock" 2>/dev/null)" = "$OWNER" ] \
-    && [ "$(fm_pid_identity "$OWNER")" = "$OWNER_IDENTITY" ] \
-    && [ ! -e "$STATE/.afk" ]
+  fm_codex_stop_generation_current "$STATE" "$OWNER" "$OWNER_IDENTITY"
 }
 lock_holder_in_session() {
   local pid=$1 parent hops=0
@@ -154,6 +152,9 @@ STOP_RECORD_OWNED=1
 still_ours() {
   session_generation_current
 }
+continuation_generation_current() {
+  session_generation_current && fm_codex_stop_handling_owned_by_session "$STATE"
+}
 queued_wake_pending() {
   [ -s "$STATE/.wake-queue" ]
 }
@@ -189,9 +190,11 @@ if ! queued_wake_pending; then
   fi
 fi
 if ! fm_codex_stop_handling_open "$STATE" "$OWNER" "$OWNER_IDENTITY" "$GRACE"; then
+  session_generation_current || exit 0
   printf 'Codex supervision could not persist its generation-bound handling successor.\n' >&2
   exit 2
 fi
+continuation_generation_current || exit 0
 if grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT"; then
   grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" | head -8 >&2
 elif queued_wake_pending; then
@@ -202,8 +205,15 @@ else
   printf 'Codex supervision cycle closed; inspect the durable wake queue and cycle result.\n' >&2
   tail -6 "$OUT" >&2
 fi
+continuation_generation_current || exit 0
 printf 'Run bin/fm-wake-drain.sh, handle its work, and acknowledge only after handling. Keep quiet intervals silent. The next Stop owns the successor; do not launch a background watcher or finish assuming a yielded tool will wake you.\n' >&2
+continuation_generation_current || exit 0
 CONTINUATION_READY=1
 cleanup
 [ "$CANCELLED" != 1 ] || exit 0
+if ! continuation_generation_current; then
+  CONTINUATION_READY=0
+  fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true
+  exit 0
+fi
 exit 2
