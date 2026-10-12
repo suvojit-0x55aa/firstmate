@@ -33,7 +33,13 @@
 # owned by fm-inactive-reconcile.sh; acknowledging it never removes this ledger.
 # Local tasks-axi mutations are idempotent, --no-prune retains replay evidence,
 # and held/blocked tasks fail closed. manual-complete confirms an operator has
-# updated a manual backlog, but only after the same delivery and decision guards.
+# updated a manual backlog, but only for an authenticated exact receipt after
+# the same delivery, decision, and active-incarnation checks; manual mode never
+# writes the backlog through tasks-axi. backlog-reviewed is the automatic-backend
+# migration path for a retained pre-binding receipt: it binds that exact receipt
+# into the current backlog row before replay. predecessor-reviewed attests only
+# an exact retained predecessor while authenticated current metadata exists,
+# then re-runs supersession without replacing or inferring either incarnation.
 # refill-reviewed is an explicit supervisor acknowledgement AFTER evaluating the
 # current ready list, date gates and dependencies and dispatching eligible work.
 # Queue wake acknowledgement alone cannot clear it. Reconcile is bounded, local,

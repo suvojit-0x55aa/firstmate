@@ -69,11 +69,13 @@
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A key that names no task, a task that is
-# not held for the captain, or a task already closed is reported as `skipped:`
-# and feeds nothing. A replayed delivery whose answer digest and requested
-# close mode both match the newest record is reported `closed:` and is a no-op;
-# a mode mismatch is skipped. The command exits nonzero when any key was
-# skipped. `--source` is provenance text recorded in the
+# not held for the captain, or an ordinary task already closed is reported as
+# `skipped:` and feeds nothing. A closed task with surviving captain-hold
+# provenance may record the supplied answer through the same repair path as
+# direct `answer`. A replayed delivery whose current-cycle answer digest and
+# requested close mode both match the newest record is reported `closed:` and
+# is a no-op; a mode mismatch is skipped. The command exits nonzero when any
+# key was skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
