@@ -14,7 +14,7 @@ The `hold` subcommand places an existing task under an active captain hold, or c
 Repeats are idempotent, a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
 
 The `answer` subcommand records the captain's exact words and closes the call in the same act.
-Each hold records a durable cycle identity, and the resolution block carries that identity with the decision digest, `Resolution mode:`, and any terminal receipt at the top of the task body; the previous body is preserved below the block and archived through tasks-axi `--archive-body`.
+Each hold records a durable cycle identity, and the resolution block carries that identity with the decision digest, `Resolution mode:`, and any terminal receipt at the top of the task body; the previous body is preserved below the block and archived through tasks-axi `--archive-body`, and exact-cycle reads authenticate historical resolution boundaries with the recorded decision digest.
 It then runs `tasks-axi done` - or `tasks-axi unhold` under `--release`, so a captain-gated work item resumes instead of closing.
 An exact retry is idempotent only when the newest resolution belongs to the current hold cycle, the requested close mode matches, and a release still names the current terminal receipt.
 A re-held task therefore records a new resolution even when the captain repeats the same words in a later hold or terminal incarnation.

@@ -371,11 +371,81 @@ task_evidence_show() {  # <id>
   printf '%s\n' "$show"
 }
 
+historical_resolution_body_for_cycle() {  # <shown-body> <hold-cycle>
+  local decoded
+  decoded=$(decode_shown_value "$1") || return 1
+  printf '%s' "$decoded" | perl -MDigest::SHA=sha256_hex -MEncode=decode,encode,FB_CROAK -MJSON::PP -e '
+    use strict;
+    use warnings;
+    my ($wanted) = @ARGV;
+    local $/;
+    my $rest = decode("UTF-8", <STDIN> // "", FB_CROAK);
+    my @matches;
+    while (length $rest) {
+      if ($rest =~ /\ACaptain hold opened by fm-captain-hold\.\nHold cycle: [0-9a-f]{64}\nCaptain hold marker end\./) {
+        my $end = $+[0];
+        last if $end == length $rest;
+        my ($separator) = substr($rest, $end) =~ /\A(\n+)/;
+        exit 1 unless defined $separator;
+        $rest = substr($rest, $end + length($separator));
+        next;
+      }
+      if ($rest =~ /\AResolution recorded by fm-(?:captain|decision)-hold\.\nDecision digest: ([0-9a-f]{64})\nResolution mode: [^\n]+\nHold cycle: ([0-9a-f]{64})\n(?:Terminal receipt: [^\n]+\n)?(?:Terminal incarnation: [^\n]+\n)?\n?Captain decision:\n/) {
+        my ($digest, $cycle) = ($1, $2);
+        my $answer_start = $+[0];
+        my @ends;
+        push @ends, [length($rest), length($rest)]
+          if sha256_hex(encode("UTF-8", substr($rest, $answer_start))) eq $digest;
+        pos($rest) = $answer_start;
+        while ($rest =~ /\n+/g) {
+          my $end = $-[0];
+          next if $end < $answer_start;
+          push @ends, [$end, $+[0]]
+            if sha256_hex(encode("UTF-8", substr($rest, $answer_start, $end - $answer_start))) eq $digest;
+        }
+        exit 1 unless @ends == 1;
+        my ($end, $next) = @{$ends[0]};
+        push @matches, substr($rest, 0, $end) if $cycle eq $wanted;
+        last if $next == length $rest;
+        $rest = substr($rest, $next);
+        next;
+      }
+      exit 1 if $rest =~ /\A(?:Captain hold opened by fm-captain-hold\.|Resolution recorded by fm-(?:captain|decision)-hold\.)/;
+      last;
+    }
+    exit 3 unless @matches;
+    exit 1 unless @matches == 1;
+    print JSON::PP->new->utf8->encode($matches[0]);
+  ' "$2"
+}
+
+active_task_show_cycle() {  # <show-output> <id> <hold-cycle>
+  local show=$1 id=$2 cycle=$3 body historical rc
+  body=$(show_field "$show" body)
+  if [ "$(current_hold_cycle "$body" || true)" = "$cycle" ]; then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  if historical=$(historical_resolution_body_for_cycle "$body" "$cycle"); then
+    printf '  id: %s\n  title: %s\n  state: %s\n  hold_kind: -\n  body: %s\n' \
+      "$id" "$(show_field "$show" title)" "$(show_field "$show" state)" "$historical"
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 3 ] && return 3
+  return 1
+}
+
 task_cycle_evidence_show() {  # <id> <hold-cycle>
-  local id=$1 cycle=$2 active='' archived='' active_match=0 archived_match=0 body rc
+  local id=$1 cycle=$2 active='' archived='' active_match=0 archived_match=0 rc
   if active=$(task_show "$id"); then
-    body=$(show_field "$active" body)
-    [ "$(current_hold_cycle "$body" || true)" != "$cycle" ] || active_match=1
+    if active=$(active_task_show_cycle "$active" "$id" "$cycle"); then
+      active_match=1
+    else
+      rc=$?
+      [ "$rc" -eq 3 ] || return 1
+    fi
   else
     rc=$?
     [ "$rc" -eq 3 ] || return 1

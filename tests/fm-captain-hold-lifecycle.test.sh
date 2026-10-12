@@ -235,6 +235,76 @@ test_teardown_verifies_persisted_call_cycles() {
   pass "scout teardown verifies exact persisted captain-call cycles"
 }
 
+test_active_rehold_preserves_prior_cycle_evidence() {
+  local home id call cycle_a cycle_b calls replay_calls unknown before
+  home=$(make_home active-rehold-cycle)
+  id=sample-active-rehold-origin
+  call=sample-active-rehold-call
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Active re-hold cycle evidence\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain first cycle pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  cycle_a=$(sed -n 's/^decision_call_cycles=//p' "$home/state/$id.meta" \
+    | tail -1 | jq -r --arg id "$call" '.[] | select(.id == $id) | .cycle')
+  [ -n "$cycle_a" ] || fail "first active cycle was not persisted"
+  printf 'Captain released the first authenticated cycle.\n' > "$home/first-answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/first-answer.txt" --release >/dev/null
+  run_captain "$home" hold "$call" --reason "captain second cycle pending" >/dev/null
+  cycle_b=$(run_captain "$home" normalize-inventory-cycles "$id" "$call" \
+    | jq -r --arg id "$call" '.[] | select(.id == $id) | .cycle')
+  [ -n "$cycle_b" ] && [ "$cycle_b" != "$cycle_a" ] \
+    || fail "re-hold did not create a distinct current cycle"
+
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "completion replay lost the resolved historical cycle"
+  calls=$(sed -n 's/^decision_call_cycles=//p' "$home/state/$id.meta" | tail -1)
+  printf '%s\n' "$calls" | jq -e --arg id "$call" --arg a "$cycle_a" --arg b "$cycle_b" '
+    sort_by(.id,.cycle) == ([{id:$id,cycle:$a},{id:$id,cycle:$b}] | sort_by(.id,.cycle))
+  ' >/dev/null || fail "completion replay did not retain both authenticated cycles"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verification could not validate historical A and current held B independently"
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "identical completion replay was not idempotent"
+  replay_calls=$(sed -n 's/^decision_call_cycles=//p' "$home/state/$id.meta" | tail -1)
+  [ "$replay_calls" = "$calls" ] || fail "completion replay changed the authenticated cycle inventory"
+
+  if run_captain "$home" terminal-ready "$id" "$call:$cycle_b" \
+    > "$home/held-ready.out" 2> "$home/held-ready.err"; then
+    fail "terminal readiness treated current held cycle B as answered"
+  fi
+  unknown=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  if run_captain "$home" terminal-ready "$id" "$call:$unknown" \
+    > "$home/unknown-ready.out" 2> "$home/unknown-ready.err"; then
+    fail "terminal readiness accepted an unknown historical cycle"
+  fi
+  cp "$home/state/$id.meta" "$home/state/$id.meta.valid"
+  before=$(shasum -a 256 "$home/state/$id.meta.valid" | awk '{print $1}')
+  printf '%s\n' "$calls" | jq -c --arg id "$call" --arg cycle "$unknown" \
+    '. + [{id:$id,cycle:$cycle}]' > "$home/calls.invalid"
+  awk '!/^decision_call_cycles=/' "$home/state/$id.meta.valid" > "$home/state/$id.meta"
+  printf 'decision_call_cycles=%s\n' "$(cat "$home/calls.invalid")" >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/unknown-verify.out" 2> "$home/unknown-verify.err"; then
+    fail "verification accepted an unknown persisted cycle"
+  fi
+  cp "$home/state/$id.meta.valid" "$home/state/$id.meta"
+  [ "$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')" = "$before" ] \
+    || fail "unknown-cycle refusal did not preserve the valid attestation"
+
+  printf 'Captain answered the current second cycle.\n' > "$home/second-answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/second-answer.txt" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "completion replay rejected the genuine second-cycle answer"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verification rejected the resolved historical and current cycles"
+  run_captain "$home" terminal-ready "$id" "$call:$cycle_b" >/dev/null \
+    || fail "terminal readiness rejected the genuine current-cycle answer"
+  pass "active re-holds retain exact historical and current cycle evidence"
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -1845,6 +1915,11 @@ case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
     test_legacy_identities_keep_working
     exit 0
     ;;
+  active-rehold-cycle-evidence)
+    test_active_rehold_preserves_prior_cycle_evidence
+    run_reused_cycle_teardown_refusal tasks
+    exit 0
+    ;;
   '') ;;
   *) fail "unknown focused captain-hold test: $FM_CAPTAIN_HOLD_FOCUSED_TEST" ;;
 esac
@@ -1867,6 +1942,7 @@ test_secondmate_hold_stays_in_authoritative_home
 test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
 test_teardown_verifies_persisted_call_cycles
+test_active_rehold_preserves_prior_cycle_evidence
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
