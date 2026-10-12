@@ -1,0 +1,49 @@
+$ tasks-axi show sample-resolution-call --full
+task:
+  id: sample-resolution-call
+  title: Choose the resolution path
+  state: done
+  blocked: no
+  blocked_by: none
+  held: no
+  hold_reason: captain resolution choice pending
+  hold_kind: captain
+  hold_until: "-"
+  kind: task
+  repo: sample
+  priority: "-"
+  created: "-"
+  closed: 2026-10-12
+  deps: none
+  links: none
+  body: "Resolution recorded by fm-captain-hold.\nDecision digest: 1c2d902fdf8a2bf5b3d9dcd973a62f04454dfd7294aa601d1e323b925fce8e6b\nResolution mode: answered\nHold cycle: 734b440874d9b1ca5b3836447846d15e49db338af1dc440c2e81b6943eecf329\n\nCaptain decision:\nCaptain selected the supported path.\n\nCaptain hold opened by fm-captain-hold.\nHold cycle: 734b440874d9b1ca5b3836447846d15e49db338af1dc440c2e81b6943eecf329\nCaptain hold marker end.\nOrigin: sample-resolution-review"
+$ fm-captain-hold.sh terminal-ready sample-resolution-review sample-resolution-call
+exit=0 (supported answered mode)
+
+$ tasks-axi show sample-resolution-call --full  # corrupted persisted mode
+task:
+  id: sample-resolution-call
+  title: Choose the resolution path
+  state: done
+  blocked: no
+  blocked_by: none
+  held: no
+  hold_reason: captain resolution choice pending
+  hold_kind: captain
+  hold_until: "-"
+  kind: task
+  repo: sample
+  priority: "-"
+  created: "-"
+  closed: 2026-10-12
+  deps: none
+  links: none
+  body: "Resolution recorded by fm-captain-hold.\nDecision digest: 1c2d902fdf8a2bf5b3d9dcd973a62f04454dfd7294aa601d1e323b925fce8e6b\nResolution mode: garbage\nHold cycle: 734b440874d9b1ca5b3836447846d15e49db338af1dc440c2e81b6943eecf329\n\nCaptain decision:\nCaptain selected the supported path.\n\nCaptain hold opened by fm-captain-hold.\nHold cycle: 734b440874d9b1ca5b3836447846d15e49db338af1dc440c2e81b6943eecf329\nCaptain hold marker end.\nOrigin: sample-resolution-review"
+$ fm-captain-hold.sh terminal-ready sample-resolution-review sample-resolution-call
+exit=1 (unknown mode rejected)
+
+$ fm-captain-hold.sh terminal-ready sample-resolution-review sample-resolution-call  # missing mode
+exit=1 (missing mode rejected)
+
+$ fm-captain-hold.sh terminal-ready sample-resolution-review sample-resolution-call  # restored
+exit=0 (supported mode restored)

@@ -1,0 +1,5 @@
+[]
+ok - terminal readiness accepts only supported captain resolution modes
+[]
+ok - an out-of-band close is recordable with the captain's word and nothing else
+ok - captain release requires a successor only after real terminal evidence

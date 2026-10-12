@@ -1,0 +1,1 @@
+ok - post-reap captain calls block both worktree removal backends and retry safely

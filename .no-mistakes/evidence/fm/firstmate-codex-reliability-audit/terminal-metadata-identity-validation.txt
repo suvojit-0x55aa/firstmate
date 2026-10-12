@@ -1,0 +1,1 @@
+ok - terminal metadata identity rejects ambiguity and preserves exact absent replay

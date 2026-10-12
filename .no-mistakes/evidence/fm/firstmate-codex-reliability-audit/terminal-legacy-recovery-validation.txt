@@ -1,0 +1,5 @@
+ok - legacy attestation survives owner mutation and captain interruption
+ok - auto exact recovery ignores completed history and rejects active ambiguity
+ok - manual exact recovery ignores completed history and rejects active ambiguity
+ok - manual backend remains read-only and legacy receipts recover exactly
+ok - metadata-absent completion requires exact durable backlog identity

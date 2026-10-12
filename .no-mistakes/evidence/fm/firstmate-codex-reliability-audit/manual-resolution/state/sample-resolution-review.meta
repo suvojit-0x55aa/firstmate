@@ -1,0 +1,8 @@
+window=firstmate:fm-sample-resolution-review
+worktree=/Users/shin/.no-mistakes/evidence/01M4PWVWET80AJTZKF7TDB6ZMQ/manual-resolution/projects/missing-sample-resolution-review
+project=/Users/shin/.no-mistakes/evidence/01M4PWVWET80AJTZKF7TDB6ZMQ/manual-resolution/projects/sample
+harness=codex
+kind=scout
+mode=scout
+decisions_reviewed=1
+decision_keys=sample-resolution-call

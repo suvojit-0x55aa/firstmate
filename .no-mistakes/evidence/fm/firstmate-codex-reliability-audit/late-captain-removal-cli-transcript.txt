@@ -1,0 +1,41 @@
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+teardown: reaping leaked worktree process(es) for task-x1: 11100
+fm-captain-hold: open captain decision task-x1/late-call is not transferred to the captain-held inventory; re-run complete
+REFUSED: task task-x1 has not passed the captain-call completion gate.
+Review every captain call, run bin/fm-captain-hold.sh complete task-x1 (--none | <task-id>...), then retry teardown.
+WARNING: watcher still down (same stale episode; last beat: 4s ago, grace 300s) - full banner already printed this episode.
+teardown task-x1 complete (window firstmate:fm-task-x1, worktree /var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-teardown-tests.IlcYCL/late-captain-treehouse/wt)
+TERMINAL DELIVERY: task-x1 receipt=f6ff016c36b88857a27713566979f887417d7746649140b8e652dd93e583eb87 state=unknown pr= merge_proven=false default_landed=true teardown=true backlog_done=true refill_pending=true discard=false captain_reviewed=true backlog_bound=true backlog_attested=false
+Evaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed f6ff016c36b88857a27713566979f887417d7746649140b8e652dd93e583eb87
+count: 0
+ready: 0 unblocked queued tasks
+ready_public_followups: 0 delivery-ready obligations
+help[1]:
+  - Run `tasks-axi list --state queued --file=/var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-teardown-tests.IlcYCL/late-captain-treehouse/data/backlog.md` to see all queued work (incl. blocked)
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+teardown: reaping leaked worktree process(es) for task-x1: 27488
+fm-captain-hold: open captain decision task-x1/late-call is not transferred to the captain-held inventory; re-run complete
+REFUSED: task task-x1 has not passed the captain-call completion gate.
+Review every captain call, run bin/fm-captain-hold.sh complete task-x1 (--none | <task-id>...), then retry teardown.
+WARNING: watcher still down (same stale episode; last beat: 5s ago, grace 300s) - full banner already printed this episode.
+teardown task-x1 complete (window term-late, worktree /var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-teardown-tests.IlcYCL/late-captain-orca/wt)
+TERMINAL DELIVERY: task-x1 receipt=3f87b1a614c2368ea2833bd73fdf5694c7b2ac1c94ea3b2c71290e9c8fc3f347 state=unknown pr= merge_proven=false default_landed=true teardown=true backlog_done=true refill_pending=true discard=false captain_reviewed=true backlog_bound=true backlog_attested=false
+Evaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed 3f87b1a614c2368ea2833bd73fdf5694c7b2ac1c94ea3b2c71290e9c8fc3f347
+count: 0
+ready: 0 unblocked queued tasks
+ready_public_followups: 0 delivery-ready obligations
+help[1]:
+  - Run `tasks-axi list --state queued --file=/var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-teardown-tests.IlcYCL/late-captain-orca/data/backlog.md` to see all queued work (incl. blocked)
+ok - post-reap captain calls block both worktree removal backends and retry safely
