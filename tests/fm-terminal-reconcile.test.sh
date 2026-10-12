@@ -1869,6 +1869,134 @@ run_same_receipt_rehold_case() {
     "$successor_record" >/dev/null || fail "$shape same-receipt lifecycle replay was not stable"
   pass "$shape same-receipt re-hold preserves composite cycle obligations"
 }
+test_none_cycle_transitions_to_first_hold() {
+  local id=none-cycle-first-hold call=none-cycle-first-hold-call
+  local pr=https://github.com/o/r/pull/509 receipt record cycle
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$call"
+  printf 'decision_keys=%s\ndecisions_reviewed=1\n' "$call" >> "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" "$pr"
+  "$owner" retired "$id" normal
+  receipt=$("$owner" receipt-key "$id")
+  record="$FM_HOME/state/terminal-delivery/$receipt.json"
+  jq -e --arg receipt "$receipt" --arg call "$call" '
+    ([.captain_obligations[] | select(.receipt==$receipt and .origin_cycle=="none" and .captain_keys==$call and .origin_resolved==false)] | length) == 1
+  ' "$record" >/dev/null || fail 'origin-absence fixture did not preserve transferred inventory'
+  hold_captain_task "$id"
+  cycle=$(captain origin-obligation "$id")
+  printf 'decision_keys=\ndecisions_reviewed=1\n' >> "$FM_HOME/state/$id.meta"
+  "$owner" prepare-retirement "$id"
+  "$owner" prepare-retirement "$id"
+  "$owner" retired "$id" normal
+  jq -e --arg receipt "$receipt" --arg cycle "$cycle" --arg call "$call" '
+    .captain_keys == $call and .origin_captain_cycle == $cycle and
+    ([.captain_obligations[] | select(.receipt==$receipt and .origin_cycle=="none" and .captain_keys==$call and .origin_resolved==true)] | length) == 1 and
+    ([.captain_obligations[] | select(.receipt==$receipt and .origin_cycle==$cycle and .captain_keys==$call and .origin_resolved==false)] | length) == 1 and
+    (.captain_obligations | length) == 2
+  ' "$record" >/dev/null || fail 'first real hold did not resolve absence and transfer its inventory'
+  answer_captain_task "$id"
+  answer_captain_task "$call"
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true and (.captain_obligations | length) == 2' \
+    "$record" >/dev/null || fail 'answered first hold remained blocked by historical absence'
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true and (.captain_obligations | length) == 2' \
+    "$record" >/dev/null || fail 'none-to-first-hold replay was not stable'
+  pass 'origin absence transitions into the first authenticated hold cycle'
+}
+test_none_cycle_transition_rejects_missing_identity() {
+  local id=none-cycle-missing-identity record key bogus before rc=0 tmp
+  make_task "$id"
+  "$owner" observe "$id" done https://github.com/o/r/pull/510
+  key=$("$owner" receipt-key "$id")
+  record="$FM_HOME/state/terminal-delivery/$key.json"
+  bogus=$(printf '0%.0s' {1..64})
+  tmp="$record.tmp"
+  jq --arg bogus "$bogus" '.captain_obligations[0].receipt=$bogus' "$record" > "$tmp" && mv "$tmp" "$record"
+  before=$(shasum -a 256 "$record" | awk '{print $1}')
+  hold_captain_task "$id"
+  set +e
+  "$owner" prepare-retirement "$id"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'none-to-first-hold accepted an unauthenticated absence identity'
+  [ "$(shasum -a 256 "$record" | awk '{print $1}')" = "$before" ] \
+    || fail 'failed absence transition mutated unauthenticated receipt evidence'
+  pass 'origin absence transition fails closed on missing receipt identity'
+}
+test_unattested_predecessor_recovery() {
+  local id=unattested-predecessor pr=https://github.com/o/r/pull/511
+  local old_key old_record current_key current_record rc=0 report
+  make_unreviewed_task "$id"
+  "$owner" observe "$id" done "$pr"
+  old_key=$("$owner" receipt-key "$id")
+  old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
+  rm "$FM_HOME/state/$id.meta"
+  printf 'spawn_gen=%s-current\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" "$pr" > "$FM_HOME/state/$id.meta"
+  set +e
+  "$owner" observe "$id" done "$pr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'unattested predecessor did not block replacement receipt'
+  current_key=$("$owner" current-incarnation "$id")
+  current_record="$FM_HOME/state/terminal-delivery/$current_key.json"
+  [ -f "$current_record" ] || fail 'blocked supersession did not retain its current receipt'
+  report=$("$owner" report)
+  assert_contains "$report" "predecessor-reviewed $id $old_key" \
+    'unattested predecessor report omitted exact recovery command'
+  set +e
+  "$owner" predecessor-reviewed "$id" "$(printf 'f%.0s' {1..64})" --none
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'predecessor recovery accepted missing receipt evidence'
+  set +e
+  "$owner" predecessor-reviewed wrong-predecessor "$old_key" --none
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'predecessor recovery accepted mismatched task identity'
+  "$owner" predecessor-reviewed "$id" "$old_key" --none \
+    || fail 'exact unattested predecessor could not be recovered'
+  jq -e --arg current "$current_key" '.decisions_reviewed == true and .superseded_by == $current' \
+    "$old_record" >/dev/null || fail 'predecessor recovery did not attest and supersede exact receipt'
+  "$owner" predecessor-reviewed "$id" "$old_key" --none \
+    || fail 'exact predecessor recovery replay was not idempotent'
+  "$owner" merged "$id" "$pr"
+  "$owner" retired "$id" normal
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true' "$current_record" >/dev/null \
+    || fail 'recovered predecessor did not unblock current terminal receipt'
+  pass 'exact predecessor captain review recovers blocked supersession'
+}
+test_ambiguous_predecessor_identity_fails_closed() {
+  local id=ambiguous-predecessor pr=https://github.com/o/r/pull/512
+  local old_key old_record tmp before rc=0
+  make_unreviewed_task "$id"
+  "$owner" observe "$id" done "$pr"
+  old_key=$("$owner" receipt-key "$id")
+  old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
+  rm "$FM_HOME/state/$id.meta"
+  printf 'spawn_gen=%s-current\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" "$pr" > "$FM_HOME/state/$id.meta"
+  set +e
+  "$owner" observe "$id" done "$pr"
+  set -e
+  tmp="$old_record.tmp"
+  jq '.captain_obligations += [(.captain_obligations[0] | .origin_resolved=true)]' \
+    "$old_record" > "$tmp" && mv "$tmp" "$old_record"
+  before=$(shasum -a 256 "$old_record" | awk '{print $1}')
+  set +e
+  "$owner" predecessor-reviewed "$id" "$old_key" --none
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'predecessor recovery accepted ambiguous obligation identity'
+  [ "$(shasum -a 256 "$old_record" | awk '{print $1}')" = "$before" ] \
+    || fail 'ambiguous predecessor recovery mutated retained evidence'
+  pass 'predecessor recovery rejects ambiguous authenticated identity'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -1957,6 +2085,13 @@ EOF
   same-receipt-rehold)
     run_same_receipt_rehold_case current
     run_same_receipt_rehold_case legacy
+    exit
+    ;;
+  absence-predecessor-recovery)
+    test_none_cycle_transitions_to_first_hold
+    test_none_cycle_transition_rejects_missing_identity
+    test_unattested_predecessor_recovery
+    test_ambiguous_predecessor_identity_fails_closed
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;

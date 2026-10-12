@@ -17,6 +17,7 @@
 #        fm-terminal-reconcile.sh manual-complete <receipt-key>
 #        fm-terminal-reconcile.sh captain-review-state <id> <receipt-key>
 #        fm-terminal-reconcile.sh captain-reviewed <id> <receipt-key> <captain-task-ids>
+#        fm-terminal-reconcile.sh predecessor-reviewed <id> <receipt-key> (--none | <task-id>...)
 #        fm-terminal-reconcile.sh discard-reviewed <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
 #
@@ -138,14 +139,31 @@ set_current_captain_obligation() {
   obligations=$(printf '%s\n' "$obligations" | jq -ce \
     --arg receipt "$current_receipt" --arg keys "$keys" --arg cycle "$cycle" '
       ([.[] | select(.receipt == $receipt and .origin_cycle == $cycle)] | length) as $matches
+      | ([.[] | select(.receipt == $receipt and .origin_cycle == "none" and .origin_resolved == false)]) as $absence
+      | ([.[] | select(.receipt != $receipt and .origin_cycle == "none" and .origin_resolved == false)] | length) as $foreign_absence
       | if $matches == 1 then
-          map(if .receipt == $receipt and .origin_cycle == $cycle
-              then if .origin_resolved == false
-                   then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
-                   else error("current captain obligation is already resolved") end
-              else . end)
+          if $cycle != "none" and ($absence | length) > 0 then
+            error("unresolved origin absence conflicts with current captain cycle")
+          else
+            map(if .receipt == $receipt and .origin_cycle == $cycle
+                then if .origin_resolved == false
+                     then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                     else error("current captain obligation is already resolved") end
+                else . end)
+          end
         elif $matches == 0 then
-          . + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,origin_resolved:false}]
+          if $cycle != "none" and $foreign_absence > 0 then
+            error("origin absence receipt identity is unauthenticated")
+          elif $cycle != "none" and ($absence | length) == 1 then
+            ([($absence[0].captain_keys),$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(",")) as $transitioned_keys
+            | map(if .receipt == $receipt and .origin_cycle == "none" and .origin_resolved == false
+                  then .origin_resolved=true else . end)
+            + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$transitioned_keys,origin_resolved:false}]
+          elif ($absence | length) > 1 then
+            error("ambiguous origin absence obligation")
+          else
+            . + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,origin_resolved:false}]
+          end
         else error("ambiguous current captain obligation") end
     ') || return 1
   merged=$(printf '%s\n' "$obligations" | jq -r 'map(.captain_keys) | join(",")') || return 1
@@ -290,6 +308,25 @@ select_captain_review_receipt() {
     active_key=${active_key%.json}
   done
   [ "$count" -eq 1 ] && [ "$active_key" = "$key" ]
+}
+select_predecessor_review_receipt() {
+  local id=$1 key=$2 meta="$STATE/$1.meta" current current_key superseded
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  select_record_path "$id" || return $?
+  current=$RECORD
+  current_key=$KEY
+  [ "$current_key" != "$key" ] || return 1
+  receipt_path_authenticated "$current" || return 1
+  jq -e --arg id "$id" \
+    '.id == $id and .discarded != true and .reviewed != true and ((.superseded_by // "") == "")' \
+    "$current" >/dev/null || return 1
+  select_authenticated_receipt_key "$key" || return $?
+  jq -e --arg id "$id" \
+    '.id == $id and .incarnation != "||" and .retired != true and .discarded != true and .backlog != true and .refill != true and .reviewed != true' \
+    "$RECORD" >/dev/null || return 1
+  superseded=$(jq -r '.superseded_by // ""' "$RECORD") || return 1
+  [ -z "$superseded" ] || [ "$superseded" = "$current_key" ] || return 1
+  PREDECESSOR_CURRENT_KEY=$current_key
 }
 select_record() {
   local id=$1 meta="$STATE/$1.meta" tmp captain_keys origin_captain_cycle decisions_reviewed=false
@@ -658,7 +695,7 @@ case "$mode" in
         (if .retired == true then
           "bin/fm-captain-hold.sh complete \(.id) --receipt \(.key)"
         else
-          "bin/fm-captain-hold.sh complete \(.id)"
+          "bin/fm-captain-hold.sh complete \(.id) (--none | <task-id>...). If this exact receipt is a retained predecessor, run bin/fm-terminal-reconcile.sh predecessor-reviewed \(.id) \(.key)"
         end) + " (--none | <task-id>...)."
       elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then
         "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key). If it refuses, restore the exact active or archived origin captain-cycle evidence and retry."
@@ -712,6 +749,38 @@ case "$mode" in
       "$RECORD" >/dev/null || exit 1
     set_current_captain_obligation "$captain_keys" "$origin_captain_cycle" || exit 1
     put '.decisions_reviewed=true' ;;
+  predecessor-reviewed)
+    [ "$#" -ge 4 ] && valid "$2" && valid "$3" || exit 2
+    predecessor_id=$2
+    predecessor_key=$3
+    shift 3
+    predecessor_supplied=
+    if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
+      :
+    else
+      for predecessor_entry in "$@"; do
+        [ "$predecessor_entry" != --none ] || exit 2
+        valid "$predecessor_entry" || exit 2
+        predecessor_supplied="${predecessor_supplied}${predecessor_supplied:+,}$predecessor_entry"
+      done
+    fi
+    select_predecessor_review_receipt "$predecessor_id" "$predecessor_key" || exit 1
+    previous_keys=$(normalize_captain_keys "$(jq -r '.captain_keys // ""' "$RECORD")") || exit 1
+    captain_keys=$(resolve_captain_keys "$predecessor_id" "$predecessor_supplied") || exit 1
+    combined_keys=$(normalize_captain_keys "$previous_keys,$captain_keys") || exit 1
+    [ "$combined_keys" = "$captain_keys" ] || exit 1
+    predecessor_superseded=$(jq -r '.superseded_by // ""' "$RECORD") || exit 1
+    if [ -n "$predecessor_superseded" ]; then
+      [ "$captain_keys" = "$previous_keys" ] || exit 1
+      [ "$(jq -r '.decisions_reviewed // false' "$RECORD")" = true ] || exit 1
+      exit 0
+    fi
+    origin_captain_cycle=$(jq -r '.origin_captain_cycle // ""' "$RECORD") || exit 1
+    valid_origin_captain_cycle "$origin_captain_cycle" || exit 1
+    set_current_captain_obligation "$captain_keys" "$origin_captain_cycle" || exit 1
+    put '.decisions_reviewed=true' || exit 1
+    select_record "$predecessor_id" || exit 1
+    [ "$KEY" = "$PREDECESSOR_CURRENT_KEY" ] || exit 1 ;;
   discard-reviewed)
     [ "$#" -eq 2 ] || exit 2
     select_authenticated_receipt_key "$2" || exit 1
