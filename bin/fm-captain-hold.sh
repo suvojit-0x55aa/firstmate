@@ -1139,12 +1139,17 @@ command_complete() {
   fi
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   meta="$STATE/$origin.meta"
-  [ -f "$meta" ] && has_meta=1
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
+      || fail "origin metadata is unsafe or unreadable: $meta"
+    has_meta=1
+  fi
   if [ "$has_meta" = 1 ]; then
     CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
     fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=1
-    [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
+      || fail "task metadata disappeared or became unsafe while recording completion"
   fi
   require_task_reader
   if origin_exists_here "$origin"; then
