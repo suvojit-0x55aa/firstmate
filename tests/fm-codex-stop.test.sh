@@ -552,6 +552,74 @@ test_hard_killed_watcher_preserves_replacement_lock() {
   pass 'hard-killed Stop watcher cleanup preserves a replacement lock owner'
 }
 
+test_live_watcher_with_unreadable_identity_is_preserved() {
+  local dir ready owner_pid owner_link rc=0 n=0
+  dir=$(make_home unreadable-live-watcher)
+  freeze_configured_stop_runtime "$dir"
+  ready="$dir/live-owner.ready"
+  mkdir "$dir/unreadable-bin"
+  cat > "$dir/unreadable-bin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=
+previous=
+for arg in "$@"; do
+  [ "$previous" != -p ] || pid=$arg
+  previous=$arg
+done
+[ "$pid" != "${FM_TEST_UNREADABLE_PID:-}" ] || exit 1
+exec /bin/ps "$@"
+SH
+  chmod +x "$dir/unreadable-bin/ps"
+
+  FM_HOME="$dir" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$2/state/.watch.lock" || exit 1
+    printf "%s\n" "$2" > "$2/state/.watch.lock/fm-home"
+    printf "%s\n" "$1/bin/fm-watch.sh" > "$2/state/.watch.lock/watcher-path"
+    fm_pid_identity "${BASHPID:-$$}" > "$2/state/.watch.lock/pid-identity"
+    : > "$3"
+    trap "fm_lock_release \"$2/state/.watch.lock\"; exit 0" TERM INT HUP EXIT
+    while :; do sleep 1; done
+  ' _ "$ROOT" "$dir" "$ready" > "$dir/live-owner.out" 2>&1 &
+  STOP_PID_TWO=$!
+  await_file "$ready"
+  owner_pid=$(cat "$dir/state/.watch.lock/pid")
+  owner_link=$(readlink "$dir/state/.watch.lock")
+  printf 'done: unreadable identity probe\n' > "$dir/state/unreadable.status"
+
+  PATH="$dir/unreadable-bin:$dir/fakebin:$PATH" FM_TEST_UNREADABLE_PID="$owner_pid" \
+    FM_PROC_ROOT_OVERRIDE="$dir/unreadable-proc" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$dir/bin/fm-watch-arm.sh" --restart > "$dir/unreadable-restart.out" 2>&1 &
+  STOP_PID=$!
+  while kill -0 "$STOP_PID" 2>/dev/null && [ "$n" -lt 100 ]; do
+    sleep 0.05
+    n=$((n + 1))
+  done
+  if kill -0 "$STOP_PID" 2>/dev/null; then
+    kill -TERM "$STOP_PID" 2>/dev/null || true
+    wait "$STOP_PID" 2>/dev/null || true
+    STOP_PID=
+    fail 'watch restart did not fail closed for an unreadable live owner'
+  fi
+  wait "$STOP_PID" || rc=$?
+  STOP_PID=
+  [ "$rc" -ne 0 ] || fail 'watch restart accepted an unreadable live owner as stale'
+  [ "$(readlink "$dir/state/.watch.lock" 2>/dev/null || true)" = "$owner_link" ] \
+    || fail 'watch restart replaced the unreadable live owner link'
+  [ "$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)" = "$owner_pid" ] \
+    || fail 'watch restart replaced the unreadable live owner pid'
+  kill -0 "$owner_pid" 2>/dev/null || fail 'watch restart killed the unreadable live owner'
+  assert_absent "$dir/state/.watcher-down" \
+    'watch restart published downtime for an unreadable live owner'
+  assert_not_contains "$(cat "$dir/unreadable-restart.out")" 'watcher: started pid=' \
+    'watch restart started a duplicate behind an unreadable live owner'
+  kill -TERM "$STOP_PID_TWO" 2>/dev/null || true
+  wait "$STOP_PID_TWO" 2>/dev/null || true
+  STOP_PID_TWO=
+  pass 'watch restart preserves a live owner when identity is unreadable'
+}
+
 test_expired_successor_requires_replacement_generation() {
   local dir identity rc=0 guard old_pid replacement_pid
   dir=$(make_home expired-successor)
@@ -1161,6 +1229,7 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
   hard-kill-lock)
     test_hard_killed_watcher_releases_only_its_stale_lock
     test_hard_killed_watcher_preserves_replacement_lock
+    test_live_watcher_with_unreadable_identity_is_preserved
     exit 0
     ;;
   afk-handoff)

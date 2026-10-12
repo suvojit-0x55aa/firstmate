@@ -733,9 +733,16 @@ fm_watcher_lock_snapshot_matches() {
   [ "$(cat "$expected_owner/watcher-path" 2>/dev/null || true)" = "$expected_path" ]
 }
 
+fm_watcher_lock_owner_proven_stale() {
+  local pid=$1 expected_identity=$2 current_identity
+  fm_pid_alive "$pid" || return 0
+  current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current_identity" ] && [ "$current_identity" != "$expected_identity" ]
+}
+
 fm_watcher_lock_clear_stale_exact() {
   local marker=$1 lockdir=$2 expected_owner=$3 expected_pid=$4 expected_identity=$5
-  local expected_home=$6 expected_path=$7 kind=${8:-downtime} steal steal_owner current_identity status=1
+  local expected_home=$6 expected_path=$7 kind=${8:-downtime} steal steal_owner status=1
   case "$expected_pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$expected_identity" ] && [ -n "$expected_home" ] && [ -n "$expected_path" ] || return 1
   steal="$lockdir.steal"
@@ -744,15 +751,12 @@ fm_watcher_lock_clear_stale_exact() {
   if fm_lock_points_to_owner "$steal" "$steal_owner" \
     && fm_watcher_lock_snapshot_matches "$lockdir" "$expected_owner" "$expected_pid" \
       "$expected_identity" "$expected_home" "$expected_path"; then
-    current_identity=$(fm_pid_identity "$expected_pid" 2>/dev/null || true)
-    if [ "$current_identity" != "$expected_identity" ] \
+    if fm_watcher_lock_owner_proven_stale "$expected_pid" "$expected_identity" \
       && _fm_recovery_marker_publish "$marker" "$kind" \
       && fm_watcher_lock_snapshot_matches "$lockdir" "$expected_owner" "$expected_pid" \
-        "$expected_identity" "$expected_home" "$expected_path"; then
-      current_identity=$(fm_pid_identity "$expected_pid" 2>/dev/null || true)
-      if [ "$current_identity" != "$expected_identity" ]; then
-        fm_lock_remove_path "$lockdir" && status=0
-      fi
+        "$expected_identity" "$expected_home" "$expected_path" \
+      && fm_watcher_lock_owner_proven_stale "$expected_pid" "$expected_identity"; then
+      fm_lock_remove_path "$lockdir" && status=0
     fi
   fi
   fm_lock_release "$steal"
