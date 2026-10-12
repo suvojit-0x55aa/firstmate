@@ -1,0 +1,1 @@
+ok - terminal receipts bind captain inventory to authenticated hold cycles

@@ -1,0 +1,5 @@
+[]
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+ok - captain resolution evidence is authenticated before lifecycle progress
+[]
+ok - active re-holds retain exact historical and current cycle evidence

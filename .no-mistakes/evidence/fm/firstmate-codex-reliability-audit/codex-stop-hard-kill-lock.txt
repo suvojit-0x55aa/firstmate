@@ -1,0 +1,3 @@
+ok - hard-killed Stop watcher clears only its authenticated stale lock
+ok - hard-killed Stop watcher cleanup preserves a replacement lock owner
+ok - watch restart preserves a live owner when identity is unreadable
