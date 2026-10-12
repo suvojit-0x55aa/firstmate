@@ -18,6 +18,7 @@
 #        fm-terminal-reconcile.sh captain-review-state <id> <receipt-key>
 #        fm-terminal-reconcile.sh captain-reviewed <id> <receipt-key> <captain-task-ids>
 #        fm-terminal-reconcile.sh predecessor-reviewed <id> <receipt-key> (--none | <task-id>...)
+#        fm-terminal-reconcile.sh backlog-reviewed <receipt-key>
 #        fm-terminal-reconcile.sh discard-reviewed <receipt-key>
 #        fm-terminal-reconcile.sh refill-reviewed <receipt-key>
 #
@@ -90,15 +91,23 @@ current_metadata_incarnation() {
     INCARNATION_KIND=legacy
   fi
 }
-backlog_task_body() {
+backlog_task_record() {
   local id=$1 snapshot
   snapshot=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --backlog-json 2>/dev/null) \
     || return 1
   printf '%s\n' "$snapshot" | jq -er --arg id "$id" '
     [.records[] | select(.structured == true and .id == $id)]
-    | if length == 1 then .[0].body_lines | join("\n") else halt_error(1) end
+    | if length == 1 then .[0] else halt_error(1) end
   '
+}
+backlog_task_body() {
+  backlog_task_record "$1" | jq -er '.body_lines | join("\n")'
+}
+backlog_task_evidence() {
+  local record
+  record=$(backlog_task_record "$1") || return 1
+  printf '%s' "$record" | jq -cS . | shasum -a 256 | awk '{print $1}'
 }
 backlog_body_has_receipt() {
   local body=$1 key=$2 line
@@ -126,6 +135,15 @@ bind_backlog_receipt() {
   printf '%s' "$task" | jq -e '.ok == true' >/dev/null || return 1
   body=$(backlog_task_body "$id") || return 1
   backlog_body_has_receipt "$body" "$key"
+}
+prepare_backlog_identity() {
+  local id=$1 key=$2
+  BACKLOG_EVIDENCE=$(backlog_task_evidence "$id") || return 1
+  BACKLOG_BINDING=false
+  fm_backlog_backend_manual "$CONFIG" && return 0
+  bind_backlog_receipt "$id" "$key" || return 1
+  BACKLOG_EVIDENCE=$(backlog_task_evidence "$id") || return 1
+  BACKLOG_BINDING=true
 }
 normalize_captain_keys() {
   local input=$1 key normalized=''
@@ -372,7 +390,7 @@ receipt_path_authenticated() {
   case "$name" in *.json) key=${name%.json} ;; *) return 1 ;; esac
   valid "$key" || return 1
   jq -e --arg key "$key" \
-    '.schema == "fm-terminal-delivery.v1" and .key == $key and (.id | type == "string" and length > 0) and (.incarnation | type == "string" and length > 0 and . != "||") and ((.incarnation_kind // "") | . == "" or . == "spawn" or . == "legacy") and ((.backlog_binding // false) | type == "boolean")' \
+    '.schema == "fm-terminal-delivery.v1" and .key == $key and (.id | type == "string" and length > 0) and (.incarnation | type == "string" and length > 0 and . != "||") and ((.incarnation_kind // "") | . == "" or . == "spawn" or . == "legacy") and ((.backlog_binding // false) | type == "boolean") and ((.backlog_attested // false) | type == "boolean") and ((.backlog_evidence // "") | type == "string")' \
     "$candidate" >/dev/null || return 1
   id=$(jq -r .id "$candidate")
   incarnation=$(jq -r .incarnation "$candidate")
@@ -444,7 +462,7 @@ select_predecessor_review_receipt() {
 }
 select_record() {
   local id=$1 meta="$STATE/$1.meta" tmp captain_keys origin_captain_cycle decisions_reviewed=false
-  local backlog_binding=false binding_rc=0
+  local backlog_binding=false backlog_evidence=
   select_record_path "$id" || return $?
   if [ -e "$RECORD" ] || [ -L "$RECORD" ]; then
     receipt_path_authenticated "$RECORD" || return 1
@@ -455,19 +473,17 @@ select_record() {
   origin_captain_cycle=$(origin_captain_obligation "$id") || return 1
   valid_origin_captain_cycle "$origin_captain_cycle" || return 1
   [ "$(field "$meta" decisions_reviewed)" != 1 ] || decisions_reviewed=true
-  if bind_backlog_receipt "$id" "$KEY"; then
-    backlog_binding=true
-  else
-    binding_rc=$?
-    [ "$binding_rc" -eq 3 ] || return 1
-  fi
+  prepare_backlog_identity "$id" "$KEY" || return 1
+  backlog_binding=$BACKLOG_BINDING
+  backlog_evidence=$BACKLOG_EVIDENCE
   tmp=$(mktemp "$DIR/.receipt.XXXXXX") || return 1
   jq -n --arg id "$id" --arg key "$KEY" --arg incarnation "$INCARNATION" \
     --arg incarnation_kind "$INCARNATION_KIND" --argjson backlog_binding "$backlog_binding" \
+    --arg backlog_evidence "$backlog_evidence" \
     --arg kind "$(field "$meta" kind)" --arg mode "$(field "$meta" mode)" --arg pr "$(field "$meta" pr)" \
     --arg captain_keys "$captain_keys" --arg origin_captain_cycle "$origin_captain_cycle" \
     --argjson decisions_reviewed "$decisions_reviewed" \
-    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,incarnation_kind:$incarnation_kind,backlog_binding:$backlog_binding,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,superseded_by:"",captain_keys:$captain_keys,origin_captain_cycle:$origin_captain_cycle,captain_obligations:[{receipt:$key,origin_cycle:$origin_captain_cycle,captain_keys:$captain_keys,origin_resolved:false}],decisions_reviewed:$decisions_reviewed}' > "$tmp" \
+    '{schema:"fm-terminal-delivery.v1",key:$key,id:$id,incarnation:$incarnation,incarnation_kind:$incarnation_kind,backlog_binding:$backlog_binding,backlog_attested:false,backlog_evidence:$backlog_evidence,kind:$kind,mode:$mode,state:"unknown",pr:$pr,merged:false,retired:false,discarded:false,backlog:false,refill:false,reviewed:false,superseded_by:"",captain_keys:$captain_keys,origin_captain_cycle:$origin_captain_cycle,captain_obligations:[{receipt:$key,origin_cycle:$origin_captain_cycle,captain_keys:$captain_keys,origin_resolved:false}],decisions_reviewed:$decisions_reviewed}' > "$tmp" \
     && mv "$tmp" "$RECORD" \
     && supersede_prior_records "$id"
 }
@@ -533,22 +549,33 @@ select_merge_observation_record() {
   KEY=${found##*/}
   KEY=${KEY%.json}
 }
-record_backlog_identity_matches() {
-  local id body candidate candidate_key count=0 found=
+record_is_unique_unsuperseded() {
+  local id candidate count=0 found=
   id=$(jq -r .id "$RECORD") || return 1
-  jq -e '.backlog_binding == true' "$RECORD" >/dev/null || return 1
-  body=$(backlog_task_body "$id") || return 1
   for candidate in "$DIR"/*.json; do
     receipt_path_authenticated "$candidate" || continue
     jq -e --arg id "$id" \
-      '.id == $id and .backlog_binding == true and ((.superseded_by // "") == "")' \
+      '.id == $id and ((.superseded_by // "") == "")' \
       "$candidate" >/dev/null || continue
-    candidate_key=$(jq -r .key "$candidate") || return 1
-    backlog_body_has_receipt "$body" "$candidate_key" || continue
     count=$((count + 1))
     found=$candidate
   done
   [ "$count" -eq 1 ] && [ "$found" = "$RECORD" ]
+}
+record_backlog_identity_matches() {
+  local id body evidence expected
+  id=$(jq -r .id "$RECORD") || return 1
+  record_is_unique_unsuperseded || return 1
+  if jq -e '.backlog_binding == true' "$RECORD" >/dev/null; then
+    body=$(backlog_task_body "$id") || return 1
+    backlog_body_has_receipt "$body" "$(jq -r .key "$RECORD")"
+    return $?
+  fi
+  jq -e '.backlog_attested == true' "$RECORD" >/dev/null || return 1
+  expected=$(jq -r '.backlog_evidence // ""' "$RECORD") || return 1
+  [ -n "$expected" ] || return 1
+  evidence=$(backlog_task_evidence "$id") || return 1
+  [ "$evidence" = "$expected" ]
 }
 record_matches_current_incarnation() {
   local id meta incarnation metadata_status
@@ -627,6 +654,7 @@ reconcile_record() {
   local -a args
   [ "$(jq -r .reviewed "$RECORD")" != true ] || return 0
   [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || return 0
+  [ "$(jq -r .backlog "$RECORD")" != true ] || return 0
   id=$(jq -r .id "$RECORD") || return 1
   record_matches_current_incarnation || return 0
   pr=$(jq -r .pr "$RECORD")
@@ -827,7 +855,7 @@ case "$mode" in
         (.origin_captain_cycle | type) == "string" and
         (.origin_captain_cycle == "none" or (.origin_captain_cycle | test("^[0-9a-f]{64}$")));
       select(.reviewed!=true and ((.superseded_by // "") == "")) |
-      "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded) captain_reviewed=\(.decisions_reviewed // false) backlog_bound=\(.backlog_binding // false)" +
+      "TERMINAL DELIVERY: \(.id) receipt=\(.key) state=\(.state) pr=\(.pr) merge_proven=\(.merged) default_landed=\((.local_head // .default_head // "") != "") teardown=\(.retired) backlog_done=\(.backlog) refill_pending=\(.refill) discard=\(.discarded) captain_reviewed=\(.decisions_reviewed // false) backlog_bound=\(.backlog_binding // false) backlog_attested=\(.backlog_attested // false)" +
       (if .refill then
         "\nEvaluate current ready work, dependencies and date gates, dispatch eligible work, then run bin/fm-terminal-reconcile.sh refill-reviewed \(.key)\n" + (.ready // "Ready-list refresh pending")
       elif .discarded == true then
@@ -843,6 +871,8 @@ case "$mode" in
         end) + " (--none | <task-id>...)."
       elif $manual and .retired and (.discarded != true) and (.kind == "scout" or (.merged and .pr != "") or ((.local_head // .default_head // "") != "")) then
         "\nPreserve captain holds; after manually completing data/backlog.md, run bin/fm-terminal-reconcile.sh manual-complete \(.key). If it refuses, restore the exact task-incarnation metadata and active or archived origin captain-cycle evidence, then retry."
+      elif .retired and (.discarded != true) and (.backlog_binding // false) != true and (.backlog_attested // false) != true then
+        "\nBacklog identity needs exact receipt review. Verify the current backlog row belongs to this incarnation, then run bin/fm-terminal-reconcile.sh backlog-reviewed \(.key); restore exact task metadata instead if identity is uncertain."
       else
         "\nPreserve captain holds; reconcile PR custody/merge proof and guarded teardown before closing backlog, then dispatch only work whose blockers are gone and date is due."
       end)
@@ -852,12 +882,38 @@ case "$mode" in
     fm_backlog_backend_manual "$CONFIG" || exit 1
     select_authenticated_receipt_key "$2" || exit 1
     [ -z "$(jq -r '.superseded_by // ""' "$RECORD")" ] || exit 1
-    record_matches_current_incarnation || exit 1
+    jq -e '.backlog != true' "$RECORD" >/dev/null || exit 0
     jq -e '.retired and (.discarded != true)' "$RECORD" >/dev/null || exit 1
     delivery_proven || exit 1
     captain_calls_resolved || exit 1
-    put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
-      '.backlog=true | .refill=true | .ready=$ready' ;;
+    id=$(jq -r .id "$RECORD") || exit 1
+    meta="$STATE/$id.meta"
+    if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+      record_is_unique_unsuperseded || exit 1
+      backlog_record=$(backlog_task_record "$id") || exit 1
+      [ "$(printf '%s\n' "$backlog_record" | jq -r .state)" = done ] || exit 1
+      backlog_evidence=$(printf '%s' "$backlog_record" | jq -cS . | shasum -a 256 | awk '{print $1}') || exit 1
+      put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
+        --arg evidence "$backlog_evidence" \
+        '.backlog_attested=true | .backlog_evidence=$evidence | .backlog=true | .refill=true | .ready=$ready' \
+        || exit 1
+    else
+      record_matches_current_incarnation || exit 1
+      put --arg ready 'Manual backend: review data/backlog.md for current ready work, dependencies and date gates.' \
+        '.backlog=true | .refill=true | .ready=$ready' || exit 1
+    fi ;;
+  backlog-reviewed)
+    [ "$#" -eq 2 ] && valid "$2" || exit 2
+    select_authenticated_receipt_key "$2" || exit 1
+    jq -e '.retired == true and .discarded != true and .backlog != true and ((.superseded_by // "") == "")' \
+      "$RECORD" >/dev/null || exit 1
+    id=$(jq -r .id "$RECORD") || exit 1
+    meta="$STATE/$id.meta"
+    [ ! -e "$meta" ] && [ ! -L "$meta" ] || exit 1
+    record_is_unique_unsuperseded || exit 1
+    backlog_evidence=$(backlog_task_evidence "$id") || exit 1
+    put --arg evidence "$backlog_evidence" \
+      '.backlog_attested=true | .backlog_evidence=$evidence' || exit 1 ;;
   captain-review-state)
     [ "$#" -eq 3 ] && valid "$2" && valid "$3" || exit 2
     select_captain_review_receipt "$2" "$3" || exit 1
