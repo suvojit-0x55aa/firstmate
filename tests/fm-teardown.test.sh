@@ -603,8 +603,8 @@ run_terminal_owner() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id jq ln \
+    mkdir mktemp mv paste perl ps readlink realpath rm sed sh shasum sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -2679,7 +2679,7 @@ EOF
   FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
+  expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "lsof-absent-process-group-reap: tmux process group survived teardown"
@@ -3400,13 +3400,17 @@ test_forced_discard_replays_staged_inventory_after_interruption() {
   local case_dir rc=0 call=staged-captain-call decision receipt
   case_dir=$(make_case discard-stage-replay)
   write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' tasks-axi > "$case_dir/config/backlog-backend"
   tasks-axi add task-x1 "Forced discard origin" --start --json \
     --file "$case_dir/data/backlog.md" >/dev/null
   tasks-axi add "$call" "Staged captain call" --json \
     --file "$case_dir/data/backlog.md" >/dev/null
-  tasks-axi hold "$call" --reason "captain answer pending" --kind captain --json \
-    --file "$case_dir/data/backlog.md" >/dev/null
-  printf '%s\n' "decision_keys=$call" >> "$case_dir/state/task-x1.meta"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$call" --reason "captain answer pending" >/dev/null
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-x1 "$call" >/dev/null
   FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
     FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
     "$ROOT/bin/fm-terminal-reconcile.sh" prepare-retirement task-x1
@@ -3474,6 +3478,10 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
     ;;
   squash-replayed-patch)
     test_squash_merged_pr_allows_replayed_unpushed_patch
+    exit
+    ;;
+  lsof-absent-process-group)
+    test_lsof_absent_reaps_tmux_process_group
     exit
     ;;
   late-captain-removal)

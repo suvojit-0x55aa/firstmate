@@ -2388,7 +2388,8 @@ test_bootstrap_isolates_incomplete_poll_migration() {
     'backend=tmux'
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$dir/home/.env"
   mkdir -p "$dir/home/projects"
-  fm_fake_exit0 "$fakebin" curl jq
+  fm_fake_exit0 "$fakebin" curl
+  ln -s "$REAL_JQ" "$fakebin/jq"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
@@ -2662,13 +2663,16 @@ test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" task-a
   fm_write_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
-    'mode=local-only'
+    'mode=local-only' \
+    'decisions_reviewed=1' \
+    'decision_keys='
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
@@ -2686,7 +2690,7 @@ SH
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "teardown cleanup fixture failed"
+    || fail "teardown cleanup fixture failed: $(cat "$dir/teardown.err")"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
@@ -2696,6 +2700,7 @@ SH
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" task-a
   fm_write_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
@@ -2703,6 +2708,8 @@ SH
     "project=$dir/project" \
     'kind=ship' \
     'mode=local-only' \
+    'decisions_reviewed=1' \
+    'decision_keys=' \
     'pr=https://github.com/o/r/pull/18'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/18
   fm_pr_poll_snapshot_capture "$dir/home/state" task-a "$POLL" \
@@ -2724,13 +2731,16 @@ SH
 
   dir=$(make_case teardown-reserved-quarantine)
   fakebin="$dir/fakebin"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" invalid
   fm_write_meta "$dir/home/state/invalid.meta" \
     'window=firstmate:fm-invalid' \
     'endpoint_task_id=invalid' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
-    'mode=local-only'
+    'mode=local-only' \
+    'decisions_reviewed=1' \
+    'decision_keys='
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
   printf 'task artifact\n' > "$dir/home/state/.pr-check-quarantine/invalid.check.abc123"
@@ -3735,6 +3745,10 @@ case "${FM_PR_CHECK_SECURITY_FOCUSED_TEST:-}" in
     ;;
   obligation-namespace-compatibility)
     test_obligation_namespace_compatibility
+    exit
+    ;;
+  teardown-poll-artifacts)
+    test_teardown_removes_poll_artifacts
     exit
     ;;
   *) fail "unknown focused PR check security test: $FM_PR_CHECK_SECURITY_FOCUSED_TEST" ;;

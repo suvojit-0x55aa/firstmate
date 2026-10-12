@@ -270,7 +270,7 @@ run_transferred_release_resume_case() {
 run_preterminal_transferred_release_case() {
   local backend=$1 proof=$2 expected=$3
   local origin="preterminal-$backend-$proof-origin" call="preterminal-$backend-$proof-work"
-  local origin_key call_key rc=0 backlog
+  local origin_key call_key rc=0 backlog reconcile_limit reconcile_attempt
   case "$backend" in
     auto) printf '%s\n' tasks-axi > "$FM_HOME/config/backlog-backend" ;;
     manual) printf '%s\n' manual > "$FM_HOME/config/backlog-backend" ;;
@@ -316,8 +316,13 @@ run_preterminal_transferred_release_case() {
         "$owner" manual-complete "$call_key"
         "$owner" manual-complete "$call_key"
       else
-        "$owner" reconcile
-        "$owner" reconcile
+        reconcile_limit=$(( $(find "$FM_HOME/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d '[:space:]') + 1 ))
+        reconcile_attempt=0
+        while [ "$reconcile_attempt" -lt "$reconcile_limit" ]; do
+          "$owner" reconcile
+          [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$call_key.json")" != true ] || break
+          reconcile_attempt=$((reconcile_attempt + 1))
+        done
       fi
       [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$call_key.json")" = true ] \
         || fail "$backend/$proof did not complete the released transferred receipt"
@@ -327,6 +332,14 @@ run_preterminal_transferred_release_case() {
   rc=0
   if [ "$backend" = manual ]; then
     "$owner" manual-complete "$origin_key" >/dev/null 2>&1 || rc=$?
+  elif [ "$expected" = progressed ]; then
+    reconcile_limit=$(( $(find "$FM_HOME/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d '[:space:]') + 1 ))
+    reconcile_attempt=0
+    while [ "$reconcile_attempt" -lt "$reconcile_limit" ]; do
+      "$owner" reconcile
+      [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$origin_key.json")" != true ] || break
+      reconcile_attempt=$((reconcile_attempt + 1))
+    done
   else
     "$owner" reconcile
     "$owner" reconcile

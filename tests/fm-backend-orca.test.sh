@@ -1274,6 +1274,7 @@ test_ship_teardown_refuses_orca_missing_worktree_path() {
   config="$TMP_ROOT/missing-ship-config"
   fm_git_init_commit "$proj"
   mkdir -p "$data/$id" "$state" "$config"
+  fm_test_seed_manual_task "$data" "$config" "$id"
   touch "$state/.last-watcher-beat"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-missing-ship" "worktree=$wt" "project=$proj" \
@@ -1994,6 +1995,10 @@ case "${FM_BACKEND_ORCA_FOCUSED_TEST:-}" in
     ;;
   teardown-missing-path)
     test_teardown_removes_orca_worktree_when_path_missing
+    exit
+    ;;
+  teardown-missing-ship)
+    test_ship_teardown_refuses_orca_missing_worktree_path
     exit
     ;;
   *) fail "unknown focused Orca backend test: $FM_BACKEND_ORCA_FOCUSED_TEST" ;;
