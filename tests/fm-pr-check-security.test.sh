@@ -129,19 +129,25 @@ SH
 
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" "$id"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "decisions_reviewed=1" \
+    "decision_keys="
 }
 
 write_poll_meta() {
   local state=$1 id=$2 url=$3
+  fm_test_seed_manual_task "$(dirname "$state")/data" "$(dirname "$state")/config" "$id"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "decisions_reviewed=1" \
+    "decision_keys=" \
     "pr=$url"
 }
 
@@ -549,6 +555,7 @@ test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" task-a
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
@@ -3262,8 +3269,15 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   local dir state rc
   dir=$(make_case different-merged-pr-not-absorbed)
   state="$dir/home/state"
+  mkdir -p "$dir/secondmate-home"
+  printf -- '- task-a | scope: test | home: %s\n' "$dir/secondmate-home" \
+    > "$dir/home/data/secondmates.md"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/1
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_write_meta "$state/task-a.meta" \
+    'window=session:fm-task-a' "worktree=$dir/secondmate-home" "project=$dir/project" \
+    'kind=secondmate' 'mode=secondmate' 'backend=tmux' "home=$dir/secondmate-home" \
+    'pr=https://github.com/o/r/pull/1' 'decisions_reviewed=1' 'decision_keys='
 
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
@@ -3279,6 +3293,10 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
 
   write_poll_meta "$state" task-a https://github.com/o/r/pull/2
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/2
+  fm_write_meta "$state/task-a.meta" \
+    'window=session:fm-task-a' "worktree=$dir/secondmate-home" "project=$dir/project" \
+    'kind=secondmate' 'mode=secondmate' 'backend=tmux' "home=$dir/secondmate-home" \
+    'pr=https://github.com/o/r/pull/2' 'decisions_reviewed=1' 'decision_keys='
   rm -f "$state/.last-check"
 
   set +e

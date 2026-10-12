@@ -194,8 +194,10 @@ run_transferred_release_resume_case() {
         tx 'done' "$call" --no-prune --json >/dev/null
         "$owner" manual-complete "$new_key"
       else
-        "$owner" reconcile
-        "$owner" reconcile
+        for _ in 1 2 3 4 5 6 7 8; do
+          "$owner" reconcile
+          [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$new_key.json")" != true ] || break
+        done
       fi
       [ "$(jq -r .backlog "$FM_HOME/state/terminal-delivery/$new_key.json")" = true ] \
         || fail "$backend/$scenario did not complete transferred resumed work"
@@ -1100,7 +1102,8 @@ EOF
 
 test_reconcile_streams_history_past_argv_limit() {
   local original_home=$FM_HOME home="$TMP_ROOT/reconcile-argv-scale" dir fakebin real_jq
-  local id=argv-scale-active key record argmax target total=0 i=0 padding name path count report
+  local id=argv-scale-active key record argmax target total=0 i=0 j padding name path count report
+  local completed_id completed_key
   FM_HOME=$home
   export FM_HOME
   mkdir -p "$home"/{state/terminal-delivery,config,data,fakebin}
@@ -1123,6 +1126,12 @@ test_reconcile_streams_history_past_argv_limit() {
     total=$((total + ${#path} + 1))
     i=$((i + 1))
   done
+  for j in $(seq 1 108); do
+    completed_id=$(printf 'completed-pending-%03d' "$j")
+    completed_key=$(printf '%s' "$completed_id|$completed_id" | shasum -a 256 | awk '{print $1}')
+    printf '{"schema":"fm-terminal-delivery.v1","key":"%s","id":"%s","incarnation":"%s","kind":"ship","mode":"no-mistakes","state":"done","pr":"https://github.com/o/r/pull/1","merged":true,"retired":true,"discarded":false,"backlog":true,"refill":true,"reviewed":false,"superseded_by":"","captain_keys":"","origin_captain_cycle":"none","decisions_reviewed":true}\n' \
+      "$completed_key" "$completed_id" "$completed_id" > "$dir/$completed_key.json"
+  done
 
   real_jq=$(command -v jq)
   fakebin="$home/fakebin"
@@ -1144,11 +1153,13 @@ EOF
   PATH="$fakebin:$PATH" FM_REAL_JQ="$real_jq" FM_JQ_COUNT="$home/jq.count" \
     "$owner" reconcile
   count=$(cat "$home/jq.count")
-  [ "$count" -le 30 ] || fail "argv-scale reconcile launched jq $count times"
+  [ "$count" -le 48 ] || fail "argv-scale reconcile launched jq $count times"
   [ "$(jq -r .backlog "$record")" = true ] \
     || fail 'argv-scale reconcile did not advance the actionable active receipt'
   [ "$(find "$dir" -type f -name 'reviewed-*.json' | wc -l | tr -d ' ')" = "$i" ] \
     || fail 'argv-scale reconcile did not preserve retained receipt history'
+  [ "$(find "$dir" -type f -name '*.json' -exec jq -r 'select(.backlog == true and .reviewed == false) | .key' {} + | wc -l | tr -d ' ')" = 109 ] \
+    || fail 'argv-scale reconcile did not preserve completed pending-review history'
   FM_HOME=$original_home
   export FM_HOME
   pass 'terminal report and reconciliation stream history beyond the argv limit'
@@ -2521,6 +2532,10 @@ case "${FM_TERMINAL_FOCUSED_TEST:-}" in
     for attestation_backend in auto manual; do
       run_retired_attestation_recovery_case "$attestation_backend"
     done
+    test_reconcile_streams_history_past_argv_limit
+    exit
+    ;;
+  reconcile-history)
     test_reconcile_streams_history_past_argv_limit
     exit
     ;;

@@ -418,6 +418,7 @@ EOF
   # a seeded busy record could never be settled.
   assert_absent "$home/state/$id.busy-gen" "muse spawn armed a busy record it can never clear"
   printf 'binding_id=retired\nsession_log=%s\n' "$prior" > "$home/state/$id.muse-session-current"
+  fm_test_seed_manual_task "$home/data" "$home/config" "$id"
 
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     PATH="$fakebin:$PATH" "$TEARDOWN" "$id" --force >/dev/null 2>&1 \

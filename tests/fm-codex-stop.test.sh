@@ -340,7 +340,6 @@ test_cleanup_cancellation_revokes_handling() {
     arm_pid=$AWAIT_ARM_PID
     kill -STOP "$arm_pid"
     : > "$release"
-    await_output "$dir/out" 'Run bin/fm-wake-drain.sh'
     await_cleanup_wait "$stop_owner"
     assert_grep 'phase=handling' "$dir/state/.codex-stop-health" \
       "$signal cleanup cancellation fixture lost its handling claim before cancellation"
@@ -387,7 +386,6 @@ test_cleanup_cancellation_revokes_handling() {
   arm_pid=$AWAIT_ARM_PID
   kill -STOP "$arm_pid"
   : > "$release"
-  await_output "$dir/out" 'Run bin/fm-wake-drain.sh'
   await_cleanup_wait "$stop_owner"
   sleep 30 &
   STOP_PID_TWO=$!

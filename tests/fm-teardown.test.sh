@@ -170,6 +170,7 @@ SH
 
   # Fresh watcher beacon so fm-guard stays quiet.
   touch "$case_dir/state/.last-watcher-beat"
+  fm_test_seed_manual_task "$case_dir/data" "$case_dir/config" task-x1
 
   printf '%s\n' "$case_dir"
 }
@@ -1050,6 +1051,46 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+}
+
+test_merged_pr_refuses_fork_pushed_unlanded_patch() {
+  local case_dir rc pr_dir pr_head
+  case_dir=$(make_case fork-pushed-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" a.txt a "add a"
+  wt_commit_file "$case_dir" hidden.txt hidden "fork custody only"
+  add_fork_with_pushed_branch "$case_dir"
+  wt_commit_file "$case_dir" c.txt c "add c"
+  append_pr_meta_url "$case_dir"
+
+  pr_dir="$case_dir/_pr"
+  git clone -q "$case_dir/origin.git" "$pr_dir"
+  printf '%s\n' a > "$pr_dir/a.txt"
+  git -C "$pr_dir" add -- a.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "add a"
+  printf '%s\n' c > "$pr_dir/c.txt"
+  git -C "$pr_dir" add -- c.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "add c"
+  git -C "$pr_dir" push -q origin HEAD:refs/heads/pr-head
+  git -C "$case_dir/project" fetch -q origin pr-head
+  pr_head=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/pr-head)
+  rm -rf "$pr_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fork-pushed-unlanded: teardown should refuse content absent from the merged PR"
+  git -C "$case_dir/wt" merge-base --is-ancestor HEAD^ refs/remotes/fork/fm/task-x1 \
+    || fail "fork-pushed-unlanded: fixture did not preserve fork custody"
+  assert_present "$case_dir/wt" "fork-pushed-unlanded: teardown removed the unlanded worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "fork-pushed-unlanded: teardown removed custody metadata"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "fork-pushed-unlanded: refusal was not actionable"
+  pass "merged PR proof checks fork-pushed current content before teardown"
 }
 
 test_merged_pr_with_later_local_commit_refuses() {
@@ -3337,6 +3378,10 @@ case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
     test_local_only_merged_to_local_main_allows
     exit
     ;;
+  merged-pr-current-content)
+    test_merged_pr_refuses_fork_pushed_unlanded_patch
+    exit
+    ;;
   late-captain-removal)
     test_late_captain_call_refuses_before_worktree_removal
     exit
@@ -3375,6 +3420,7 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_no_pr_recorded_open_pr_retains_reconciliation_custody
 test_squash_merged_pr_allows_replayed_unpushed_patch
+test_merged_pr_refuses_fork_pushed_unlanded_patch
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags

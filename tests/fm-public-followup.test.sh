@@ -624,7 +624,9 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+    "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-child
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -648,7 +650,9 @@ test_secondmate_teardown_requires_parent_binding() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+    "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-child
   assert_absent "$child/.fm-secondmate-parent" \
     "the legacy env-only binding case must not gain a durable parent record"
 
@@ -757,7 +761,9 @@ test_secondmate_teardown_resolves_parent_from_durable_record_when_env_lost() {
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+    "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-child
 
   # No FM_PUBLIC_FOLLOWUP_PRIMARY_HOME at all here: a restart of the secondmate
   # agent that drops the launch-time prefix must still find the real parent
@@ -790,7 +796,9 @@ test_secondmate_teardown_durable_record_missing_parent_registration_still_refuse
   assert_local_secondmate_parent_record "$child" "$parent_resolved"
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+    "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-child
   # No parent/state/mate.meta at all: the parent never recorded this secondmate's
   # own agent, so its side of the binding is genuinely missing. A durable LOCAL
   # record naming the real parent path must not be enough on its own to bypass
@@ -823,12 +831,13 @@ test_secondmate_teardown_durable_record_with_unknown_field_succeeds() {
   parent_alias="$TMP_ROOT/teardown-durable-clean-parent-alias"
   ln -s "$parent" "$parent_alias"
   fm_write_meta "$parent/state/mate.meta" "kind=secondmate" "home=$child"
-  fm_git_init_commit "$child/projects/worktree"
+  fm_git_worktree "$child/projects/source" "$child/projects/worktree" "fm/work-clean"
   printf 'manual\n' > "$child/config/backlog-backend"
   fm_write_meta "$child/state/work-clean.meta" \
     "window=firstmate:fm-work-clean" "endpoint_task_id=work-clean" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/source" \
+    "kind=ship" "mode=local-only" "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-clean
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -860,7 +869,8 @@ test_secondmate_teardown_rejects_conflicting_live_and_durable_parent_bindings() 
   fm_write_meta "$child/state/work-conflict.meta" \
     "window=firstmate:fm-work-conflict" "endpoint_task_id=work-conflict" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-conflict
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -887,7 +897,9 @@ test_secondmate_teardown_rejects_unsafe_durable_parent_records() {
     fm_fake_exit0 "$child/fakebin" tmux treehouse no-mistakes gh gh-axi
     fm_write_meta "$child/state/work-child.meta" \
       "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
-      "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+      "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+      "decisions_reviewed=1" "decision_keys="
+    fm_test_seed_manual_task "$child/data" "$child/config" work-child
     parent_record="$child/.fm-secondmate-parent"
     case "$case_name" in
       symlink)
@@ -954,7 +966,8 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
   fm_write_meta "$child/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "kind=ship" "mode=local-only" "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-child
   pre=${parent_resolved%??????}
   suf=${parent_resolved#"$pre"}
   record="$child/.fm-secondmate-parent"
@@ -980,7 +993,7 @@ test_secondmate_teardown_rejects_nul_bearing_durable_parent_record() {
 test_relay_disabled_unmarked_teardown_skips_public_path() {
   local home tasks_log out rc
   home=$(make_home teardown-disabled-unmarked relay-off)
-  fm_git_init_commit "$home/projects/worktree"
+  fm_git_worktree "$home/projects/source" "$home/projects/worktree" "fm/work-disabled"
   tasks_log="$home/tasks-axi.log"; : > "$tasks_log"
   printf 'manual\n' > "$home/config/backlog-backend"
   cat > "$home/fakebin/tasks-axi" <<'SH'
@@ -991,8 +1004,9 @@ SH
   chmod +x "$home/fakebin/tasks-axi"
   fm_write_meta "$home/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
-    "worktree=$home/projects/worktree" "project=$home/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "worktree=$home/projects/worktree" "project=$home/projects/source" \
+    "kind=ship" "mode=local-only" "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$home/data" "$home/config" work-disabled
 
   rc=0
   out=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -1000,7 +1014,9 @@ SH
     FM_CONFIG_OVERRIDE="$home/config" FAKE_TASKS_AXI_LOG="$tasks_log" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "relay-disabled unmarked teardown must not refuse public-followup cleanup (rc=$rc): $out"
-  [ ! -s "$tasks_log" ] || fail "relay-disabled unmarked teardown must not invoke tasks-axi: $(tr '\n' ';' < "$tasks_log")"
+  if grep -vFx -- '--version' "$tasks_log" > "$home/unexpected-tasks-axi.log"; then
+    fail "relay-disabled unmarked teardown invoked the public tasks-axi path: $(tr '\n' ';' < "$home/unexpected-tasks-axi.log")"
+  fi
   assert_not_contains "$out" "still owes a public reply" \
     "relay-disabled unmarked teardown must not run the public commitment guard"
   assert_absent "$home/state/public-followup" \
@@ -1012,7 +1028,7 @@ test_relay_disabled_parent_allows_marked_child_teardown() {
   local parent child tasks_log out rc
   parent=$(make_home teardown-disabled-parent relay-off)
   child=$(make_home teardown-disabled-child relay-off)
-  fm_git_init_commit "$child/projects/worktree"
+  fm_git_worktree "$child/projects/source" "$child/projects/worktree" "fm/work-disabled"
   printf '%s\n' disabled-mate > "$child/.fm-secondmate-home"
   printf -- '- disabled-mate - synthetic (home: %s; scope: synthetic; projects: ; added 2026-07-30)\n' \
     "$child" > "$parent/data/secondmates.md"
@@ -1027,8 +1043,9 @@ SH
   chmod +x "$child/fakebin/tasks-axi"
   fm_write_meta "$child/state/work-disabled.meta" \
     "window=firstmate:fm-work-disabled" "endpoint_task_id=work-disabled" \
-    "worktree=$child/projects/worktree" "project=$child/projects/worktree" \
-    "kind=ship" "mode=local-only"
+    "worktree=$child/projects/worktree" "project=$child/projects/source" \
+    "kind=ship" "mode=local-only" "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-disabled
 
   rc=0
   out=$(PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
@@ -1037,7 +1054,9 @@ SH
     FM_PUBLIC_FOLLOWUP_PRIMARY_HOME="$parent" FAKE_TASKS_AXI_LOG="$tasks_log" \
     "$TEARDOWN" work-disabled 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "relay-disabled parent must allow marked-child teardown (rc=$rc): $out"
-  [ ! -s "$tasks_log" ] || fail "relay-disabled parent must not invoke tasks-axi for a marked child"
+  if grep -vFx -- '--version' "$tasks_log" > "$child/unexpected-tasks-axi.log"; then
+    fail "relay-disabled parent invoked the public tasks-axi path for a marked child: $(tr '\n' ';' < "$child/unexpected-tasks-axi.log")"
+  fi
   assert_not_contains "$out" "still owes a public reply" \
     "relay-disabled parent must not run the public commitment guard"
   assert_absent "$child/state/public-followup" \
@@ -1056,7 +1075,9 @@ test_secondmate_parent_binding_matches_literal_id() {
   fm_write_meta "$parent/state/mate.id.meta" "kind=secondmate" "home=$child"
   fm_write_meta "$child/state/work-literal.meta" \
     "window=firstmate:fm-work-literal" "endpoint_task_id=work-literal" \
-    "worktree=$child" "project=$child" "kind=ship" "mode=local-only"
+    "worktree=$child" "project=$child" "kind=ship" "mode=local-only" \
+    "decisions_reviewed=1" "decision_keys="
+  fm_test_seed_manual_task "$child/data" "$child/config" work-literal
 
   PATH="$child/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$child" \
     FM_STATE_OVERRIDE="$child/state" FM_DATA_OVERRIDE="$child/data" \
@@ -1147,7 +1168,10 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "decisions_reviewed=1" \
+    "decision_keys="
+  fm_test_seed_manual_task "$home/data" "$home/config" ship-task
 
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -1165,8 +1189,10 @@ test_cleanup_refuses_while_a_public_reply_is_owed() {
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" ship-task >/dev/null 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] || fail "cleanup must proceed once the public reply has landed (rc=$rc)"
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" ship-task \
+    > "$home/teardown-2.out" 2> "$home/teardown-2.err" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "cleanup must proceed once the public reply has landed (rc=$rc): $(cat "$home/teardown-2.err")"
   pass "cleanup refuses while a public reply is owed and proceeds once it has landed"
 }
 
@@ -1972,7 +1998,10 @@ test_retention_creates_no_false_teardown_refusal() {
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "decisions_reviewed=1" \
+    "decision_keys="
+  fm_test_seed_manual_task "$home/data" "$home/config" ship-retain
   emit_terminal "$home" "$home" pf-retain main ship-retain >/dev/null || fail "emit failed"
   run_pf "$home" consume >/dev/null || fail "consume failed"
   FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-retain >/dev/null || fail "delivery failed"
@@ -2127,7 +2156,10 @@ test_x_request_teardown_warns_when_final_unposted() {
     "project=$home/projects/sample" \
     "kind=ship" \
     "mode=local-only" \
-    "x_request=req-legacy-final"
+    "x_request=req-legacy-final" \
+    "decisions_reviewed=1" \
+    "decision_keys="
+  fm_test_seed_manual_task "$home/data" "$home/config" linked-task
   rc=0
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \

@@ -965,6 +965,8 @@ test_teardown_conformance_old_vs_new() {
   state_old="$TMP_ROOT/teardown-state-old"; state_new="$TMP_ROOT/teardown-state-new"
   config_old="$TMP_ROOT/teardown-config-old"; config_new="$TMP_ROOT/teardown-config-new"
   mkdir -p "$state_old" "$state_new" "$config_old" "$config_new"
+  fm_test_seed_manual_task "$data" "$config_old" "$id"
+  printf '%s\n' manual > "$config_new/backlog-backend"
 
   fm_write_meta "$state_old/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \

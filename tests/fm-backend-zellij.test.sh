@@ -836,6 +836,7 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
   dir="$TMP_ROOT/teardown-zellij-ghost"; state="$dir/state"; data="$dir/data"; config="$dir/config"; project="$dir/project"
   mkdir -p "$state" "$data/zghost" "$config" "$project" "$dir/responses"
   printf 'report\n' > "$data/zghost/report.md"
+  fm_test_seed_manual_task "$data" "$config" zghost
   fm_write_meta "$state/zghost.meta" \
     "window=firstmate:7" \
     "endpoint_task_id=zghost" \

@@ -815,7 +815,7 @@ case "$mode" in
     cursor=$(cat "$DIR/.cursor" 2>/dev/null || true)
     RECONCILE_CANDIDATES=$(mktemp "$DIR/.candidates.XXXXXX") || exit 1
     find "$DIR" -type f -name '*.json' -exec cat {} + | jq -r '
-      select(.reviewed != true and ((.superseded_by // "") == "") and .discarded != true)
+      select(.reviewed != true and .backlog != true and ((.superseded_by // "") == "") and .discarded != true)
       | .key
       | select(type == "string")
     ' | LC_ALL=C sort -u > "$RECONCILE_CANDIDATES" || exit 1

@@ -75,7 +75,8 @@ run_captain() {  # <home> <command args...>
 run_terminal() {  # <home> <command args...>
   local home=$1
   shift
-  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-terminal-reconcile.sh" "$@"
 }
@@ -946,10 +947,10 @@ test_terminal_resolution_mode_is_whitelisted() {
   pass "terminal readiness accepts only supported captain resolution modes"
 }
 
-# A post-teardown visual review completes against the surviving report and
-# durable tasks, with no volatile task metadata and no second decision database.
+# A post-teardown visual review still uses the shared hold owner, while the
+# completed receipt keeps its authenticated captain inventory immutable.
 test_visual_review_uses_shared_completion_owner() {
-  local home id json receipt
+  local home id json receipt before out
   home=$(make_home visual-review)
   id=sample-board-review
   mkdir -p "$home/data/$id"
@@ -965,21 +966,27 @@ test_visual_review_uses_shared_completion_owner() {
   receipt=$(jq -r --arg id "$id" \
     'select(.id==$id and ((.superseded_by // "") == "")) | .key' \
     "$home/state/terminal-delivery/"*.json)
+  before=$(jq -cS . "$home/state/terminal-delivery/$receipt.json")
 
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   run_captain "$home" hold sample-layout-call --title "Choose the sample layout" \
     --reason "captain layout choice pending" --repo sample --origin "$id" >/dev/null \
     || fail "post-teardown visual review could not use the shared hold owner"
-  run_captain "$home" complete "$id" --receipt "$receipt" sample-layout-call >/dev/null \
-    || fail "post-teardown visual review could not use the shared completion owner"
+  if out=$(run_captain "$home" complete "$id" --receipt "$receipt" sample-layout-call 2>&1); then
+    fail "post-teardown visual review changed a completed receipt's captain inventory"
+  fi
+  assert_contains "$out" 'keep its captain inventory unchanged' \
+    "post-teardown visual review did not name the immutable receipt boundary"
+  [ "$before" = "$(jq -cS . "$home/state/terminal-delivery/$receipt.json")" ] \
+    || fail "rejected post-teardown review mutated the completed receipt"
   json=$(run_bearings "$home") || fail "Bearings failed after the ended visual review"
   printf '%s' "$json" | jq -e '
     .decisions_open | any(.id == "sample-layout-call" and .verb == "captain-hold")
   ' >/dev/null || fail "ended visual review did not leave its durable Captain Call: $json"
   [ ! -e "$home/data/visual-review-decisions.json" ] \
     || fail "visual review created a second decision database"
-  pass "ended visual review follows the same captain-hold completion owner"
+  pass "ended visual review uses the shared hold owner without reopening completed receipt inventory"
 }
 
 test_none_inventory_and_resolved_prose_do_not_create_holds() {

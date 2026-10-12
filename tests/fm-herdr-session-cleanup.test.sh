@@ -291,6 +291,19 @@ cat > "$INTEGRATION_ROOT/bin/fm-herdr-session-cleanup.sh" <<'SH'
 printf '%s\n' "${FM_HOME:?}" >> "${FM_HERDR_CLEANUP_TRACE:?}"
 SH
 chmod +x "$INTEGRATION_ROOT/bin/fm-herdr-session-cleanup.sh"
+cat > "$INTEGRATION_ROOT/bin/fm-startup-network.sh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  start)
+    (
+      while [ ! -e "${FM_HERDR_CLEANUP_RELEASE:?}" ]; do sleep 0.01; done
+      "$(dirname "$0")/fm-herdr-session-cleanup.sh"
+    ) >/dev/null 2>&1 &
+    ;;
+  harvest) ;;
+esac
+SH
+chmod +x "$INTEGRATION_ROOT/bin/fm-startup-network.sh"
 printf '%s\n' manual > "$INTEGRATION_ROOT/home/config/backlog-backend"
 FM_HOME="$INTEGRATION_ROOT/home" FM_HERDR_CLEANUP_TRACE="$TRACE" FM_BOOTSTRAP_DETECT_ONLY=1 \
   "$INTEGRATION_ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
@@ -305,14 +318,22 @@ cat > "$INTEGRATION_ROOT/bin/fm-lock.sh" <<'SH'
 printf '%s\n' 'lock acquired'
 SH
 chmod +x "$INTEGRATION_ROOT/bin/fm-lock.sh"
+RELEASE="$INTEGRATION_ROOT/cleanup.release"
 FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
-  FM_HERDR_CLEANUP_TRACE="$TRACE" \
+  FM_HERDR_CLEANUP_TRACE="$TRACE" FM_HERDR_CLEANUP_RELEASE="$RELEASE" \
   "$INTEGRATION_ROOT/bin/fm-session-start.sh" >/dev/null 2>&1 \
   || fail "lock-owning session start failed"
-[ "$(cat "$TRACE")" = "$INTEGRATION_ROOT/home" ] \
-  || fail "lock-owning session start did not run cleanup for its exact home"
+[ ! -e "$TRACE" ] || fail "lock-owning session start waited for deferred cleanup"
+: > "$RELEASE"
+for _ in $(seq 1 200); do
+  [ -e "$TRACE" ] && break
+  sleep 0.01
+done
+[ -e "$TRACE" ] && [ "$(cat "$TRACE")" = "$INTEGRATION_ROOT/home" ] \
+  || fail "deferred cleanup did not run for the lock-owning session's exact home"
 
 : > "$TRACE"
+rm -f "$RELEASE"
 cat > "$INTEGRATION_ROOT/bin/fm-lock.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' 'error: another live firstmate session holds the lock' >&2
@@ -320,7 +341,7 @@ exit 1
 SH
 chmod +x "$INTEGRATION_ROOT/bin/fm-lock.sh"
 FM_HOME="$INTEGRATION_ROOT/home" FM_ROOT_OVERRIDE="$INTEGRATION_ROOT" \
-  FM_HERDR_CLEANUP_TRACE="$TRACE" \
+  FM_HERDR_CLEANUP_TRACE="$TRACE" FM_HERDR_CLEANUP_RELEASE="$RELEASE" \
   "$INTEGRATION_ROOT/bin/fm-session-start.sh" >/dev/null 2>&1 \
   || fail "read-only session start failed"
 [ ! -s "$TRACE" ] || fail "read-only session start ran stale projection cleanup"
