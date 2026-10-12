@@ -96,21 +96,32 @@ receipt_captain_obligations() {
   jq -ce '
     def valid_cycle: . == "none" or (type == "string" and test("^[0-9a-f]{64}$"));
     def valid_keys: type == "string" and (split(",") | all(test("^[A-Za-z0-9._-]+$") or . == ""));
-    if has("captain_obligations") then
-      .captain_obligations
-      | select(type == "array" and length > 0)
-      | select(all(
-          type == "object" and
-          (.receipt | type == "string" and test("^[0-9a-f]{64}$")) and
-          (.origin_cycle | valid_cycle) and
-          (.captain_keys | valid_keys) and
-          (.origin_resolved | type == "boolean")
-        ))
-    else
-      select((.captain_keys | type) == "string")
-      | select(.origin_captain_cycle | valid_cycle)
-      | [{receipt:.key,origin_cycle:.origin_captain_cycle,captain_keys:.captain_keys,origin_resolved:false}]
-    end
+    def normalized_keys:
+      split(",") | map(select(length > 0)) | unique | join(",");
+    (if has("captain_obligations") then
+       .captain_obligations
+       | select(type == "array" and length > 0)
+     else
+       select((.captain_keys | type) == "string")
+       | select(.origin_captain_cycle | valid_cycle)
+       | [{receipt:.key,origin_cycle:.origin_captain_cycle,captain_keys:.captain_keys,origin_resolved:false}]
+     end)
+    | select(all(
+        type == "object" and
+        (.receipt | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.origin_cycle | valid_cycle) and
+        (.captain_keys | valid_keys) and
+        (.origin_resolved | type == "boolean")
+      ))
+    | sort_by(.receipt,.origin_cycle)
+    | group_by([.receipt,.origin_cycle])
+    | select(all(.[]; (map(.origin_resolved) | unique | length) == 1))
+    | map({
+        receipt:.[0].receipt,
+        origin_cycle:.[0].origin_cycle,
+        captain_keys:(map(.captain_keys) | join(",") | normalized_keys),
+        origin_resolved:.[0].origin_resolved
+      })
   ' "$record"
 }
 set_current_captain_obligation() {
@@ -126,10 +137,13 @@ set_current_captain_obligation() {
   fi
   obligations=$(printf '%s\n' "$obligations" | jq -ce \
     --arg receipt "$current_receipt" --arg keys "$keys" --arg cycle "$cycle" '
-      ([.[] | select(.receipt == $receipt and .origin_resolved == false)] | length) as $matches
+      ([.[] | select(.receipt == $receipt and .origin_cycle == $cycle)] | length) as $matches
       | if $matches == 1 then
-          map(if .receipt == $receipt and .origin_resolved == false
-              then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(",")) | .origin_cycle=$cycle else . end)
+          map(if .receipt == $receipt and .origin_cycle == $cycle
+              then if .origin_resolved == false
+                   then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(","))
+                   else error("current captain obligation is already resolved") end
+              else . end)
         elif $matches == 0 then
           . + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,origin_resolved:false}]
         else error("ambiguous current captain obligation") end
@@ -191,6 +205,7 @@ supersede_prior_records() {
       fi
       existing=$(printf '%s\n' "$obligations" | jq -r --arg cycle "$prior_cycle" \
         '[.[] | select(.origin_cycle == $cycle and .origin_resolved == false)] | length') || return 1
+      [ "$existing" -le 1 ] || return 1
       if [ "$existing" -gt 0 ]; then
         obligations=$(printf '%s\n' "$obligations" | jq -ce --arg cycle "$prior_cycle" --arg keys "$prior_keys" '
           map(if .origin_cycle == $cycle and .origin_resolved == false

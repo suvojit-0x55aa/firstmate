@@ -1799,6 +1799,76 @@ test_same_cycle_obligation_updates_preserve_inherited_calls() {
     || fail 'answered inherited captain call did not unblock replacement completion'
   pass 'same-cycle obligation updates preserve inherited captain calls'
 }
+run_same_receipt_rehold_case() {
+  local shape=$1 id="same-receipt-rehold-$1" pr=https://github.com/o/r/pull/508
+  local call_a="same-receipt-rehold-$1-a" call_b="same-receipt-rehold-$1-b"
+  local receipt record cycle_a cycle_b successor successor_record tmp
+  make_task "$id"
+  tx add "$call_a" "$call_a" --json >/dev/null
+  tx add "$call_b" "$call_b" --json >/dev/null
+  hold_captain_task "$id"
+  hold_captain_task "$call_a"
+  hold_captain_task "$call_b"
+  printf 'decision_keys=%s\ndecisions_reviewed=1\n' "$call_a" >> "$FM_HOME/state/$id.meta"
+  "$owner" observe "$id" done "$pr"
+  "$owner" retired "$id" normal
+  receipt=$("$owner" receipt-key "$id")
+  record="$FM_HOME/state/terminal-delivery/$receipt.json"
+  cycle_a=$(jq -r .origin_captain_cycle "$record")
+  if [ "$shape" = legacy ]; then
+    tmp="$record.tmp"
+    jq 'del(.captain_obligations)' "$record" > "$tmp" && mv "$tmp" "$record"
+  fi
+  release_captain_task "$id"
+  hold_captain_task "$id"
+  cycle_b=$(captain origin-obligation "$id")
+  [ "$cycle_a" != "$cycle_b" ] || fail "$shape same-receipt re-hold did not mint a new cycle"
+  printf 'decision_keys=%s\ndecisions_reviewed=1\n' "$call_b" >> "$FM_HOME/state/$id.meta"
+  "$owner" prepare-retirement "$id"
+  "$owner" prepare-retirement "$id"
+  "$owner" retired "$id" normal
+  "$owner" retired "$id" normal
+  jq -e --arg receipt "$receipt" --arg a "$cycle_a" --arg b "$cycle_b" \
+    --arg call_a "$call_a" --arg call_b "$call_b" '
+    .captain_keys == ($call_a + "," + $call_b) and
+    .origin_captain_cycle == $b and
+    ([.captain_obligations[] | select(.receipt==$receipt and .origin_cycle==$a and .captain_keys==$call_a and .origin_resolved==false)] | length) == 1 and
+    ([.captain_obligations[] | select(.receipt==$receipt and .origin_cycle==$b and .captain_keys==$call_b and .origin_resolved==false)] | length) == 1 and
+    (.captain_obligations | length) == 2
+  ' "$record" >/dev/null || fail "$shape same-receipt re-hold overwrote or duplicated a cycle obligation"
+  answer_captain_task "$id"
+  answer_captain_task "$call_a"
+  answer_captain_task "$call_b"
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == false and .refill == false' "$record" >/dev/null \
+    || fail "$shape same-receipt re-hold accepted a release without a successor incarnation"
+  rm "$FM_HOME/state/$id.meta"
+  printf 'spawn_gen=%s-successor\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=%s\n' \
+    "$id" "$pr" "$call_b" > "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" "$pr"
+  "$owner" retired "$id" normal
+  successor=$("$owner" receipt-key "$id")
+  successor_record="$FM_HOME/state/terminal-delivery/$successor.json"
+  [ "$successor" != "$receipt" ] || fail "$shape same-receipt re-hold did not create a successor incarnation"
+  jq -e --arg successor "$successor" '.superseded_by == $successor' "$record" >/dev/null \
+    || fail "$shape same-receipt predecessor was not superseded by exact successor"
+  jq -e --arg old "$receipt" --arg current "$successor" --arg a "$cycle_a" --arg b "$cycle_b" \
+    --arg call_a "$call_a" --arg call_b "$call_b" '
+    .captain_keys == ($call_a + "," + $call_b) and
+    ([.captain_obligations[] | select(.receipt==$old and .origin_cycle==$a and .captain_keys==$call_a and .origin_resolved==true)] | length) == 1 and
+    ([.captain_obligations[] | select(.receipt==$current and .origin_cycle==$b and .captain_keys==$call_b and .origin_resolved==false)] | length) == 1 and
+    (.captain_obligations | length) == 2
+  ' "$successor_record" >/dev/null || fail "$shape successor did not preserve independently satisfied cycle obligations"
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true' "$successor_record" >/dev/null \
+    || fail "$shape genuine successor did not unblock both satisfied cycles"
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true and (.captain_obligations | length) == 2' \
+    "$successor_record" >/dev/null || fail "$shape same-receipt lifecycle replay was not stable"
+  pass "$shape same-receipt re-hold preserves composite cycle obligations"
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -1882,6 +1952,11 @@ EOF
   terminal-selection-obligations)
     test_verified_merge_refuses_retired_fallback_for_current_metadata
     test_same_cycle_obligation_updates_preserve_inherited_calls
+    exit
+    ;;
+  same-receipt-rehold)
+    run_same_receipt_rehold_case current
+    run_same_receipt_rehold_case legacy
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;
