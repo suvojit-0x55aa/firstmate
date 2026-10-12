@@ -102,6 +102,139 @@ write_origin_meta() {  # <home> <id> [kind]
     "mode=$kind"
 }
 
+use_manual_reader() {  # <home>
+  local home=$1
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'tasks-axi 0.0.0'
+  exit 0
+fi
+exit 97
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+}
+
+archive_done_task_in_home() {  # <home> <task-id> <prefix>
+  local home=$1 id=$2 prefix=$3 filler
+  for filler in $(seq 1 11); do
+    tasks_in "$home" add "$prefix-filler-$filler" "$prefix filler $filler" >/dev/null
+    tasks_in "$home" done "$prefix-filler-$filler" >/dev/null
+  done
+  if tasks_in "$home" show "$id" --full >/dev/null 2>&1; then
+    fail "$id did not cross the configured Done archive boundary"
+  fi
+}
+
+run_cycle_bound_teardown_control() {  # <backend> <held-or-answered>
+  local backend=$1 resolution=$2 home id call
+  home=$(make_home "cycle-control-$backend-$resolution")
+  id="sample-cycle-control-$backend-$resolution"
+  call="$id-call"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Exact cycle control\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain cycle control pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  if [ "$resolution" = answered ]; then
+    printf 'Captain answered the exact persisted cycle.\n' > "$home/answer.txt"
+    run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null
+  fi
+  [ "$backend" != manual ] || use_manual_reader "$home"
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "$backend $resolution exact-cycle teardown failed: $(cat "$home/teardown.err")"
+}
+
+run_reused_cycle_teardown_refusal() {  # <backend>
+  local backend=$1 home id call meta report custody saved_calls bad_calls before_meta before_report before_custody rc
+  home=$(make_home "teardown-cycle-reuse-$backend")
+  id="sample-cycle-reuse-$backend"
+  call="$id-call"
+  meta="$home/state/$id.meta"
+  report="$home/data/$id/report.md"
+  custody="$home/projects/missing-$id/custody.marker"
+  mkdir -p "$home/data/$id" "$(dirname "$custody")"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Reused cycle teardown evidence\n' > "$report"
+  printf 'custody retained\n' > "$custody"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain original cycle pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  saved_calls=$(sed -n 's/^decision_call_cycles=//p' "$meta" | tail -1)
+  [ -n "$saved_calls" ] || fail "$backend reuse fixture omitted the original cycle"
+  tasks_in "$home" done "$call" --no-prune >/dev/null
+  archive_done_task_in_home "$home" "$call" "$id-archive"
+  tasks_in "$home" add "$call" "$call replacement" >/dev/null
+  run_captain "$home" hold "$call" --reason "captain replacement cycle pending" >/dev/null
+  printf 'Captain answered only the replacement cycle.\n' > "$home/replacement-answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/replacement-answer.txt" >/dev/null
+
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/treehouse.log"
+exit 0
+SH
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/tmux.log"
+exit 0
+SH
+  chmod +x "$home/fakebin/treehouse" "$home/fakebin/tmux"
+  [ "$backend" != manual ] || use_manual_reader "$home"
+
+  before_meta=$(shasum -a 256 "$meta" | awk '{print $1}')
+  before_report=$(shasum -a 256 "$report" | awk '{print $1}')
+  before_custody=$(shasum -a 256 "$custody" | awk '{print $1}')
+  for rc in 1 2; do
+    if run_teardown "$home" "$id" > "$home/teardown-$rc.out" 2> "$home/teardown-$rc.err"; then
+      fail "$backend teardown accepted a replacement answer for an archived unresolved cycle"
+    fi
+  done
+  [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before_meta" ] \
+    || fail "$backend refused teardown mutated captain attestation metadata"
+  [ "$(shasum -a 256 "$report" | awk '{print $1}')" = "$before_report" ] \
+    || fail "$backend refused teardown mutated the scout report"
+  [ "$(shasum -a 256 "$custody" | awk '{print $1}')" = "$before_custody" ] \
+    || fail "$backend refused teardown removed worktree custody"
+  assert_no_grep 'return ' "$home/treehouse.log" \
+    "$backend refused teardown returned the worktree"
+  assert_no_grep 'kill-window' "$home/tmux.log" \
+    "$backend refused teardown removed the endpoint"
+
+  cp "$meta" "$meta.valid"
+  awk '!/^decision_call_cycles=/' "$meta.valid" > "$meta"
+  if run_captain "$home" verify "$id" > "$home/missing.out" 2> "$home/missing.err"; then
+    fail "$backend verification accepted missing cycle inventory"
+  fi
+  cp "$meta.valid" "$meta"
+  sed 's/^decision_call_cycles=.*/decision_call_cycles=not-json/' "$meta.valid" > "$meta"
+  if run_captain "$home" verify "$id" > "$home/corrupt.out" 2> "$home/corrupt.err"; then
+    fail "$backend verification accepted corrupt cycle inventory"
+  fi
+  cp "$meta.valid" "$meta"
+  bad_calls=$(printf '%s\n' "$saved_calls" | jq -c --arg id "$call" \
+    '. + [{id:$id,cycle:"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]')
+  awk '!/^decision_call_cycles=/' "$meta.valid" > "$meta"
+  printf 'decision_call_cycles=%s\n' "$bad_calls" >> "$meta"
+  if run_captain "$home" verify "$id" > "$home/ambiguous.out" 2> "$home/ambiguous.err"; then
+    fail "$backend verification accepted an unprovable additional cycle identity"
+  fi
+}
+
+test_teardown_verifies_persisted_call_cycles() {
+  run_reused_cycle_teardown_refusal tasks
+  run_reused_cycle_teardown_refusal manual
+  run_cycle_bound_teardown_control tasks held
+  run_cycle_bound_teardown_control manual answered
+  pass "scout teardown verifies exact persisted captain-call cycles"
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -1288,9 +1421,9 @@ EOF
   pass "a channel source with no decision binding closes nothing"
 }
 
-# Everything a pre-collapse install already has keeps working: composed
-# identities through the shim, short decision keys in recorded metadata, a
-# concrete-origin binding, and the chat fallback for old rows.
+# Everything a pre-collapse install already has keeps working when authentic
+# cycle identity can be recorded: composed identities through the shim, fresh
+# short decision-key intake, a concrete-origin binding, and the chat fallback.
 test_legacy_identities_keep_working() {
   local home id hold out show legacy_text legacy_digest old_hold
   home=$(make_home legacy-compat)
@@ -1313,11 +1446,22 @@ test_legacy_identities_keep_working() {
   show=$(tasks_in "$home" show "$hold" --full)
   assert_contains "$show" "hold_kind: captain" "the shim-created row is not a plain captain-held task"
 
-  # A pre-collapse metadata attestation records SHORT keys; verify must resolve
-  # them through the legacy composed identity.
+  # A non-empty pre-collapse attestation without cycle identity cannot be
+  # rebound through mutable current task state. Fresh short-key intake resolves
+  # the legacy identity once and persists the authenticated cycle.
   printf 'decisions_reviewed=1\ndecision_keys=keep-two,pick-one\n' >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/legacy-verify.out" 2> "$home/legacy-verify.err"; then
+    fail "legacy short-key metadata without hold-cycle identity verified"
+  fi
+  awk '!/^decisions_reviewed=/ && !/^decision_keys=/' "$home/state/$id.meta" \
+    > "$home/state/$id.meta.tmp"
+  mv "$home/state/$id.meta.tmp" "$home/state/$id.meta"
+  run_captain "$home" complete "$id" keep-two pick-one >/dev/null \
+    || fail "fresh legacy short-key intake did not persist composed identities"
+  assert_grep 'decision_call_cycles=' "$home/state/$id.meta" \
+    "fresh legacy short-key intake omitted authenticated cycles"
   run_captain "$home" verify "$id" >/dev/null \
-    || fail "legacy short-key metadata did not verify against composed identities"
+    || fail "authenticated legacy short-key inventory did not verify"
 
   # The shim's routed close records the routed work inside the captain decision
   # and clears the recorded edge.
@@ -1696,6 +1840,11 @@ case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
     test_visual_review_uses_shared_completion_owner
     exit 0
     ;;
+  teardown-cycle-identity)
+    test_teardown_verifies_persisted_call_cycles
+    test_legacy_identities_keep_working
+    exit 0
+    ;;
   '') ;;
   *) fail "unknown focused captain-hold test: $FM_CAPTAIN_HOLD_FOCUSED_TEST" ;;
 esac
@@ -1717,6 +1866,7 @@ test_terminal_status_requires_explicit_resolution_or_transfer
 test_secondmate_hold_stays_in_authoritative_home
 test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
+test_teardown_verifies_persisted_call_cycles
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction

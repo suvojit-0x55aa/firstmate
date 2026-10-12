@@ -30,7 +30,7 @@ It accepts `--none` as an explicit semantic inventory result, refused while the 
 With a non-empty inventory it appends a `captain-held [key=<key>]: tracked by <inventory>` transfer event for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
 Every non-forced ship and scout teardown calls the read-only `verify` subcommand as a preflight, after process reaping immediately before each worktree-removal attempt, and again before journaling retirement and removing source state, with scouts first requiring their report.
-`verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
+`verify` requires the recorded attestation, requires every recorded inventory entry's exact persisted hold cycle to still be durable (actively captain-held, or carrying a recorded answer for that cycle), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
 When the configured manual backend has no compatible tasks-axi, the same owner reads the canonical Markdown task model through `fm-fleet-snapshot.sh --backlog-json`, so verification and terminal readiness remain available without weakening captain-call checks or mutating the backlog.
 Retirement copies the reviewed flag and complete normalized inventory into the exact-incarnation terminal receipt, binding every inventory task to its authenticated hold-cycle identity, and both automatic and manual backlog transitions consult `terminal-ready` only after that durable attestation is present.
 An older non-empty receipt without those per-call cycle identities fails closed and must be reviewed again through its exact authenticated recovery path.
@@ -86,7 +86,8 @@ If tasks-axi is unavailable or its listing cannot be parsed, the guard cannot re
 
 Older installs created derived `<origin>-decision-<key>` identities through the retired `bin/fm-decision-hold.sh`.
 Those rows are already plain task ids, so they render, answer, verify, and close through the collapsed surfaces with no data migration.
-Two legacy identities are resolved in place: a `decision_keys=` metadata entry that names no task resolves through `<origin>-decision-<entry>`, and a channel key that names no task resolves the same way when the source's binding carries a concrete legacy origin.
+Two legacy inputs are resolved only while recording fresh authenticated state: a supplied completion entry that names no task and a channel key with a concrete legacy origin both resolve through `<origin>-decision-<entry>`.
+Previously attested non-empty `decision_keys=` metadata without matching `decision_call_cycles=` identity fails closed instead of resolving against the mutable current backlog.
 A legacy resolution record without a provable hold-cycle identity cannot authorize a current terminal transition.
 Recovery requires replaying the captain's real answer through `answer` or `answers`; that action records a current cycle-aware resolution above the preserved historical record, and never fabricates closure from the old digest alone.
 For a pre-collapse routed resolution, the shim first validates the historical answer digest and routed ids, then records that actual answer through the current owner before finishing any still-recorded dependency-edge cleanup.

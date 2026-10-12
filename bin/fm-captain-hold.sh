@@ -120,9 +120,10 @@
 # every recorded inventory entry must still be durable and no keyed status
 # decision may be open.
 # Metadata compatibility: the attestation keeps the historical
-# `decisions_reviewed=1` and `decision_keys=` keys. Inventory is persisted as
-# resolved task ids; pre-collapse metadata entries resolve through the legacy
-# `<origin>-decision-<entry>` identity before they enter durable state.
+# `decisions_reviewed=1` and `decision_keys=` keys and binds every non-empty
+# inventory entry to its authenticated hold cycle in `decision_call_cycles=`.
+# Legacy short entries resolve through `<origin>-decision-<entry>` only during
+# fresh intake; persisted non-empty inventory without cycle identity fails closed.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -706,10 +707,15 @@ resolution_block() {  # <mode> <terminal-receipt> <hold-cycle> <terminal-incarna
 
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
-verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
-  show=$(task_evidence_show "$id") \
-    || fail "captain-held task $id has no unique active or archived captain-answer record"
+verify_hold_durable() {  # <task-id> [hold-cycle]
+  local id=$1 cycle=${2:-} show state hold_kind body
+  if [ -n "$cycle" ]; then
+    show=$(task_cycle_evidence_show "$id" "$cycle") \
+      || fail "captain-held task $id has no unique active or archived evidence for hold cycle $cycle"
+  else
+    show=$(task_evidence_show "$id") \
+      || fail "captain-held task $id has no unique active or archived captain-answer record"
+  fi
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
@@ -1304,23 +1310,13 @@ command_complete() {
   calls=$(printf '%s\n%s\n' "${previous_calls:-[]}" "$supplied_calls" | jq -sc \
     '[.[][]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') \
     || fail "cannot normalize the reviewed captain-call cycles for $origin"
-  inventory_cycles_valid_for_keys "$keys" "$calls" \
-    || fail "reviewed captain-call cycles do not match the normalized inventory for $origin"
+  verify_inventory_durable "$keys" "$calls" "$origin"
   if [ "$receipt_complete" = true ] && [ "$keys" != "$receipt_previous" ]; then
     fail "terminal receipt $receipt is complete; keep its captain inventory unchanged and register new calls against active originating work through fm-captain-hold.sh hold/complete"
   fi
   if [ "$receipt_complete" = true ] && [ "$calls" != "$receipt_calls" ]; then
     fail "terminal receipt $receipt is complete; keep its captain hold-cycle identities unchanged"
   fi
-  if [ -n "$keys" ]; then
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      verify_hold_durable "$entry"
-    done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
-  fi
-
   status_file="$STATE/$origin.status"
   raw_open=$(status_open_decisions "$status_file")
   if [ -n "$raw_open" ] && [ -z "$supplied" ]; then
@@ -1407,6 +1403,20 @@ inventory_cycles_valid_for_keys() {  # <comma-list> <json-array>
   ' >/dev/null
 }
 
+verify_inventory_durable() {  # <comma-list> <json-array> <origin-id>
+  local keys=$1 calls=$2 origin=$3 rows id cycle
+  inventory_cycles_valid_for_keys "$keys" "$calls" \
+    || fail "reviewed captain-call cycles do not match the normalized inventory for $origin"
+  rows=$(printf '%s\n' "$calls" | jq -r '.[] | [.id,.cycle] | @tsv') \
+    || fail "cannot read the reviewed captain-call cycles for $origin"
+  while IFS=$'\t' read -r id cycle; do
+    [ -n "$id" ] || continue
+    verify_hold_durable "$id" "$cycle"
+  done <<EOF
+$rows
+EOF
+}
+
 command_normalize_inventory_cycles() {
   local origin=${1:-} supplied='' entry
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
@@ -1422,7 +1432,7 @@ command_normalize_inventory_cycles() {
 }
 
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open
+  local origin=${1:-} meta reviewed keys calls key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
@@ -1431,14 +1441,9 @@ command_verify() {
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
-  if [ -n "$keys" ]; then
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
-    done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
-  fi
+  calls=$(meta_value "$meta" decision_call_cycles)
+  [ -n "$keys" ] || [ -n "$calls" ] || calls='[]'
+  verify_inventory_durable "$keys" "${calls:-null}" "$origin"
   open=$(status_open_decisions "$STATE/$origin.status")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
