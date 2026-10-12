@@ -30,7 +30,7 @@
 #   fm-captain-hold.sh normalize-inventory <origin-id> [<task-id>...]
 #   fm-captain-hold.sh origin-obligation <origin-id>
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [--origin-cycle <cycle|none>] [<captain-task-id>...]
+#   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [--origin-cycle <cycle|none>] [--origin-resolved] [<captain-task-id>...]
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -569,6 +569,32 @@ recorded_release_receipt() {  # <task-body>
 
 recorded_release_incarnation() {  # <task-body>
   newest_resolution_field "$1" 'Terminal incarnation'
+}
+
+historical_release_matches() {  # <task-body> <hold-cycle> <terminal-receipt>
+  local decoded
+  decoded=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$decoded" | perl -e '
+    use strict;
+    use warnings;
+    my ($cycle, $receipt) = @ARGV;
+    local $/;
+    my $body = <STDIN> // "";
+    my @records = split /(?=^Resolution recorded by fm-(?:captain|decision)-hold\.\n)/m, $body;
+    for my $record (@records) {
+      next unless $record =~ /^Resolution recorded by fm-(?:captain|decision)-hold\.\n/m;
+      my ($mode) = $record =~ /^Resolution mode: ([^\n]+)$/m;
+      my ($held) = $record =~ /^Hold cycle: ([0-9a-f]{64})$/m;
+      my ($terminal) = $record =~ /^Terminal receipt: ([^\n]+)$/m;
+      my ($incarnation) = $record =~ /^Terminal incarnation: ([^\n]+)$/m;
+      next unless defined $mode && $mode eq "released";
+      next unless defined $held && $held eq $cycle;
+      exit 0 if defined $terminal && $terminal eq $receipt;
+      exit 0 if defined $terminal && $terminal eq "none"
+        && defined $incarnation && $incarnation eq $receipt;
+    }
+    exit 1;
+  ' "$2" "$3"
 }
 
 terminal_receipt_key() {  # <task-id>
@@ -1298,7 +1324,7 @@ command_origin_obligation() {
 }
 
 command_terminal_ready() {
-  local origin=${1:-} receipt='' origin_cycle='' entry id resolved seen show state hold_kind body rc cycle
+  local origin=${1:-} receipt='' origin_cycle='' origin_resolved=0 entry id resolved seen show state hold_kind body rc cycle
   local -a resolved_ids=()
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
@@ -1318,9 +1344,20 @@ command_terminal_ready() {
     fi
     shift 2
   fi
+  if [ "${1:-}" = --origin-resolved ]; then
+    origin_resolved=1
+    shift
+  fi
   require_task_reader
   [ -z "$(status_open_decisions "$STATE/$origin.status")" ] || return 1
-  if show=$(task_evidence_show "$origin"); then
+  if [ "$origin_resolved" = 1 ]; then
+    [ -n "$receipt" ] && [ -n "$origin_cycle" ] || return 1
+    if [ "$origin_cycle" != none ]; then
+      show=$(task_evidence_show "$origin") || return 1
+      body=$(show_field "$show" body)
+      historical_release_matches "$body" "$origin_cycle" "$receipt" || return 1
+    fi
+  elif show=$(task_evidence_show "$origin"); then
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)

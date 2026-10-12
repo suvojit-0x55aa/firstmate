@@ -111,22 +111,18 @@ daemon_lock_held_by_live_daemon() {
 }
 
 fm_afk_flag_write() {  # <state-dir>
-  local state=$1 lock="$1/.cursor-park-owner.lock" pending attempt=0 status=1
+  local state=$1 lock="$1/.cursor-park-owner.lock" attempt=0 status=1
   mkdir -p "$state" || return 1
   [ ! -d "$state/.afk" ] || return 1
-  pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
-  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
   while [ "$attempt" -lt 50 ]; do
     attempt=$((attempt + 1))
     if fm_lock_try_acquire "$lock"; then
-      mv "$pending" "$state/.afk" && status=0
+      fm_session_transition_afk_write "$state" && status=0
       fm_lock_release "$lock"
-      rm -f "$pending" 2>/dev/null || true
       return "$status"
     fi
     [ "$attempt" -lt 50 ] && sleep 0.1
   done
-  rm -f "$pending" 2>/dev/null || true
   return 1
 }
 

@@ -1559,7 +1559,7 @@ EOF
 test_merge_observation_stays_bound_to_exact_receipt() {
   local id=merge-observed-reuse p1=https://github.com/o/r/pull/101 p2=https://github.com/o/r/pull/202
   local p3=https://github.com/o/r/pull/303 key_a key_b record_a record_b before_b current_key
-  local ambiguous=merge-observed-ambiguous ambiguous_a ambiguous_b before_a before_ambiguous_b
+  local ambiguous=merge-observed-ambiguous ambiguous_a ambiguous_b before_a before_ambiguous_b missing_b
   local early=merge-observed-early early_pr=https://github.com/o/r/pull/404 early_key early_record
 
   report_merge() {
@@ -1637,6 +1637,17 @@ test_merge_observation_stays_bound_to_exact_receipt() {
   "$owner" retired "$ambiguous" normal
   printf 'spawn_gen=%s-b\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$ambiguous" "$p1" > "$FM_HOME/state/$ambiguous.meta"
+  before_a=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')
+  missing_b=$(printf '%s' "$ambiguous|$ambiguous-b" | shasum -a 256 | awk '{print $1}')
+  if report_merge "$ambiguous" "$p1"; then
+    fail 'same-PR observation without a current receipt was acknowledged'
+  fi
+  [ ! -e "$FM_HOME/state/$ambiguous.pr-poll-merge-notified" ] \
+    || fail 'same-PR observation without a current receipt committed its notification marker'
+  assert_absent "$FM_HOME/state/terminal-delivery/$missing_b.json" \
+    'same-PR ambiguity created a replacement receipt'
+  [ "$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')" = "$before_a" ] \
+    || fail 'same-PR ambiguity mutated the retired receipt'
   "$owner" observe "$ambiguous" done "$p1"
   ambiguous_b=$("$owner" receipt-key "$ambiguous")
   before_a=$(shasum -a 256 "$FM_HOME/state/terminal-delivery/$ambiguous_a.json" | awk '{print $1}')
@@ -1653,7 +1664,7 @@ test_merge_observation_stays_bound_to_exact_receipt() {
 }
 test_supersession_preserves_unresolved_captain_inventory() {
   local id=supersession-inventory call=supersession-inventory-call
-  local old_key new_key old_record new_record cycle valid_cycle pr=https://github.com/o/r/pull/505
+  local old_key new_key old_record new_record cycle_one cycle_two valid_cycle pr=https://github.com/o/r/pull/505
   make_task "$id"
   tx add "$call" "$call" --json >/dev/null
   hold_captain_task "$id"
@@ -1663,10 +1674,13 @@ test_supersession_preserves_unresolved_captain_inventory() {
   "$owner" retired "$id" normal
   old_key=$("$owner" receipt-key "$id")
   old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
-  cycle=$(jq -r .origin_captain_cycle "$old_record")
-  valid_cycle=$(printf '%s' "$cycle" | grep -Ec '^[0-9a-f]{64}$' || true)
+  cycle_one=$(jq -r .origin_captain_cycle "$old_record")
+  valid_cycle=$(printf '%s' "$cycle_one" | grep -Ec '^[0-9a-f]{64}$' || true)
   [ "$valid_cycle" -eq 1 ] || fail 'supersession fixture did not retain an exact origin hold cycle'
   release_captain_task "$id"
+  hold_captain_task "$id"
+  cycle_two=$(captain origin-obligation "$id")
+  [ "$cycle_two" != "$cycle_one" ] || fail 're-held origin did not mint a distinct captain cycle'
   rm "$FM_HOME/state/$id.meta"
   printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
     "$id" "$pr" > "$FM_HOME/state/$id.meta"
@@ -1676,18 +1690,27 @@ test_supersession_preserves_unresolved_captain_inventory() {
   [ "$old_key" != "$new_key" ] || fail 'supersession fixture did not create a replacement receipt'
   jq -e --arg key "$new_key" '.superseded_by == $key' "$old_record" >/dev/null \
     || fail 'replacement receipt did not supersede its exact predecessor'
-  jq -e --arg call "$call" --arg cycle "$cycle" \
-    '.captain_keys == $call and .origin_captain_cycle == $cycle' "$new_record" >/dev/null \
-    || fail 'receipt supersession dropped unresolved captain inventory or cycle'
+  jq -e --arg call "$call" --arg one "$cycle_one" --arg two "$cycle_two" --arg old "$old_key" --arg new "$new_key" '
+    .captain_keys == $call and .origin_captain_cycle == $two and
+    ([.captain_obligations[] | select(.receipt==$old and .origin_cycle==$one and .captain_keys==$call and .origin_resolved==true)] | length) == 1 and
+    ([.captain_obligations[] | select(.receipt==$new and .origin_cycle==$two and .origin_resolved==false)] | length) == 1
+  ' "$new_record" >/dev/null || fail 'receipt supersession dropped a generation-bound captain obligation'
+  "$owner" merged "$id" "$pr"
   "$owner" retired "$id" normal
-  if captain complete "$id" --receipt "$new_key" --none >/dev/null 2>&1; then
-    fail 'empty completion erased inherited unresolved captain inventory'
-  fi
-  jq -e --arg call "$call" --arg cycle "$cycle" \
-    '.captain_keys == $call and .origin_captain_cycle == $cycle and .backlog == false' \
-    "$new_record" >/dev/null || fail 'refused empty completion changed inherited evidence'
+  captain complete "$id" --receipt "$new_key" --none >/dev/null \
+    || fail 'receipt-backed review could not preserve inherited inventory'
+  jq -e --arg call "$call" --arg one "$cycle_one" --arg two "$cycle_two" '
+    .captain_keys == $call and .origin_captain_cycle == $two and .backlog == false and
+    ([.captain_obligations[] | select(.origin_cycle==$one)] | length) == 1 and
+    ([.captain_obligations[] | select(.origin_cycle==$two)] | length) == 1
+  ' "$new_record" >/dev/null || fail 'receipt-backed review erased inherited cycle evidence'
   assert_contains "$(tx show "$call")" 'held: yes' \
-    'refused empty completion released the inherited captain call'
+    'receipt-backed review released the inherited captain call'
+  "$owner" reconcile
+  "$owner" reconcile
+  assert_contains "$(tx show "$id")" 'state: in_flight' \
+    'unresolved consecutive captain cycles advanced backlog state'
+  answer_captain_task "$id"
   answer_captain_task "$call"
   captain complete "$id" --receipt "$new_key" "$call" >/dev/null \
     || fail 'explicit inherited captain inventory was not recoverable'

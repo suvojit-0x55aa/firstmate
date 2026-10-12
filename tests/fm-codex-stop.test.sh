@@ -67,6 +67,8 @@ run_stop_trappable() {
     FM_TEST_CODEX_HANDLING_MARKER="${FM_TEST_CODEX_HANDLING_MARKER:-}" \
     FM_TEST_CODEX_HANDLING_RELEASE="${FM_TEST_CODEX_HANDLING_RELEASE:-}" \
     FM_TEST_REAL_DATE="${FM_TEST_REAL_DATE:-}" \
+    FM_TEST_CODEX_COMMIT_MARKER="${FM_TEST_CODEX_COMMIT_MARKER:-}" \
+    FM_TEST_CODEX_COMMIT_RELEASE="${FM_TEST_CODEX_COMMIT_RELEASE:-}" \
     perl -e '$SIG{HUP}="DEFAULT"; $SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV' \
       "$ROOT/bin/fm-codex-stop.sh"
 }
@@ -223,6 +225,16 @@ await_lock() {
     n=$((n+1))
   done
   fail 'Stop never acquired healthy identity-matched watcher ownership'
+}
+transition_lock_write() {
+  FM_HOME="$1" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_session_transition_lock_write "$2/state" "$3"' \
+    _ "$ROOT" "$1" "$2"
+}
+transition_afk_write() {
+  FM_HOME="$1" bash -c \
+    '. "$1/bin/fm-wake-lib.sh"; fm_session_transition_afk_write "$2/state"' \
+    _ "$ROOT" "$1"
 }
 
 test_final_cancellation_revokes_handling() {
@@ -542,14 +554,14 @@ test_handoff_revalidates_session_generation() {
       await_file "$marker"
       case "$mutation" in
         unchanged) ;;
-        away) : > "$dir/state/.afk" ;;
+        away) transition_afk_write "$dir" ;;
         replacement)
           sleep 30 &
           STOP_PID_TWO=$!
           replacement_pid=$STOP_PID_TWO
           replacement_identity=$(FM_HOME="$dir" bash -c \
             '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT" "$replacement_pid")
-          printf '%s\n' "$replacement_pid" > "$dir/state/.lock"
+          transition_lock_write "$dir" "$replacement_pid"
           FM_HOME="$dir" bash -c \
             '. "$1/bin/fm-wake-lib.sh"; fm_codex_stop_record_write "$2/state" "$3" "$4" handling 0 "$(( $(date +%s) + 300 ))" replacement-handoff' \
             _ "$ROOT" "$dir" "$replacement_pid" "$replacement_identity"
@@ -585,6 +597,53 @@ test_handoff_revalidates_session_generation() {
     done
   done
   pass 'Stop handoff commits only for the unchanged session generation'
+}
+
+test_native_continuation_commit_is_serialized() {
+  local mutation dir marker release rc replacement_pid
+  for mutation in away replacement; do
+    dir=$(make_home "commit-$mutation")
+    printf 'check: pending serialized continuation\n' > "$dir/state/.wake-queue"
+    marker="$dir/commit.marker"
+    release="$dir/commit.release"
+    rc=0
+    TEST_BUDGET=1 FM_TEST_CODEX_COMMIT_MARKER="$marker" FM_TEST_CODEX_COMMIT_RELEASE="$release" \
+      run_stop_trappable "$dir" > "$dir/out" 2>&1 &
+    STOP_PID=$!
+    await_file "$marker"
+    case "$mutation" in
+      away)
+        transition_afk_write "$dir" > "$dir/transition.out" 2>&1 &
+        ;;
+      replacement)
+        replacement_pid=1
+        transition_lock_write "$dir" "$replacement_pid" > "$dir/transition.out" 2>&1 &
+        ;;
+    esac
+    STOP_PID_TWO=$!
+    sleep 0.1
+    kill -0 "$STOP_PID_TWO" 2>/dev/null \
+      || fail "$mutation transition did not wait for native continuation commitment"
+    case "$mutation" in
+      away) assert_absent "$dir/state/.afk" 'away state changed before continuation commitment' ;;
+      replacement) [ "$(cat "$dir/state/.lock")" = $$ ] \
+        || fail 'session generation changed before continuation commitment' ;;
+    esac
+    : > "$release"
+    wait "$STOP_PID" || rc=$?
+    STOP_PID=
+    expect_code 2 "$rc" "$mutation serialization changed the committed native continuation"
+    wait "$STOP_PID_TWO" || fail "$mutation transition failed after continuation commitment"
+    STOP_PID_TWO=
+    case "$mutation" in
+      away) assert_present "$dir/state/.afk" 'away transition did not follow committed continuation' ;;
+      replacement)
+        [ "$(cat "$dir/state/.lock")" = "$replacement_pid" ] \
+          || fail 'replacement generation did not follow committed continuation'
+        ;;
+    esac
+  done
+  pass 'native continuation commitment serializes session and away transitions'
 }
 
 install_terminal_source() {
@@ -972,6 +1031,7 @@ case "${FM_CODEX_STOP_FOCUSED_TEST:-}" in
     ;;
   handoff-generation)
     test_handoff_revalidates_session_generation
+    test_native_continuation_commit_is_serialized
     exit 0
     ;;
   final-source-wake)

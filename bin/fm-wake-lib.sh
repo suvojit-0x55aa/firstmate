@@ -243,6 +243,81 @@ fm_codex_stop_generation_current() {  # <state> <session-pid> <identity>
   [ "$(fm_pid_identity "$session_pid")" = "$identity" ]
 }
 
+fm_session_transition_begin() {  # <state>
+  fm_lock_acquire_wait "$1/.session-generation-transition.lock"
+}
+
+fm_session_transition_end() {  # <state>
+  fm_lock_release "$1/.session-generation-transition.lock"
+}
+
+fm_session_transition_lock_write() {  # <state> <session-pid>
+  local state=$1 session_pid=$2 tmp written status
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  tmp=$(mktemp "$state/.lock.pending.XXXXXX") || return 1
+  printf '%s\n' "$session_pid" > "$tmp" || { rm -f "$tmp"; return 1; }
+  fm_session_transition_begin "$state" || { rm -f "$tmp"; return 1; }
+  if mv -f "$tmp" "$state/.lock"; then
+    written=$(cat "$state/.lock" 2>/dev/null || true)
+    [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] && [ "$written" = "$session_pid" ]
+    status=$?
+  else
+    status=1
+  fi
+  fm_session_transition_end "$state"
+  rm -f "$tmp" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_write() {  # <state>
+  local state=$1 pending status=1
+  pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
+  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
+  fm_session_transition_begin "$state" || { rm -f "$pending"; return 1; }
+  mv -f "$pending" "$state/.afk" && status=0
+  fm_session_transition_end "$state"
+  rm -f "$pending" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_restore() {  # <state> <saved-flag>
+  local state=$1 saved=$2 pending status=1
+  [ -f "$saved" ] && [ ! -L "$saved" ] || return 1
+  pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
+  cp "$saved" "$pending" || { rm -f "$pending"; return 1; }
+  fm_session_transition_begin "$state" || { rm -f "$pending"; return 1; }
+  mv -f "$pending" "$state/.afk" && status=0
+  fm_session_transition_end "$state"
+  rm -f "$pending" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_reset() {  # <state> [saved-flag]
+  local state=$1 saved=${2:-} pending= status=0
+  if [ -n "$saved" ]; then
+    [ -f "$saved" ] && [ ! -L "$saved" ] || return 1
+    pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
+    cp "$saved" "$pending" || { rm -f "$pending"; return 1; }
+  fi
+  fm_session_transition_begin "$state" || { [ -z "$pending" ] || rm -f "$pending"; return 1; }
+  if [ -n "$pending" ]; then
+    mv -f "$pending" "$state/.afk" || status=1
+  else
+    rm -f "$state/.afk" || status=1
+  fi
+  fm_session_transition_end "$state"
+  [ -z "$pending" ] || rm -f "$pending" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_clear() {  # <state>
+  local state=$1 status=0
+  fm_session_transition_begin "$state" || return 1
+  rm -f "$state/.afk" || status=1
+  fm_session_transition_end "$state"
+  return "$status"
+}
+
 fm_codex_stop_record_write() {  # <state> <session-pid> <identity> <phase> <successors> <expires> [cycle]
   local state=$1 session_pid=$2 identity=$3 phase=$4 successors=$5 expires=$6
   local cycle=${7:-} record="$1/.codex-stop-health" tmp

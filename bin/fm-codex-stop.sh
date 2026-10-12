@@ -89,6 +89,7 @@ CONTINUATION_READY=0
 CLEANUP_ACTIVE=0
 CLEANUP_DONE=0
 CANCELLED=0
+SESSION_TRANSITION_HELD=0
 # shellcheck disable=SC2329 # Called by the EXIT cleanup handler.
 arm_alive() {
   [ -n "$ARM_PID" ] && [ -n "$ARM_IDENTITY" ] \
@@ -130,6 +131,10 @@ trap cleanup EXIT
 cancel() {
   CANCELLED=1
   CONTINUATION_READY=0
+  if [ "$SESSION_TRANSITION_HELD" = 1 ]; then
+    fm_session_transition_end "$STATE"
+    SESSION_TRANSITION_HELD=0
+  fi
   if [ "$CLEANUP_DONE" = 1 ]; then
     [ "$STOP_RECORD_OWNED" != 1 ] \
       || fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true
@@ -206,14 +211,26 @@ else
   tail -6 "$OUT" >&2
 fi
 continuation_generation_current || exit 0
-printf 'Run bin/fm-wake-drain.sh, handle its work, and acknowledge only after handling. Keep quiet intervals silent. The next Stop owns the successor; do not launch a background watcher or finish assuming a yielded tool will wake you.\n' >&2
-continuation_generation_current || exit 0
 CONTINUATION_READY=1
 cleanup
 [ "$CANCELLED" != 1 ] || exit 0
+fm_session_transition_begin "$STATE" || exit 0
+SESSION_TRANSITION_HELD=1
 if ! continuation_generation_current; then
   CONTINUATION_READY=0
   fm_codex_stop_record_clear "$STATE" "$OWNER" "$OWNER_IDENTITY" || true
+  fm_session_transition_end "$STATE"
+  SESSION_TRANSITION_HELD=0
   exit 0
+fi
+printf 'Run bin/fm-wake-drain.sh, handle its work, and acknowledge only after handling. Keep quiet intervals silent. The next Stop owns the successor; do not launch a background watcher or finish assuming a yielded tool will wake you.\n' >&2
+if [ -n "${FM_TEST_CODEX_COMMIT_MARKER:-}" ]; then
+  : > "$FM_TEST_CODEX_COMMIT_MARKER"
+  commit_wait=0
+  while [ ! -e "${FM_TEST_CODEX_COMMIT_RELEASE:-}" ] && [ "$commit_wait" -lt 500 ]; do
+    sleep 0.01
+    commit_wait=$((commit_wait + 1))
+  done
+  [ -e "${FM_TEST_CODEX_COMMIT_RELEASE:-}" ] || exit 0
 fi
 exit 2
