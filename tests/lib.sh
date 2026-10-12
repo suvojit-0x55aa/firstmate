@@ -106,6 +106,9 @@ fm_test_tmproot() {
   printf '%s\n' "$root"
 }
 
+# shellcheck source=tests/manual-backlog-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/manual-backlog-fixture.sh"
+
 trap fm_test_cleanup EXIT
 trap 'fm_test_cleanup; exit 130' INT
 trap 'fm_test_cleanup; exit 143' TERM
@@ -203,6 +206,7 @@ fm_git_init_commit() {
   local dir=$1
   mkdir -p "$dir"
   git -C "$dir" init -q
+  git -C "$dir" branch -M main
   printf '# %s\n' "$(basename "$dir")" > "$dir/README.md"
   git -C "$dir" add README.md
   git -C "$dir" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial

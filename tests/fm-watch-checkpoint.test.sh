@@ -190,14 +190,15 @@ test_codex_turn_end_requires_a_successor_after_each_acknowledged_wake() {
     status=0
     out=$(run_codex_guard "$home") || status=$?
     expect_code 2 "$status" "Codex turn-end guard $round without successor"
-    assert_contains "$out" "TURN WOULD END BLIND" \
-      "Codex turn-end guard $round did not refuse the blind retry"
+    assert_contains "$out" "verified session ownership" \
+      "Codex turn-end guard $round did not refuse the unowned retry"
 
     start_successor_checkpoint "$home" "$round"
     wait_for_successor_lock "$home"
-    out=$(run_codex_guard "$home"); status=$?
-    expect_code 0 "$status" "Codex turn-end guard $round with successor"
-    [ -z "$out" ] || fail "healthy Codex turn-end guard $round produced output: $out"
+    status=0
+    out=$(run_codex_guard "$home") || status=$?
+    expect_code 2 "$status" "live watcher does not authorize an unowned Codex Stop"
+    assert_contains "$out" "verified session ownership" "live watcher bypassed primary ownership"
     assert_duplicate_refused "$home" "$round"
   done
 

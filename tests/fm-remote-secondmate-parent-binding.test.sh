@@ -221,11 +221,12 @@ esac
 # --- a finished child worker inside the remote secondmate home --------------
 CHILD_WT="$REMOTE_HOME/projects/alpha"
 mkdir -p "$REMOTE_HOME/state"
+fm_test_seed_manual_task "$REMOTE_HOME/data" "$REMOTE_HOME/config" work-child
 write_child_meta() {
   fm_write_meta "$REMOTE_HOME/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
     "worktree=$CHILD_WT" "project=$CHILD_WT" "harness=codex" "kind=ship" \
-    "mode=local-only" "yolo=off"
+    "mode=local-only" "yolo=off" "decisions_reviewed=1" "decision_keys="
 }
 mkdir -p "$TMP_ROOT/childfake"
 for t in tmux treehouse no-mistakes gh gh-axi tasks-axi; do
@@ -235,6 +236,10 @@ done
 
 run_child_teardown() { # <extra env assignments...>
   local out rc=0
+  git -C "$CHILD_WT" checkout -q main \
+    || fail "could not restore the local default branch before child teardown"
+  git -C "$CHILD_WT" checkout -qb fm/work-child \
+    || fail "could not recreate the landed child task branch"
   write_child_meta
   out=$(env "$@" PATH="$TMP_ROOT/childfake:$PATH" \
     FM_HOME="$REMOTE_HOME" FM_STATE_OVERRIDE="$REMOTE_HOME/state" \

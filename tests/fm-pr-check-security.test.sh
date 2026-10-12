@@ -129,19 +129,25 @@ SH
 
 write_task_meta() {
   local dir=$1 id=${2:-task-a}
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" "$id"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "decisions_reviewed=1" \
+    "decision_keys="
 }
 
 write_poll_meta() {
   local state=$1 id=$2 url=$3
+  fm_test_seed_manual_task "$(dirname "$state")/data" "$(dirname "$state")/config" "$id"
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "decisions_reviewed=1" \
+    "decision_keys=" \
     "pr=$url"
 }
 
@@ -549,6 +555,7 @@ test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" task-a
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
@@ -635,13 +642,16 @@ SH
 
   for id in _noncanonical aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
     dir=$(make_case "legacy-teardown-${id:0:12}")
+    fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" "$id"
     fm_write_meta "$dir/home/state/$id.meta" \
       "window=firstmate:fm-$id" \
       "endpoint_task_id=$id" \
       "worktree=$dir/missing-worktree" \
       "project=$dir/project" \
       'kind=ship' \
-      'mode=local-only'
+      'mode=local-only' \
+      'decisions_reviewed=1' \
+      'decision_keys='
     mkdir -p "$dir/home/state/.pr-check-quarantine"
     chmod 0700 "$dir/home/state/.pr-check-quarantine"
     printf 'reserved migration evidence\n' \
@@ -1881,6 +1891,7 @@ test_obligation_namespace_compatibility() {
   printf 'legacy quarantined bytes\n' \
     > "$state/.pr-check-quarantine/_noncanonical.check.abc123"
   chmod 0600 "$state/.pr-check-quarantine/"*
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" _noncanonical
   fm_write_meta "$state/_noncanonical.meta" \
     'window=firstmate:fm-_noncanonical' \
     'endpoint_task_id=_noncanonical' \
@@ -1919,7 +1930,7 @@ SH
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
     "$TEARDOWN" _noncanonical --force > "$dir/teardown-2.out" 2> "$dir/teardown-2.err" \
-    || fail "task teardown did not recover after legacy namespace migration"
+    || fail "task teardown did not recover after legacy namespace migration: $(cat "$dir/teardown-2.err")"
   [ ! -e "$state/_noncanonical.meta" ] \
     || fail "recovered task teardown retained lifecycle metadata"
   [ -f "$state/.pr-check-quarantine/!noncanonical.check.abc123" ] \
@@ -2377,7 +2388,8 @@ test_bootstrap_isolates_incomplete_poll_migration() {
     'backend=tmux'
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$dir/home/.env"
   mkdir -p "$dir/home/projects"
-  fm_fake_exit0 "$fakebin" curl jq
+  fm_fake_exit0 "$fakebin" curl
+  ln -s "$REAL_JQ" "$fakebin/jq"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case " $* " in
@@ -2651,13 +2663,16 @@ test_teardown_removes_poll_artifacts() {
   local dir fakebin kind artifact counterpart rc
   dir=$(make_case teardown-cleanup)
   fakebin="$dir/fakebin"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" task-a
   fm_write_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
-    'mode=local-only'
+    'mode=local-only' \
+    'decisions_reviewed=1' \
+    'decision_keys='
   printf 'check\n' > "$dir/home/state/task-a.check.sh"
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
@@ -2675,7 +2690,7 @@ SH
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
     "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
-    || fail "teardown cleanup fixture failed"
+    || fail "teardown cleanup fixture failed: $(cat "$dir/teardown.err")"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
@@ -2685,6 +2700,7 @@ SH
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" task-a
   fm_write_meta "$dir/home/state/task-a.meta" \
     'window=firstmate:fm-task-a' \
     'endpoint_task_id=task-a' \
@@ -2692,6 +2708,8 @@ SH
     "project=$dir/project" \
     'kind=ship' \
     'mode=local-only' \
+    'decisions_reviewed=1' \
+    'decision_keys=' \
     'pr=https://github.com/o/r/pull/18'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/18
   fm_pr_poll_snapshot_capture "$dir/home/state" task-a "$POLL" \
@@ -2713,13 +2731,16 @@ SH
 
   dir=$(make_case teardown-reserved-quarantine)
   fakebin="$dir/fakebin"
+  fm_test_seed_manual_task "$dir/home/data" "$dir/home/config" invalid
   fm_write_meta "$dir/home/state/invalid.meta" \
     'window=firstmate:fm-invalid' \
     'endpoint_task_id=invalid' \
     "worktree=$dir/missing-worktree" \
     "project=$dir/project" \
     'kind=ship' \
-    'mode=local-only'
+    'mode=local-only' \
+    'decisions_reviewed=1' \
+    'decision_keys='
   mkdir -p "$dir/home/state/.pr-check-quarantine"
   chmod 0700 "$dir/home/state/.pr-check-quarantine"
   printf 'task artifact\n' > "$dir/home/state/.pr-check-quarantine/invalid.check.abc123"
@@ -3045,7 +3066,7 @@ test_merged_poll_reregistration_after_notification_is_absorbed() {
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err")"
+  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err"); output=$(cat "$dir/watch-1.out"); triage=$(cat "$state/.watch-triage.log" 2>/dev/null || true)"
   first=$(cat "$dir/watch-1.out")
   case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merge confirmation was not delivered: $first" ;; esac
   ack_watcher_cycle "$state" || fail "first merge confirmation acknowledgement failed"
@@ -3262,14 +3283,22 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   local dir state rc
   dir=$(make_case different-merged-pr-not-absorbed)
   state="$dir/home/state"
+  mkdir -p "$dir/secondmate-home"
+  printf -- '- task-a | scope: test | home: %s\n' "$dir/secondmate-home" \
+    > "$dir/home/data/secondmates.md"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  fm_write_meta "$state/task-a.meta" \
+    'window=session:fm-task-a' "worktree=$dir/secondmate-home" "project=$dir/project" \
+    'kind=secondmate' 'mode=secondmate' 'backend=tmux' "home=$dir/secondmate-home" \
+    'decisions_reviewed=1' 'decision_keys=' 'pr=https://github.com/o/r/pull/1'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
 
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err")"
+  [ "$rc" -eq 0 ] \
+    || fail "first merged watcher cycle failed (rc=$rc): stderr=$(cat "$dir/watch-1.err"); output=$(cat "$dir/watch-1.out"); triage=$(cat "$state/.watch-triage.log" 2>/dev/null || true)"
   case "$(cat "$dir/watch-1.out")" in
     check:*task-a.check.sh:*merged) ;;
     *) fail "first PR merge confirmation was not delivered: $(cat "$dir/watch-1.out")" ;;
@@ -3278,6 +3307,10 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   assert_poll_absent "$state" task-a
 
   write_poll_meta "$state" task-a https://github.com/o/r/pull/2
+  fm_write_meta "$state/task-a.meta" \
+    'window=session:fm-task-a' "worktree=$dir/secondmate-home" "project=$dir/project" \
+    'kind=secondmate' 'mode=secondmate' 'backend=tmux' "home=$dir/secondmate-home" \
+    'decisions_reviewed=1' 'decision_keys=' 'pr=https://github.com/o/r/pull/2'
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/2
   rm -f "$state/.last-check"
 
@@ -3285,7 +3318,8 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "different-PR watcher cycle failed: $(cat "$dir/watch-2.err")"
+  [ "$rc" -eq 0 ] \
+    || fail "different-PR watcher cycle failed (rc=$rc): stderr=$(cat "$dir/watch-2.err"); output=$(cat "$dir/watch-2.out"); triage=$(cat "$state/.watch-triage.log" 2>/dev/null || true); receipts=$(find "$state/terminal-delivery" -type f -name '*.json' -maxdepth 1 -exec jq -c '{key,id,pr,retired,reviewed,superseded_by}' {} \; 2>/dev/null)"
   case "$(cat "$dir/watch-2.out")" in
     check:*task-a.check.sh:*merged) ;;
     *) fail "a different PR merge was absorbed: $(cat "$dir/watch-2.out")" ;;
@@ -3336,6 +3370,9 @@ test_persistent_secondmate_retirement_is_poll_only() {
   [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
   [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
   [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
+  [ ! -d "$state/terminal-delivery" ] \
+    || [ -z "$(find "$state/terminal-delivery" -type f -name '*.json' -print -quit)" ] \
+    || fail "persistent secondmate poll created a terminal-delivery receipt"
   pass "merged poll retirement preserves every persistent secondmate lifecycle artifact"
 }
 
@@ -3676,6 +3713,47 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+test_receipt_consumes_authenticated_poll_merge() {
+  local dir state rc receipt
+  dir=$(make_case receipt-poll-merge)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2> "$dir/check.err" \
+    || fail "receipt-poll-merge: could not arm the authenticated poll"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" custody task-a https://github.com/o/r/pull/1
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "receipt-poll-merge: authenticated watcher failed: $(cat "$dir/watch.err")"
+  receipt=$(jq -c 'select(.id == "task-a")' "$state/terminal-delivery/"*.json)
+  printf '%s' "$receipt" | jq -e \
+    '.retired == false and .merged == true and .pr == "https://github.com/o/r/pull/1"' >/dev/null \
+    || fail "receipt-poll-merge: verified poll did not publish merge proof: $receipt"
+  assert_poll_absent "$state" task-a
+  pass "authenticated poll publishes merge proof before endpoint retirement"
+}
+
+case "${FM_PR_CHECK_SECURITY_FOCUSED_TEST:-}" in
+  '') ;;
+  different-merged-pr)
+    test_different_merged_pr_for_same_task_is_not_absorbed
+    exit
+    ;;
+  obligation-namespace-compatibility)
+    test_obligation_namespace_compatibility
+    exit
+    ;;
+  teardown-poll-artifacts)
+    test_teardown_removes_poll_artifacts
+    exit
+    ;;
+  *) fail "unknown focused PR check security test: $FM_PR_CHECK_SECURITY_FOCUSED_TEST" ;;
+esac
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
@@ -3690,6 +3768,7 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_receipt_consumes_authenticated_poll_merge
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

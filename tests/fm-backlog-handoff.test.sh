@@ -354,7 +354,7 @@ case " $* " in
     if [ "${1:-}" = mv ]; then
       handoff_pid=$(ps -o ppid= -p "$PPID" | tr -d '[:space:]')
       kill -KILL "$handoff_pid"
-      sleep 1
+      exit 99
     fi
     ;;
 esac

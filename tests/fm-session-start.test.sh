@@ -231,6 +231,10 @@ for argument in "$@"; do
   previous=$argument
 done
 case "$*" in
+  *"lstart="*)
+    /bin/ps "$@"
+    exit $?
+    ;;
   *"comm="*)
     if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
       || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
@@ -2796,6 +2800,63 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+
+# At the reported fleet size the actual cleanup command must remain behind the
+# deferred boundary and its own aggregate deadline. A stuck CLI ignores TERM;
+# neither the digest nor the deferred result may wait for it indefinitely.
+test_large_herdr_cleanup_does_not_block_recovery() {
+  local rec root home fakebin out i
+  rec=$(new_world large-herdr-cleanup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  ln -s "$(command -v jq)" "$fakebin/jq"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  for i in $(seq 1 108); do
+    printf 'version=1\ntask_id=scale-%s\nprojection_id=AbCdEfGhIjKlMnOpQrStUv\n' "$i" \
+      > "$home/state/scale-$i.herdr-presentation"
+  done
+  jq -n '{result:{workspaces:[range(84) | {workspace_id:("w"+tostring),label:("workspace-"+tostring)}]}}' \
+    > "$home/workspaces.json"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'workspace list'*)
+    touch "$FM_HOME/cleanup-started"
+    echo $$ > "$FM_HOME/cleanup-probe.pid"
+    trap '' TERM
+    while :; do sleep 1; done
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" FM_SESSION_START_TIMEOUT=15 \
+    FM_HERDR_CLEANUP_TIMEOUT=2 FM_STARTUP_NETWORK_TIMEOUT=30 run_session_start "$home" "$root" "$fakebin:$BASE_PATH" 2>&1)
+  assert_not_contains "$out" '●  STARTUP TRUNCATED' 'optional Herdr cleanup blocked startup'
+  assert_contains "$out" 'FLEET STATE' 'recovery inventory disappeared behind cleanup'
+  assert_contains "$out" 'startup: stage=bootstrap elapsed=' 'bootstrap progress was invisible'
+  assert_contains "$out" 'startup: stage=wake-queue elapsed=' 'wake recovery progress was invisible'
+  wait_for_network_stage "$home" "$root" 45 || fail 'deferred cleanup did not finish'
+  [ -f "$home/cleanup-started" ] || fail 'cleanup was dropped instead of deferred'
+  assert_contains "$(cat "$home/state/.startup-network.report")" 'cleanup incomplete' 'cleanup timeout was silent'
+  if kill -0 "$(cat "$home/cleanup-probe.pid")" 2>/dev/null; then
+    fail 'cleanup timeout leaked its TERM-resistant CLI'
+  fi
+  [ "$(find "$home/state" -name '*.herdr-presentation' | wc -l | tr -d ' ')" = 108 ] \
+    || fail 'unmatched presentation journals were discarded'
+  pass '84 workspaces and 108 journals: blocked optional cleanup cannot block recovery'
+}
+
+# A focused executable entry point also makes the scale counterfactual cheap.
+if [ "${1:-}" = --cleanup-scale ]; then
+  test_large_herdr_cleanup_does_not_block_recovery
+  exit 0
+fi
+
+test_large_herdr_cleanup_does_not_block_recovery
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path

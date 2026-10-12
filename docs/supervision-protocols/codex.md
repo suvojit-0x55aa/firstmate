@@ -1,21 +1,17 @@
-Mode: Codex foreground checkpoint.
+Mode: Codex synchronous Stop supervision.
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
-   After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
-2. Source `__FM_X_MODE_ENV__` first when Relay is active.
-3. First cycle: run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
-4. Ordinary wake: if the command prints `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, handle that wake, then start the next checkpoint.
-   The turn-end guard will keep returning a continuation while supervision is needed until that successor owns the home watcher lock.
-   A yielded unified-exec call still owns its foreground process and is the expected way for Codex to leave the successor live while completing the handling turn.
-5. If the command prints `checkpoint:` or exits 124 with no wake, drain queued wakes anyway, process any queued user message now visible to Codex, then start the next checkpoint.
-6. Never use shell `&` or Codex background tasks for firstmate watcher supervision.
-7. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
-   If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
-8. Failure or missing cycle only: drain queued wakes, inspect the failure, then start a fresh foreground checkpoint.
+   Handle its wakes, open decisions and unread status before running its exact `WAKE_ACK_REQUIRED` command.
+2. The tracked Stop hook owns ordinary watcher continuity through `bin/fm-codex-stop.sh`.
+   It parks on one singleton watcher and returns a native Codex continuation for an actionable close or a quiet checkpoint deadline.
+3. On continuation, drain and handle the durable work; keep quiet intervals silent.
+   The next Stop owns the successor, so do not manually launch a checkpoint after an ordinary wake.
+4. A yielded unified-exec session or asynchronous hook does not provide post-turn wake delivery.
+   Never end a turn treating either as durable supervision.
+5. Failure only: inspect the reported session ownership or arm failure and the durable wake queue.
+   `bin/fm-watch-checkpoint.sh` remains a bounded diagnostic foreground command, not the ordinary continuation owner.
+6. Never use shell `&` or detached Codex background tasks to repair supervision.
 
-The tracked Codex Stop hook calls `bin/fm-turnend-guard.sh --codex`.
-`stop_hook_active=true` does not bypass watcher health in that mode: while supervision is needed, Codex may end the turn only after a live identity-matched checkpoint owns the home, and the watcher singleton refuses a duplicate checkpoint.
-
-Codex cannot reason while a foreground tool call is running.
-The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
+`bin/fm-codex-stop.sh` owns timing, cancellation and session-ownership mechanics.
+Other primary harnesses keep their own supervision adapters; away mode keeps its existing daemon ownership.

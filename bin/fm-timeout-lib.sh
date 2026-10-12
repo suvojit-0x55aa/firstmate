@@ -41,9 +41,19 @@ fm_timeout_mechanism() {
   fi
 }
 
-fm_run_bash_timeout() {
+fm_run_bash_timeout() (
   local seconds=$1 command_status deadline_status child_pid watchdog_pid command_rc recorded_rc monitor_was_on=0
   shift
+  child_pid='' watchdog_pid=''
+  # A caller may itself be bounded (deferred startup). Forward cancellation to
+  # both owned groups, including a child which ignores TERM; never orphan it.
+  trap '
+    [ -z "$child_pid" ] || kill -KILL -- "-$child_pid" 2>/dev/null || true
+    [ -z "$watchdog_pid" ] || kill -KILL -- "-$watchdog_pid" 2>/dev/null || true
+    wait 2>/dev/null || true
+    rm -f "${command_status:-}" "${deadline_status:-}" 2>/dev/null || true
+    exit 124
+  ' HUP INT TERM
   command_status=$(mktemp "${TMPDIR:-/tmp}/fm-bash-timeout-command.XXXXXX" 2>/dev/null) || return 124
   deadline_status="${command_status}.deadline"
   case $- in *m*) monitor_was_on=1 ;; esac
@@ -84,7 +94,7 @@ fm_run_bash_timeout() {
   fi
   rm -f "$command_status" "$deadline_status" 2>/dev/null || true
   return "$command_rc"
-}
+)
 
 fm_run_external_timeout() {
   local runner=$1 seconds=$2 status_file runner_pid runner_rc command_rc

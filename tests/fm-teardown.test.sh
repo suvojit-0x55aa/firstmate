@@ -2,14 +2,13 @@
 # Tests for bin/fm-teardown.sh's landed-work safety and stale-lock recovery.
 #
 # The check refuses to tear down a worktree whose work has not LANDED, because
-# treehouse return hard-resets the worktree. "Landed" means reachable from a remote
-# OR - for a normal ship task whose commits are not so reachable - its PR is merged
-# and GitHub reports a PR head that contains the current local work, or its content
-# is already in the up-to-date default branch.
+# treehouse return hard-resets the worktree. Remote reachability preserves custody
+# only. The teardown contract in bin/fm-teardown.sh requires current merged-PR or
+# intended-default proof before removal.
 #
 # Covers three fixes:
-#   - local-only fork-remote: a fork IS a remote, so fork-pushed upstream-
-#     contribution PRs are teardown-eligible (the pre-fix code false-refused them).
+#   - local-only fork-remote: fork reachability preserves custody but does not
+#     prove that work landed in the intended local default branch.
 #   - squash-merge-then-delete-branch: the branch's own commits live nowhere on a
 #     remote after a squash merge deletes the head branch, yet the change is fully in
 #     main. Reachability alone false-refused this common GitHub flow; the check now
@@ -21,10 +20,10 @@
 #     provably stale lock before re-running safety checks.
 #
 # Matrix:
-#   (a) local-only + HEAD on a fork remote-tracking branch     -> ALLOW  (fork fix)
+#   (a) local-only + HEAD on a fork remote-tracking branch     -> REFUSE (not landed)
 #   (b) local-only + truly unpushed work (no remote, not main) -> REFUSE (safety)
 #   (c) local-only + merged into local main, no remote         -> ALLOW  (no regression)
-#   (d) no-mistakes + HEAD on origin remote-tracking branch    -> ALLOW  (no regression)
+#   (d) no-mistakes + HEAD on origin without merge observer    -> REFUSE (custody only)
 #   (e) no-mistakes + unpushed, no PR, content not in default  -> REFUSE (safety)
 #   (f) local-only + truly unpushed + --force                  -> ALLOW  (escape hatch)
 #   (g) no-mistakes + squash-merged PR, exact PR head          -> ALLOW  (squash fix)
@@ -76,7 +75,7 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/config" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
@@ -171,6 +170,7 @@ SH
 
   # Fresh watcher beacon so fm-guard stays quiet.
   touch "$case_dir/state/.last-watcher-beat"
+  fm_test_seed_manual_task "$case_dir/data" "$case_dir/config" task-x1
 
   printf '%s\n' "$case_dir"
 }
@@ -207,7 +207,9 @@ write_meta() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=$kind" \
-    "mode=$mode"
+    "mode=$mode" \
+    "decisions_reviewed=1" \
+    "decision_keys="
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]
@@ -273,6 +275,7 @@ SH
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'MERGED' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
@@ -282,6 +285,41 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+add_gh_pr_open_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,open" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'OPEN' '$head' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+arm_open_pr_poll() {
+  local case_dir=$1 head
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head"
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$PR_CHECK" task-x1 https://github.com/example/repo/pull/7 >/dev/null
 }
 
 append_pr_meta_for_current_head() {
@@ -304,9 +342,10 @@ commit_tree_from_wt_head() {
 }
 
 land_equivalent_patch_on_origin_branch() {
-  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 tmp
+  local case_dir=$1 branch=$2 file=$3 content=$4 msg=$5 base=${6:-} tmp
   tmp="$case_dir/_equiv"
   git clone -q "$case_dir/origin.git" "$tmp"
+  [ -z "$base" ] || git -C "$tmp" checkout -q --detach "$base"
   printf '%s\n' "$content" > "$tmp/$file"
   git -C "$tmp" add -- "$file"
   git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "$msg"
@@ -544,9 +583,19 @@ run_teardown() {
   local case_dir=$1; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+run_terminal_owner() {
+  local case_dir=$1; shift
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" "$@"
 }
 
 # Build the teardown test's executable search path without lsof, regardless of
@@ -554,15 +603,15 @@ run_teardown() {
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
-  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id jq ln \
+    mkdir mktemp mv paste perl ps readlink realpath rm sed sh shasum sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
   printf '%s\n' "$path_dir"
 }
 
-test_local_only_fork_remote_allows() {
+test_local_only_fork_remote_refuses_without_default_landing() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
   write_meta "$case_dir" local-only ship
@@ -574,44 +623,51 @@ test_local_only_fork_remote_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
-  pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
+  expect_code 1 "$rc" "fork-allow: fork custody must not replace intended-default landing"
+  assert_present "$case_dir/state/task-x1.meta" "fork-allow: refusal removed task metadata"
+  assert_present "$case_dir/wt" "fork-allow: refusal removed the only locally landable branch"
+  assert_grep "not landed in its intended default branch" "$case_dir/stderr" \
+    "fork-allow: refusal did not name the missing local landing"
+  pass "local-only fork custody preserves the work until intended-default landing"
 }
 
-test_teardown_prompts_tasks_axi_done_when_compatible() {
-  local case_dir out
+test_open_pr_poll_blocks_teardown_until_landing() {
+  local case_dir rc
   case_dir=$(make_case tasks-axi-reminder)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  arm_open_pr_poll "$case_dir"
   add_compatible_tasks_axi "$case_dir"
 
-  out=$(run_teardown "$case_dir") || fail "teardown failed with compatible tasks-axi"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done task-x1 --pr https://github.com/example/repo/pull/7' >/dev/null \
-    || fail "teardown did not prompt tasks-axi done: $out"
-  printf '%s\n' "$out" | grep -F 'tasks-axi ready' >/dev/null \
-    || fail "teardown did not prompt tasks-axi ready: $out"
-  printf '%s\n' "$out" | grep -F 'check date gates' >/dev/null \
-    || fail "teardown did not preserve date-gate check: $out"
-  printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
-    && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
-  pass "teardown prompts tasks-axi backlog refresh when compatible"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "tasks-axi-reminder: open PR retirement must wait for landing proof"
+  assert_present "$case_dir/state/task-x1.check.sh" 'teardown deleted the authenticated open-PR observer'
+  assert_present "$case_dir/state/task-x1.meta" 'teardown deleted metadata required to authenticate the observer'
+  assert_present "$case_dir/wt" 'teardown deleted the worktree before merge proof'
+  pass "teardown preserves authenticated open-PR custody until landing proof"
 }
 
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present() {
-  local case_dir out
+test_manual_backend_open_pr_poll_blocks_teardown_until_landing() {
+  local case_dir rc
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  arm_open_pr_poll "$case_dir"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   add_compatible_tasks_axi "$case_dir"
 
-  out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  printf '%s\n' "$out" | grep -F 'Update data/backlog.md - move task-x1 to Done' >/dev/null \
-    || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  printf '%s\n' "$out" | grep -F 'tasks-axi done' >/dev/null \
-    && fail "teardown prompted tasks-axi despite manual backend opt-out: $out"
-  pass "teardown honors config/backlog-backend=manual even when tasks-axi is compatible"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "tasks-axi-manual-optout: open PR retirement must wait for landing proof"
+  assert_present "$case_dir/state/task-x1.check.sh" 'manual backend teardown deleted the merge observer'
+  assert_present "$case_dir/state/task-x1.meta" 'manual backend teardown deleted observer metadata'
+  assert_present "$case_dir/wt" 'manual backend teardown deleted work before merge proof'
+  pass "manual backlog opt-out preserves open-PR custody until landing proof"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -635,6 +691,8 @@ test_local_only_merged_to_local_main_allows() {
   local case_dir rc
   case_dir=$(make_case merged-main)
   write_meta "$case_dir" local-only ship
+  printf '# Backlog\n\n## In flight\n\n- [ ] task-x1 - Exact landed treehouse fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+    > "$case_dir/data/backlog.md"
   wt_commit "$case_dir" "merged work"
   # Fast-forward the project's main to the worktree's HEAD commit so HEAD is
   # reachable from main. update-ref works whether or not main is checked out,
@@ -653,11 +711,198 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
-test_no_mistakes_origin_remote_allows() {
+test_ship_teardown_requires_captain_inventory_attestation() {
+  local case_dir rc wt_head receipt
+  case_dir=$(make_case ship-captain-attestation)
+  write_meta "$case_dir" local-only ship
+  rm -f "$case_dir/fakebin/tasks-axi"
+  tasks-axi add task-x1 'Ship captain attestation' --start --json \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  sed -i.bak '/^decisions_reviewed=/d; /^decision_keys=/d' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  wt_commit "$case_dir" "reviewed ship work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/unreviewed.stdout" 2> "$case_dir/unreviewed.stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "ship-attestation: teardown must refuse an unreviewed captain-call inventory"
+  assert_present "$case_dir/state/task-x1.meta" "ship-attestation: refusal removed recoverable metadata"
+  assert_present "$case_dir/wt" "ship-attestation: refusal removed the reviewed worktree"
+  assert_grep "fm-captain-hold.sh complete task-x1" "$case_dir/unreviewed.stderr" \
+    "ship-attestation: refusal omitted the recovery owner"
+
+  PATH="$case_dir/fakebin:$PATH" FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-x1 --none >/dev/null \
+    || fail "ship-attestation: explicit empty inventory could not be recorded"
+  run_teardown "$case_dir" > "$case_dir/reviewed.stdout" 2> "$case_dir/reviewed.stderr" \
+    || fail "ship-attestation: reviewed teardown failed: $(cat "$case_dir/reviewed.stderr")"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  assert_present "$receipt" "ship-attestation: reviewed teardown omitted its terminal receipt"
+  [ "$(jq -r '.decisions_reviewed and .captain_keys == ""' "$receipt")" = true ] \
+    || fail "ship-attestation: terminal receipt lost the reviewed empty inventory"
+  pass "ordinary ship teardown requires and preserves captain-call inventory attestation"
+}
+
+test_manual_backend_attestation_without_tasks_axi() {
+  local variant case_dir rc wt_head receipt key manual_path before after decision_digest
+  decision_digest=$(printf '%s' 'Captain approved.' | shasum -a 256 | awk '{print $1}')
+  for variant in absent incompatible; do
+    case_dir=$(make_case "manual-attestation-$variant")
+    write_meta "$case_dir" local-only ship
+    printf '%s\n' manual > "$case_dir/config/backlog-backend"
+    cat > "$case_dir/data/backlog.md" <<'EOF'
+## In flight
+
+- [ ] task-x1 - Manual ship (repo: firstmate)
+
+## Queued
+
+## Done
+EOF
+    if [ "$variant" = incompatible ]; then
+      cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_TASKS_LOG"
+case "${1:-}" in --version) printf '%s\n' '0.1.0' ;; *) exit 97 ;; esac
+SH
+      chmod +x "$case_dir/fakebin/tasks-axi"
+      : > "$case_dir/tasks.log"
+    fi
+    printf '%s\n' 'needs-decision [key=manual-choice]: captain answer pending' \
+      > "$case_dir/state/task-x1.status"
+    wt_commit "$case_dir" "manual reviewed ship"
+    wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+    manual_path=/usr/bin:/bin:/usr/sbin:/sbin
+
+    rc=0
+    FM_TEARDOWN_TEST_PATH="$manual_path" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      run_teardown "$case_dir" > "$case_dir/unresolved.stdout" 2> "$case_dir/unresolved.stderr" || rc=$?
+    expect_code 1 "$rc" "manual-$variant: unresolved captain call must refuse teardown"
+    assert_present "$case_dir/state/task-x1.meta" "manual-$variant: refusal removed metadata"
+    printf '%s\n' 'working: captain-call inventory reviewed' > "$case_dir/state/task-x1.status"
+    cat > "$case_dir/data/backlog.md" <<'EOF'
+## In flight
+
+- [ ] task-x1 - Manual ship (repo: firstmate)
+
+## Queued
+
+- [ ] manual-call - Manual captain call (repo: firstmate) (hold: captain answer pending) (hold-kind: captain)
+  Captain hold opened by fm-captain-hold.
+  Hold cycle: 1111111111111111111111111111111111111111111111111111111111111111
+  Captain hold marker end.
+
+## Done
+EOF
+    printf '%s\n' \
+      'decision_keys=manual-call' \
+      'decision_call_cycles=[{"id":"manual-call","cycle":"1111111111111111111111111111111111111111111111111111111111111111"}]' \
+      >> "$case_dir/state/task-x1.meta"
+    rc=0
+    PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      "$ROOT/bin/fm-captain-hold.sh" terminal-ready task-x1 --receipt pending \
+      manual-call:1111111111111111111111111111111111111111111111111111111111111111 \
+      > "$case_dir/unresolved-ready.stdout" 2> "$case_dir/unresolved-ready.stderr" || rc=$?
+    expect_code 1 "$rc" "manual-$variant: unresolved inventory must block terminal readiness"
+    cat > "$case_dir/data/backlog.md" <<EOF
+## In flight
+
+- [ ] task-x1 - Manual ship (repo: firstmate)
+
+## Queued
+
+## Done
+
+- [x] manual-call - Manual captain call (repo: firstmate) (hold: captain answer pending) (hold-kind: captain) (done 2026-10-11)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: $decision_digest
+  Resolution mode: answered
+  Hold cycle: 1111111111111111111111111111111111111111111111111111111111111111
+  Captain decision:
+  Captain approved.
+  Captain hold opened by fm-captain-hold.
+  Hold cycle: 1111111111111111111111111111111111111111111111111111111111111111
+  Captain hold marker end.
+EOF
+    before=$(shasum "$case_dir/data/backlog.md" "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.status")
+    PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      "$ROOT/bin/fm-captain-hold.sh" verify task-x1 >/dev/null \
+      || fail "manual-$variant: answered inventory failed verification"
+    PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      "$ROOT/bin/fm-captain-hold.sh" verify task-x1 >/dev/null \
+      || fail "manual-$variant: repeated inventory verification failed"
+    after=$(shasum "$case_dir/data/backlog.md" "$case_dir/state/task-x1.meta" "$case_dir/state/task-x1.status")
+    [ "$after" = "$before" ] \
+      || fail "manual-$variant: repeated verification mutated durable state"
+    PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      "$ROOT/bin/fm-captain-hold.sh" terminal-ready task-x1 --receipt pending \
+      manual-call:1111111111111111111111111111111111111111111111111111111111111111 >/dev/null \
+      || fail "manual-$variant: answered inventory blocked terminal readiness"
+
+    FM_TEARDOWN_TEST_PATH="$manual_path" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      run_teardown "$case_dir" > "$case_dir/reviewed.stdout" 2> "$case_dir/reviewed.stderr" \
+      || fail "manual-$variant: reviewed teardown failed: $(cat "$case_dir/reviewed.stderr")"
+    receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+    key=$(jq -r .key "$receipt")
+    cat > "$case_dir/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+
+## Done
+
+- [x] task-x1 - Manual ship (repo: firstmate) (done 2026-10-11)
+
+- [x] manual-call - Manual captain call (repo: firstmate) (hold: captain answer pending) (hold-kind: captain) (done 2026-10-11)
+  Resolution recorded by fm-captain-hold.
+  Decision digest: $decision_digest
+  Resolution mode: answered
+  Hold cycle: 1111111111111111111111111111111111111111111111111111111111111111
+  Captain decision:
+  Captain approved.
+  Captain hold opened by fm-captain-hold.
+  Hold cycle: 1111111111111111111111111111111111111111111111111111111111111111
+  Captain hold marker end.
+EOF
+    PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      "$ROOT/bin/fm-terminal-reconcile.sh" manual-complete "$key" \
+      || fail "manual-$variant: manual completion still required tasks-axi"
+    PATH="$case_dir/fakebin:$manual_path" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+      FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_TASKS_LOG="$case_dir/tasks.log" \
+      "$ROOT/bin/fm-terminal-reconcile.sh" manual-complete "$key" \
+      || fail "manual-$variant: repeated manual completion failed"
+    [ "$(jq -r .backlog "$receipt")" = true ] \
+      || fail "manual-$variant: manual completion did not advance its receipt"
+    if [ "$variant" = incompatible ]; then
+      ! grep -Ev '^--version$' "$case_dir/tasks.log" | grep -q . \
+        || fail "manual-incompatible: readiness invoked unsupported tasks-axi commands"
+    fi
+  done
+  pass "manual backlog captain readiness survives absent and incompatible tasks-axi"
+}
+
+test_no_mistakes_remote_custody_without_observer_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
   write_meta "$case_dir" no-mistakes ship
-  wt_commit "$case_dir" "shippable work"
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
   # Push the task branch to origin and fetch so the worktree sees it.
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
@@ -667,11 +912,12 @@ test_no_mistakes_origin_remote_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "nm-origin: teardown should succeed when HEAD is on origin"
-  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-origin: teardown printed a REFUSED line"
-  grep -F 'blockers are gone and date is due' "$case_dir/stdout" >/dev/null \
-    || fail "nm-origin: teardown manual prompt did not preserve date-gate check"
-  pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
+  expect_code 1 "$rc" "nm-origin: remote reachability without a merge observer must refuse"
+  assert_present "$case_dir/state/task-x1.meta" "nm-origin: refusal removed task metadata"
+  assert_present "$case_dir/wt" "nm-origin: refusal removed remotely-custodied work"
+  assert_grep "no authenticated landing proof or merge observer" "$case_dir/stderr" \
+    "nm-origin: refusal did not name the missing observer"
+  pass "remote custody without an authenticated merge observer refuses teardown"
 }
 
 test_no_mistakes_truly_unpushed_refuses() {
@@ -764,7 +1010,31 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
+  assert_contains "$(cat "$case_dir/stdout")" 'pr=https://github.com/example/repo/pull/7 merge_proven=true' \
+    'no-pr-branch-discovery: teardown lost authenticated merge proof before metadata removal'
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
+}
+
+test_no_pr_recorded_open_pr_retains_reconciliation_custody() {
+  local case_dir rc head
+  case_dir=$(make_case no-pr-open-custody)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_open_for_head "$case_dir" "$head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-pr-open-custody: discovered open PR without an armed observer must refuse"
+  assert_present "$case_dir/state/task-x1.meta" \
+    'no-pr-open-custody: refusal removed the metadata needed to arm a poll'
+  assert_present "$case_dir/wt" 'no-pr-open-custody: refusal removed the worktree before merge proof'
+  pass "discovered open PR without an authenticated observer preserves its landing path"
 }
 
 test_squash_merged_pr_allows_replayed_unpushed_patch() {
@@ -777,7 +1047,8 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   git -C "$case_dir/project" fetch -q origin fm/task-x1
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   append_pr_meta_url "$case_dir"
-  pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head feature.txt hello "add feature")
+  pr_head=$(land_equivalent_patch_on_origin_branch \
+    "$case_dir" pr-head feature.txt hello "replay feature" origin/fm/task-x1)
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
 
   set +e
@@ -785,9 +1056,125 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"
+  expect_code 0 "$rc" "squash-replayed-patch: teardown should succeed when unpushed local patch is in the merged PR head"$'\n'"$(cat "$case_dir/stderr")"
   ! grep -q REFUSED "$case_dir/stderr" || fail "squash-replayed-patch: teardown printed a REFUSED line"
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
+}
+
+test_merged_pr_refuses_fork_pushed_unlanded_patch() {
+  local case_dir rc pr_dir pr_head
+  case_dir=$(make_case fork-pushed-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" a.txt a "add a"
+  wt_commit_file "$case_dir" hidden.txt hidden "fork custody only"
+  add_fork_with_pushed_branch "$case_dir"
+  wt_commit_file "$case_dir" c.txt c "add c"
+  append_pr_meta_url "$case_dir"
+
+  pr_dir="$case_dir/_pr"
+  git clone -q "$case_dir/origin.git" "$pr_dir"
+  printf '%s\n' a > "$pr_dir/a.txt"
+  git -C "$pr_dir" add -- a.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "add a"
+  printf '%s\n' c > "$pr_dir/c.txt"
+  git -C "$pr_dir" add -- c.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "add c"
+  git -C "$pr_dir" push -q origin HEAD:refs/heads/pr-head
+  git -C "$case_dir/project" fetch -q origin pr-head
+  pr_head=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/pr-head)
+  rm -rf "$pr_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "fork-pushed-unlanded: teardown should refuse content absent from the merged PR"
+  git -C "$case_dir/wt" merge-base --is-ancestor HEAD^ refs/remotes/fork/fm/task-x1 \
+    || fail "fork-pushed-unlanded: fixture did not preserve fork custody"
+  assert_present "$case_dir/wt" "fork-pushed-unlanded: teardown removed the unlanded worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "fork-pushed-unlanded: teardown removed custody metadata"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "fork-pushed-unlanded: refusal was not actionable"
+  pass "merged PR proof checks fork-pushed current content before teardown"
+}
+
+test_merged_pr_refuses_replayed_patch_set_with_different_final_tree() {
+  local case_dir rc pr_dir pr_head
+  case_dir=$(make_case replayed-patch-set-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "add feature"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t revert --no-edit HEAD >/dev/null
+  wt_commit_file "$case_dir" feature.txt landed "add feature again"
+  add_fork_with_pushed_branch "$case_dir"
+  append_pr_meta_url "$case_dir"
+
+  pr_dir="$case_dir/_pr"
+  git clone -q "$case_dir/origin.git" "$pr_dir"
+  printf '%s\n' landed > "$pr_dir/feature.txt"
+  git -C "$pr_dir" add -- feature.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "add feature"
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t revert --no-edit HEAD >/dev/null
+  git -C "$pr_dir" push -q origin HEAD:refs/heads/pr-head
+  git -C "$case_dir/project" fetch -q origin pr-head
+  pr_head=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/pr-head)
+  rm -rf "$pr_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "replayed-patch-set-unlanded: teardown should refuse a different final tree"
+  git -C "$case_dir/wt" merge-base --is-ancestor HEAD refs/remotes/fork/fm/task-x1 \
+    || fail "replayed-patch-set-unlanded: fixture did not push every current commit"
+  git -C "$case_dir/wt" cat-file -e "$pr_head:feature.txt" 2>/dev/null \
+    && fail "replayed-patch-set-unlanded: merged PR unexpectedly contains the final feature"
+  assert_present "$case_dir/wt" \
+    "replayed-patch-set-unlanded: teardown removed the unlanded worktree"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "replayed-patch-set-unlanded: teardown removed custody metadata"
+  pass "merged PR patch membership cannot replace final-tree containment"
+}
+
+test_merged_pr_allows_replayed_history_with_matching_final_tree() {
+  local case_dir rc pr_dir pr_head
+  case_dir=$(make_case replayed-history-landed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt landed "add feature"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t revert --no-edit HEAD >/dev/null
+  wt_commit_file "$case_dir" feature.txt landed "add feature again"
+  add_fork_with_pushed_branch "$case_dir"
+  append_pr_meta_url "$case_dir"
+
+  pr_dir="$case_dir/_pr"
+  git clone -q "$case_dir/origin.git" "$pr_dir"
+  printf '%s\n' landed > "$pr_dir/feature.txt"
+  git -C "$pr_dir" add -- feature.txt
+  git -C "$pr_dir" -c user.email=t@t -c user.name=t commit -q -m "land final feature"
+  git -C "$pr_dir" push -q origin HEAD:refs/heads/pr-head
+  git -C "$case_dir/project" fetch -q origin pr-head
+  pr_head=$(git -C "$case_dir/project" rev-parse refs/remotes/origin/pr-head)
+  rm -rf "$pr_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "replayed-history-landed: matching final PR content should allow teardown"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "replayed-history-landed: successful teardown retained task metadata"
+  assert_contains "$(cat "$case_dir/stdout")" \
+    'pr=https://github.com/example/repo/pull/7 merge_proven=true' \
+    "replayed-history-landed: teardown lost authenticated merge proof"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "replayed-history-landed: teardown printed a false refusal"
+  pass "matching final PR content accepts replayed commit history"
 }
 
 test_merged_pr_with_later_local_commit_refuses() {
@@ -884,6 +1271,8 @@ test_content_in_default_fallback_allows() {
 
   expect_code 0 "$rc" "content-landed: teardown should succeed when content is already in the default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed: teardown printed a REFUSED line"
+  assert_contains "$(cat "$case_dir/stdout")" 'default_landed=true' \
+    'content-landed: teardown lost authenticated default-branch proof before metadata removal'
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
@@ -1522,7 +1911,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
 }
 
 assert_herdr_teardown_preflight_refuses_before_changes() {
-  local mode=$1 case_dir log closed rc thlog teardown_bin
+  local mode=$1 case_dir log closed rc thlog teardown_bin teardown_root
   case_dir=$(make_case "herdr-preflight-$mode")
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -1557,15 +1946,19 @@ SH
       teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
       ;;
   esac
+  teardown_root=${teardown_bin%/bin/fm-teardown.sh}
   rc=0
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$teardown_root" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
     FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
     "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-preflight-$mode: teardown continued without its required preflight: stdout=$(cat "$case_dir/stdout"); stderr=$(cat "$case_dir/stderr")"
   assert_grep "nothing was changed" "$case_dir/stderr" \
-    "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly"
+    "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly: $(cat "$case_dir/stderr")"
   [ -d "$case_dir/wt" ] || fail "herdr-preflight-$mode: refusal removed the isolated copy"
   [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "fm/task-x1" ] \
     || fail "herdr-preflight-$mode: refusal dropped the task branch"
@@ -2286,7 +2679,7 @@ EOF
   FM_TEARDOWN_TEST_PATH="$path_without_lsof" \
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
 
-  expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"
+  expect_code 0 "$rc" "lsof-absent-process-group-reap: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
     fail "lsof-absent-process-group-reap: tmux process group survived teardown"
@@ -2591,12 +2984,529 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
-test_local_only_fork_remote_allows
-test_teardown_prompts_tasks_axi_done_when_compatible
-test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
+install_interrupting_treehouse() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+target=${@: -1}
+if [ ! -e "$FM_TEST_TREEHOUSE_INTERRUPTED" ]; then
+  : > "$FM_TEST_TREEHOUSE_INTERRUPTED"
+  rm -rf -- "$target"
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+install_retaining_treehouse_interruption() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "$FM_TEST_TREEHOUSE_CALLS"
+if [ ! -e "$FM_TEST_TREEHOUSE_INTERRUPTED" ]; then
+  : > "$FM_TEST_TREEHOUSE_INTERRUPTED"
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_persisted_landing_proof_replays_after_worktree_return() {
+  local case_dir head rc=0 receipt
+  case_dir=$(make_case terminal-proof-replay)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$head"
+  install_interrupting_treehouse "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-replay: interruption should stop the first teardown"
+  assert_absent "$case_dir/wt" "terminal-proof-replay: fixture did not remove the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-replay: interruption removed metadata"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  assert_present "$receipt" "terminal-proof-replay: landing proof was not journaled before removal"
+  [ "$(jq -r .local_head "$receipt")" = "$head" ] \
+    || fail "terminal-proof-replay: journal did not retain authenticated local landing"
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "terminal-proof-replay: exact-incarnation retry should complete"
+  assert_absent "$case_dir/state/task-x1.meta" "terminal-proof-replay: retry retained metadata"
+  [ "$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "terminal-proof-replay: retry duplicated its terminal receipt"
+  [ "$(jq -r .retired "$receipt")" = true ] \
+    || fail "terminal-proof-replay: retry did not finish the recorded teardown stage"
+  pass "same-incarnation landing proof survives worktree-return interruption and replay"
+}
+
+test_unauthenticated_landing_receipts_refuse_replay() {
+  local variant case_dir head pr key receipt original forged before rc
+  pr=https://github.com/o/r/pull/404
+  for variant in cross-copied-local-head malformed-merged-pr; do
+    case_dir=$(make_case "terminal-proof-$variant")
+    tasks-axi add task-x1 task-x1 --start --file "$case_dir/data/backlog.md" --json >/dev/null
+    if [ "$variant" = cross-copied-local-head ]; then
+      write_meta "$case_dir" local-only ship
+      wt_commit "$case_dir" "authenticated local landing"
+      head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      run_terminal_owner "$case_dir" local-landed task-x1 "$head"
+    else
+      write_meta "$case_dir" no-mistakes ship
+      printf 'pr=%s\n' "$pr" >> "$case_dir/state/task-x1.meta"
+      run_terminal_owner "$case_dir" merged task-x1 "$pr"
+    fi
+    run_terminal_owner "$case_dir" landing-proven task-x1 \
+      || fail "$variant: genuine authenticated receipt did not prove landing"
+    original=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+    assert_present "$original" "$variant: fixture did not create a genuine receipt"
+    git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+
+    if [ "$variant" = cross-copied-local-head ]; then
+      printf 'spawn_gen=replacement-incarnation\n' >> "$case_dir/state/task-x1.meta"
+      key=$(run_terminal_owner "$case_dir" current-incarnation task-x1)
+      forged="$case_dir/state/terminal-delivery/$key.json"
+      cp "$original" "$forged"
+    else
+      key=${original##*/}
+      key=${key%.json}
+      forged=$original
+      printf '{"schema":"wrong","key":"%s","id":"task-x1","incarnation":"","kind":"ship","mode":"no-mistakes","state":"done","pr":"%s","merged":true,"retired":false,"discarded":false,"backlog":false,"refill":false,"reviewed":false,"superseded_by":""}\n' \
+        "$key" "$pr" > "$forged"
+    fi
+    before=$(shasum -a 256 "$forged" | awk '{print $1}')
+    if run_terminal_owner "$case_dir" landing-proven task-x1; then
+      fail "$variant: unauthenticated receipt authorized landing"
+    fi
+    [ "$(shasum -a 256 "$forged" | awk '{print $1}')" = "$before" ] \
+      || fail "$variant: landing proof lookup changed unauthenticated evidence"
+
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+    expect_code 1 "$rc" "$variant: missing-worktree replay accepted unauthenticated proof"
+    assert_present "$case_dir/state/task-x1.meta" \
+      "$variant: refused replay retired recovery metadata"
+    [ "$(shasum -a 256 "$forged" | awk '{print $1}')" = "$before" ] \
+      || fail "$variant: refused replay changed unauthenticated evidence"
+  done
+  pass "unauthenticated landing receipts cannot authorize teardown replay"
+}
+
+test_persisted_landing_proof_rejects_replacement_incarnation() {
+  local case_dir head rc=0
+  case_dir=$(make_case terminal-proof-mismatch)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed work"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$head"
+  install_interrupting_treehouse "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-mismatch: interruption should stop the first teardown"
+  printf 'spawn_gen=replacement-incarnation\n' >> "$case_dir/state/task-x1.meta"
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-mismatch: replacement must not reuse prior proof"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-mismatch: refusal removed replacement metadata"
+  assert_grep "not landed in its intended default branch" "$case_dir/retry.stderr" \
+    "terminal-proof-mismatch: refusal did not require replacement proof"
+  pass "persisted landing proof cannot cross terminal incarnations"
+}
+
+test_persisted_landing_proof_revalidates_existing_worktree() {
+  local case_dir landed_head rc=0 receipt calls
+  case_dir=$(make_case terminal-proof-stale)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "initial landed work"
+  landed_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$landed_head"
+  install_retaining_treehouse_interruption "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+  FM_TEST_TREEHOUSE_CALLS="$case_dir/treehouse.calls" \
+    run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-stale: interruption should retain the first worktree"
+  assert_present "$case_dir/wt" "terminal-proof-stale: fixture removed the worktree"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-stale: interruption removed metadata"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  [ "$(jq -r .local_head "$receipt")" = "$landed_head" ] \
+    || fail "terminal-proof-stale: initial landing proof was not recorded"
+
+  git -C "$case_dir/wt" checkout -q -b fm/task-x1-followup
+  wt_commit_file "$case_dir" followup.txt later "later pushed work"
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  git -C "$case_dir/wt" push -q fork HEAD:refs/heads/fm/task-x1-followup
+  git -C "$case_dir/project" fetch -q fork
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+  FM_TEST_TREEHOUSE_CALLS="$case_dir/treehouse.calls" \
+    run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 1 "$rc" "terminal-proof-stale: pushed follow-up work must require current landing"
+  assert_present "$case_dir/wt" "terminal-proof-stale: stale proof discarded the current worktree"
+  assert_present "$case_dir/state/task-x1.meta" "terminal-proof-stale: stale proof removed task metadata"
+  assert_grep "not landed in its intended default branch" "$case_dir/retry.stderr" \
+    "terminal-proof-stale: refusal did not require current default landing"
+  calls=$(wc -l < "$case_dir/treehouse.calls" | tr -d ' ')
+  [ "$calls" = 1 ] || fail "terminal-proof-stale: retry reached destructive return with stale proof"
+  pass "persisted landing proof never replaces current worktree validation"
+}
+
+test_term_pushed_followup_requires_current_landing() {
+  local case_dir landed_head current_head scan_wt marker ready pid i rc=0 receipt
+  case_dir=$(make_case term-pushed-followup)
+  write_meta "$case_dir" local-only ship
+  printf '# Backlog\n\n## In flight\n\n- [ ] task-x1 - TERM pushed treehouse fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+    > "$case_dir/data/backlog.md"
+  wt_commit_file "$case_dir" landed.txt landed "initial landed work"
+  landed_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$landed_head"
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  scan_wt=$(cd "$case_dir/wt" && pwd -P)
+  marker="$case_dir/term-finished"
+  ready="$case_dir/term-ready"
+  cat > "$case_dir/term-worker" <<'SH'
+#!/usr/bin/env bash
+set -u
+cd "${FM_TEST_TERM_WT:?}"
+on_term() {
+  printf 'pushed after TERM\n' > term-pushed.txt
+  git add term-pushed.txt
+  git -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'pushed after TERM'
+  git push -q fork HEAD:refs/heads/fm/task-x1
+  git fetch -q fork
+  : > "${FM_TEST_TERM_MARKER:?}"
+  exit 0
+}
+trap on_term TERM
+: > "${FM_TEST_TERM_READY:?}"
+while :; do sleep 0.1; done
+SH
+  chmod +x "$case_dir/term-worker"
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+if [ ! -f "${FM_TEST_TERM_MARKER:?}" ]; then
+  printf 'p%s\nfcwd\nn%s\n' "${FM_TEST_TERM_PID:?}" "${FM_TEST_TERM_SCAN_WT:?}"
+fi
+exit 0
+SH
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "${FM_TEST_TREEHOUSE_CALLS:?}"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
+  FM_TEST_TERM_WT="$case_dir/wt" FM_TEST_TERM_MARKER="$marker" FM_TEST_TERM_READY="$ready" \
+    "$case_dir/term-worker" &
+  pid=$!
+  i=0
+  while [ ! -f "$ready" ] && [ "$i" -lt 50 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "term-pushed-followup: worker did not become ready"
+
+  FM_TEST_TERM_PID="$pid" FM_TEST_TERM_SCAN_WT="$scan_wt" FM_TEST_TERM_MARKER="$marker" \
+  FM_TEST_TREEHOUSE_CALLS="$case_dir/treehouse.calls" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+
+  [ -f "$marker" ] || fail "term-pushed-followup: TERM handler did not push follow-up work: $(cat "$case_dir/stderr")"
+  expect_code 1 "$rc" "term-pushed-followup: pushed custody must not replace current landing"
+  current_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  [ "$current_head" != "$landed_head" ] || fail "term-pushed-followup: HEAD did not advance"
+  git -C "$case_dir/wt" merge-base --is-ancestor "$current_head" refs/remotes/fork/fm/task-x1 \
+    || fail "term-pushed-followup: fixture did not preserve H2 in fork custody"
+  assert_grep "not landed in its intended default branch" "$case_dir/stderr" \
+    "term-pushed-followup: refusal did not require current landing proof"
+  assert_no_grep "teardown task-x1 complete" "$case_dir/stdout" \
+    "term-pushed-followup: teardown reported false success"
+  assert_absent "$case_dir/treehouse.calls" \
+    "term-pushed-followup: teardown returned the worktree after H2 changed landing identity"
+  assert_present "$case_dir/wt" "term-pushed-followup: teardown removed the H2 worktree"
+  assert_present "$case_dir/state/task-x1.meta" "term-pushed-followup: teardown removed custody metadata"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  [ "$(jq -r .local_head "$receipt")" = "$landed_head" ] \
+    || fail "term-pushed-followup: refusal replaced authenticated H1 proof with H2 custody"
+  [ "$(jq -r .retired "$receipt")" != true ] \
+    || fail "term-pushed-followup: refusal recorded false retirement"
+  pass "TERM-pushed follow-up custody cannot replace current landing proof"
+}
+
+test_late_captain_call_refuses_before_worktree_removal() {
+  local backend case_dir head marker ready pid i rc receipt log
+  for backend in treehouse orca; do
+    case_dir=$(make_case "late-captain-$backend")
+    write_meta "$case_dir" local-only ship
+    printf '# Backlog\n\n## In flight\n\n- [ ] task-x1 - Late captain call fixture (repo: firstmate) (kind: ship)\n\n## Queued\n\n## Done\n' \
+      > "$case_dir/data/backlog.md"
+    wt_commit "$case_dir" "landed late captain fixture"
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    git -C "$case_dir/project" update-ref refs/heads/main "$head"
+    log="$case_dir/removal.log"
+    : > "$log"
+
+    if [ "$backend" = orca ]; then
+      sed -i.bak 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta"
+      rm -f "$case_dir/state/task-x1.meta.bak"
+      printf '%s\n' 'backend=orca' 'terminal=term-late' 'orca_worktree_id=wt-late' \
+        >> "$case_dir/state/task-x1.meta"
+      cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_REMOVAL_LOG:?}"
+case "${1:-} ${2:-}" in
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-late","path":"%s"}}}\n' "${FM_TEST_ORCA_WT:?}"
+    ;;
+  *) printf '%s\n' '{"ok":true,"result":{}}' ;;
+esac
+SH
+      chmod +x "$case_dir/fakebin/orca"
+    else
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_REMOVAL_LOG:?}"
+exit 0
+SH
+      chmod +x "$case_dir/fakebin/treehouse"
+    fi
+
+    marker="$case_dir/term-finished"
+    ready="$case_dir/term-ready"
+    cat > "$case_dir/term-worker" <<'SH'
+#!/usr/bin/env bash
+set -u
+cd "${FM_TEST_TERM_WT:?}"
+on_term() {
+  printf '%s\n' 'needs-decision [key=late-call]: captain answer pending after TERM' \
+    >> "${FM_TEST_TERM_STATUS:?}"
+  : > "${FM_TEST_TERM_MARKER:?}"
+  exit 0
+}
+trap on_term TERM
+: > "${FM_TEST_TERM_READY:?}"
+while :; do sleep 0.1; done
+SH
+    chmod +x "$case_dir/term-worker"
+    cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+if [ ! -f "${FM_TEST_TERM_MARKER:?}" ]; then
+  printf 'p%s\nfcwd\nn%s\n' "${FM_TEST_TERM_PID:?}" "${FM_TEST_TERM_SCAN_WT:?}"
+fi
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/lsof"
+
+    FM_TEST_TERM_WT="$case_dir/wt" \
+    FM_TEST_TERM_STATUS="$case_dir/state/task-x1.status" \
+    FM_TEST_TERM_MARKER="$marker" FM_TEST_TERM_READY="$ready" \
+      "$case_dir/term-worker" &
+    pid=$!
+    i=0
+    while [ ! -f "$ready" ] && [ "$i" -lt 50 ]; do
+      sleep 0.02
+      i=$((i + 1))
+    done
+    [ -f "$ready" ] || fail "late-captain-$backend: worker did not become ready"
+
+    rc=0
+    FM_TEST_TERM_PID="$pid" FM_TEST_TERM_SCAN_WT="$(cd "$case_dir/wt" && pwd -P)" \
+    FM_TEST_TERM_MARKER="$marker" FM_TEST_REMOVAL_LOG="$log" \
+    FM_TEST_ORCA_WT="$case_dir/wt" \
+      run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+
+    [ -f "$marker" ] || fail "late-captain-$backend: TERM handler did not run"
+    expect_code 1 "$rc" "late-captain-$backend: late captain call must refuse removal"
+    assert_present "$case_dir/wt" "late-captain-$backend: refusal removed the worktree"
+    assert_present "$case_dir/state/task-x1.meta" "late-captain-$backend: refusal removed metadata"
+    assert_grep "captain-call completion gate" "$case_dir/first.stderr" \
+      "late-captain-$backend: refusal did not identify the captain gate"
+    if [ "$backend" = orca ]; then
+      assert_no_grep "worktree rm" "$log" \
+        "late-captain-orca: refusal called Orca worktree removal"
+      assert_no_grep "terminal close" "$log" \
+        "late-captain-orca: refusal closed the endpoint before preserving evidence"
+    else
+      [ ! -s "$log" ] || fail "late-captain-treehouse: refusal called treehouse return"
+    fi
+    receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+    assert_present "$receipt" "late-captain-$backend: landing receipt was not retained"
+    [ "$(jq -r '.retired // false' "$receipt")" != true ] \
+      || fail "late-captain-$backend: refusal recorded false retirement"
+
+    printf '%s\n' 'resolved [key=late-call]: answered: continue synthetic teardown' \
+      >> "$case_dir/state/task-x1.status"
+    rc=0
+    FM_TEST_TERM_PID="$pid" FM_TEST_TERM_SCAN_WT="$case_dir/wt" \
+    FM_TEST_TERM_MARKER="$marker" FM_TEST_REMOVAL_LOG="$log" \
+    FM_TEST_ORCA_WT="$case_dir/wt" \
+      run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+    expect_code 0 "$rc" "late-captain-$backend: resolved retry should complete"
+    if [ "$backend" = orca ]; then
+      assert_grep "worktree rm --worktree id:wt-late" "$log" \
+        "late-captain-orca: resolved retry did not remove the authenticated worktree"
+    else
+      assert_grep "return --force $case_dir/wt" "$log" \
+        "late-captain-treehouse: resolved retry did not return the worktree"
+    fi
+  done
+  pass "post-reap captain calls block both worktree removal backends and retry safely"
+}
+
+test_forced_discard_refuses_unstageable_inventory_before_removal() {
+  local case_dir rc=0
+  case_dir=$(make_case discard-stage-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'decision_keys=missing-captain-call' >> "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_DESTRUCTIVE_LOG"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  FM_TEST_DESTRUCTIVE_LOG="$case_dir/destructive.log" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 1 "$rc" "discard-stage-refusal: unresolved inventory must refuse forced teardown"
+  assert_absent "$case_dir/destructive.log" \
+    "discard-stage-refusal: forced teardown reached destructive worktree cleanup"
+  assert_present "$case_dir/wt" \
+    "discard-stage-refusal: forced teardown removed the worktree before receipt validation"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "discard-stage-refusal: forced teardown removed metadata before receipt validation"
+  assert_grep "could not be durably staged" "$case_dir/stderr" \
+    "discard-stage-refusal: refusal did not identify the durable receipt prerequisite"
+  pass "forced discard validates captain inventory before destructive cleanup"
+}
+
+test_forced_discard_replays_staged_inventory_after_interruption() {
+  local case_dir rc=0 call=staged-captain-call decision receipt
+  case_dir=$(make_case discard-stage-replay)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' tasks-axi > "$case_dir/config/backlog-backend"
+  tasks-axi add task-x1 "Forced discard origin" --start --json \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  tasks-axi add "$call" "Staged captain call" --json \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$call" --reason "captain answer pending" >/dev/null
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-x1 "$call" >/dev/null
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" prepare-retirement task-x1
+  decision="$case_dir/captain-answer.txt"
+  printf '%s\n' 'Proceed with the forced discard.' > "$decision"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$call" --decision-file "$decision" >/dev/null
+  install_interrupting_treehouse "$case_dir"
+
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" --force > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "discard-stage-replay: interruption should stop the first teardown"
+  [ ! -e "$case_dir/wt" ] \
+    || fail "discard-stage-replay: fixture did not remove the worktree before interruption: $(cat "$case_dir/first.stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "discard-stage-replay: interruption removed metadata needed for replay"
+  receipt=$(find "$case_dir/state/terminal-delivery" -type f -name '*.json' -print -quit)
+  assert_present "$receipt" "discard-stage-replay: receipt prerequisites were not staged"
+  jq -e --arg call "$call" \
+    '.retirement_prepared == true and .captain_keys == $call and (.retired != true)' \
+    "$receipt" >/dev/null \
+    || fail "discard-stage-replay: staged receipt did not preserve captain inventory"
+
+  rc=0
+  FM_TEST_TREEHOUSE_INTERRUPTED="$case_dir/interrupted" \
+    run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "discard-stage-replay: exact staged retry should complete"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "discard-stage-replay: successful retry retained task metadata"
+  jq -e --arg call "$call" \
+    '.retired and .discarded and (.reviewed != true) and (.backlog != true) and (.refill != true) and .captain_keys == $call' \
+    "$receipt" >/dev/null \
+    || fail "discard-stage-replay: discard retirement lost its staged review obligation"
+  FM_HOME="$case_dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-terminal-reconcile.sh" report > "$case_dir/report"
+  assert_grep "discard-reviewed $(basename "$receipt" .json)" "$case_dir/report" \
+    "discard-stage-replay: pending discard review was not reportable"
+  pass "forced discard replays durable inventory after destructive interruption"
+}
+
+case "${FM_TEARDOWN_FOCUSED_TEST:-}" in
+  '') ;;
+  ship-captain-attestation)
+    test_ship_teardown_requires_captain_inventory_attestation
+    test_manual_backend_attestation_without_tasks_axi
+    exit
+    ;;
+  discard-retirement-recovery)
+    test_forced_discard_refuses_unstageable_inventory_before_removal
+    test_forced_discard_replays_staged_inventory_after_interruption
+    exit
+    ;;
+  current-landing-removal)
+    test_term_pushed_followup_requires_current_landing
+    test_local_only_merged_to_local_main_allows
+    exit
+    ;;
+  merged-pr-current-content)
+    test_merged_pr_refuses_fork_pushed_unlanded_patch
+    test_merged_pr_refuses_replayed_patch_set_with_different_final_tree
+    test_merged_pr_allows_replayed_history_with_matching_final_tree
+    exit
+    ;;
+  squash-replayed-patch)
+    test_squash_merged_pr_allows_replayed_unpushed_patch
+    exit
+    ;;
+  lsof-absent-process-group)
+    test_lsof_absent_reaps_tmux_process_group
+    exit
+    ;;
+  late-captain-removal)
+    test_late_captain_call_refuses_before_worktree_removal
+    exit
+    ;;
+  receipt-authentication)
+    test_unauthenticated_landing_receipts_refuse_replay
+    exit
+    ;;
+  herdr-preflight)
+    test_herdr_flat_teardown_preflight_refuses_before_changes
+    exit
+    ;;
+  *) fail "unknown focused teardown test: $FM_TEARDOWN_FOCUSED_TEST" ;;
+esac
+
+test_local_only_fork_remote_refuses_without_default_landing
+test_open_pr_poll_blocks_teardown_until_landing
+test_manual_backend_open_pr_poll_blocks_teardown_until_landing
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
-test_no_mistakes_origin_remote_allows
+test_ship_teardown_requires_captain_inventory_attestation
+test_manual_backend_attestation_without_tasks_axi
+test_no_mistakes_remote_custody_without_observer_refuses
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_teardown_missing_busy_sidecar_completes
@@ -2614,7 +3524,11 @@ test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
+test_no_pr_recorded_open_pr_retains_reconciliation_custody
 test_squash_merged_pr_allows_replayed_unpushed_patch
+test_merged_pr_refuses_fork_pushed_unlanded_patch
+test_merged_pr_refuses_replayed_patch_set_with_different_final_tree
+test_merged_pr_allows_replayed_history_with_matching_final_tree
 test_merged_pr_with_later_local_commit_refuses
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
@@ -2649,3 +3563,10 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_persisted_landing_proof_replays_after_worktree_return
+test_persisted_landing_proof_rejects_replacement_incarnation
+test_persisted_landing_proof_revalidates_existing_worktree
+test_term_pushed_followup_requires_current_landing
+test_late_captain_call_refuses_before_worktree_removal
+test_forced_discard_refuses_unstageable_inventory_before_removal
+test_forced_discard_replays_staged_inventory_after_interruption

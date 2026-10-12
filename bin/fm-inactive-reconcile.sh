@@ -359,6 +359,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   else
     outcome_key="inactive-outcome-main-$id-$state"
   fi
+  "$SCRIPT_DIR/fm-terminal-reconcile.sh" observe "$id" "$state" "$pr" || return 1
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   if [ -n "$self" ]; then
@@ -436,6 +437,7 @@ scan() {
   if [ "$startup" != 1 ] && [ "$(scan_marker_age)" -lt "$FM_INACTIVE_RECONCILE_SECS" ]; then
     return 0
   fi
+  fm_run_timed 4 "$SCRIPT_DIR/fm-terminal-reconcile.sh" reconcile || true
   cursor=$(scan_marker_cursor)
   valid_id "$cursor" || cursor=''
   write_scan_marker "$cursor" || return 1

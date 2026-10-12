@@ -223,14 +223,16 @@ cycle_mark_predecessor_successor() {
 }
 
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
-  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$FM_HOME" ] || return 0
-  [ "$lock_path" = "$WATCH" ] || return 0
-  [ -n "$lock_identity" ] || return 0
-  fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
+  local lock_owner lock_pid lock_home lock_path lock_identity
+  lock_owner=$(fm_lock_existing_owner "$WATCH_LOCK" 2>/dev/null || true)
+  lock_pid=$(cat "$lock_owner/pid" 2>/dev/null || true)
+  lock_home=$(cat "$lock_owner/fm-home" 2>/dev/null || true)
+  lock_path=$(cat "$lock_owner/watcher-path" 2>/dev/null || true)
+  lock_identity=$(cat "$lock_owner/pid-identity" 2>/dev/null || true)
+  [ -n "$lock_owner" ] && [ -n "$lock_pid" ] && [ -n "$lock_identity" ] \
+    && [ "$lock_home" = "$FM_HOME" ] && [ "$lock_path" = "$WATCH" ] || return 1
+  fm_watcher_lock_clear_stale_exact "$STATE/.watcher-down" "$WATCH_LOCK" \
+    "$lock_owner" "$lock_pid" "$lock_identity" "$lock_home" "$lock_path" downtime
 }
 
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS

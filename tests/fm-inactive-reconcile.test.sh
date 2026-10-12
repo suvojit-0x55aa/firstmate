@@ -57,6 +57,10 @@ make_world() { # <name>
   MAIN="$WORLD/main"
   MATE="$WORLD/mate"
   mkdir -p "$WORLD/root" "$MAIN"/{state,data,config,projects} "$MATE"/{state,data,config,projects,bin}
+  cp "$ROOT/.tasks.toml" "$MAIN/.tasks.toml"
+  cp "$ROOT/.tasks.toml" "$MATE/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$MAIN/data/backlog.md"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$MATE/data/backlog.md"
   : > "$MATE/AGENTS.md"
   make_tools "$WORLD"
   : > "$WORLD/forge.log"
@@ -81,10 +85,15 @@ EOF
 
 write_child() { # <home> <id> <status> [spawn-gen]
   local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
+  if ! tasks-axi show "$id" --file "$home/data/backlog.md" >/dev/null 2>&1; then
+    tasks-axi add "$id" "$id" --start --json --file "$home/data/backlog.md" >/dev/null \
+      || fail "could not create inactive child backlog fixture: $id"
+  fi
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
-    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
+    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1' \
+    'decisions_reviewed=1' 'decision_keys='
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
@@ -123,7 +132,7 @@ reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 # The main retains a terminal presentation receipt until the corresponding wake
 # is handled and acknowledged.
 test_main_direct_terminal_presentation_receipt() {
-  local err seq generation
+  local err seq generation delivery
   make_world main-direct; write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "main did not queue terminal presentation"
@@ -136,7 +145,10 @@ test_main_direct_terminal_presentation_receipt() {
   [ -n "$seq" ] && [ -n "$generation" ] || fail "main presentation did not require durable acknowledgement"
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
-  pass "main direct terminal presentation has a durable receipt"
+  delivery=$(FM_HOME="$MAIN" "$ROOT/bin/fm-terminal-reconcile.sh" report)
+  assert_contains "$delivery" 'TERMINAL DELIVERY: child' 'presentation acknowledgement erased the next delivery action'
+  assert_contains "$delivery" 'backlog_done=false' 'acknowledgement falsely claimed backlog completion'
+  pass "main presentation acknowledgement retains an independent delivery obligation"
 }
 
 # A secondmate independently reports a genuinely terminal inactive child.

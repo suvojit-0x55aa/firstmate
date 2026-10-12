@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Retire stale restored-shell Herdr presentation children at locked session start.
+# Retire stale restored-shell Herdr presentation children in the deferred startup worker.
 #
 # Usage: fm-herdr-session-cleanup.sh
+# The CLI has a 30-second aggregate budget; FM_HERDR_CLEANUP_TIMEOUT may lower
+# it to an integer from 1 to 30. Expiry warns, preserves remaining journals,
+# and terminates the entire probe process group. A subsequent invocation retries
+# retained candidates. --bounded-worker is internal to the deadline wrapper.
 #
 # The caller must already own this Firstmate home's session lock. This script is
 # home-local and considers only the current named Herdr session and ordinary
@@ -215,6 +219,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   bound_pane=$FM_HERDR_CLEANUP_BOUND_PANE
   [ "$FM_HERDR_CLEANUP_TOKEN" = "$token" ] || return 0
   task_lock="$STATE/.spawn-$id.lock"
+  FM_HERDR_CLEANUP_TASK_LOCK=$task_lock
   if ! fm_lock_try_acquire "$task_lock"; then
     fm_herdr_cleanup_warn "$id skipped because its task lock is busy"
     return 0
@@ -224,6 +229,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
     fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is unavailable"
     return 0
   }
+  FM_HERDR_CLEANUP_PRESENTATION_LOCK=$presentation_lock
   if ! fm_lock_try_acquire "$presentation_lock"; then
     fm_lock_release "$task_lock" || true
     fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is busy"
@@ -332,6 +338,27 @@ fm_herdr_session_cleanup() {
 }
 
 if [ "${FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY:-0}" != 1 ]; then
-  fm_herdr_session_cleanup
+  if [ "${1:-}" = --bounded-worker ]; then
+    # Release only locks still owned by this process. SIGKILL leaves dead-owner
+    # locks recoverable through the ordinary lock owner's guarded reclaim.
+    trap '[ -z "${FM_HERDR_CLEANUP_PRESENTATION_LOCK:-}" ] || fm_lock_release "$FM_HERDR_CLEANUP_PRESENTATION_LOCK"; [ -z "${FM_HERDR_CLEANUP_TASK_LOCK:-}" ] || fm_lock_release "$FM_HERDR_CLEANUP_TASK_LOCK"' EXIT
+    trap 'exit 124' HUP INT TERM
+    fm_herdr_session_cleanup
+  else
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+    budget=${FM_HERDR_CLEANUP_TIMEOUT:-30}
+    case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
+    if [ "${#budget}" -gt 2 ] || [ "$budget" -lt 1 ] || [ "$budget" -gt 30 ]; then budget=30; fi
+    printf 'BOOTSTRAP_INFO: Herdr cleanup budget=%ss; incomplete candidates remain journaled\n' "$budget"
+    # The Bash runner forwards outer-stage cancellation as well as its own
+    # deadline, so nesting under the network budget cannot orphan CLI probes.
+    rc=0
+    FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_run_timed "$budget" \
+      bash "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" --bounded-worker || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      fm_herdr_cleanup_warn "cleanup incomplete (exit=$rc, budget=${budget}s); retained candidates will be retried"
+    fi
+  fi
   exit 0
 fi

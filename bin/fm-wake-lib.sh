@@ -144,13 +144,17 @@ fm_watcher_healthy() {
 #               watcher is armed at each turn end and exits on its wake, so it
 #               runs only BETWEEN turns. Mid-turn a fresh beacon with no live
 #               watcher process is the healthy state.
+#   stop-managed Codex's synchronous Stop owns one watcher until an actionable
+#               return or quiet checkpoint, then removes it before handing the
+#               native continuation back. During that handling turn a fresh
+#               beacon with no live watcher process is the healthy state.
 #   extension   Pi (and pi-signed): .pi/extensions/fm-primary-pi-watch.ts owns
 #               continuity. It tears the watcher down on every actionable wake and
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
-#   persistent  every other harness (codex foreground checkpoint, opencode/grok
-#               background arm, tmux, unknown): the watcher runs as a tracked live
+#   persistent  every other harness (opencode/grok background arm, tmux,
+#               unknown): the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
 # the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
@@ -158,11 +162,12 @@ fm_watcher_healthy() {
 fm_supervision_model() {
   local harness
   case "${FM_SUPERVISION_MODEL:-}" in
-    autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
+    autoarm|stop-managed|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
+    codex) printf 'stop-managed\n' ;;
     pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
@@ -226,6 +231,227 @@ fm_pi_extension_owns_supervision() {
   fm_pid_alive "$session_pid"
 }
 
+fm_codex_stop_record_value() {  # <record> <key>
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  sed -n "s/^$2=//p" "$1" | head -1
+}
+
+fm_codex_stop_generation_current() {  # <state> <session-pid> <identity>
+  local state=$1 session_pid=$2 identity=$3 lock="$1/.lock"
+  [ -f "$lock" ] && [ ! -L "$lock" ] && [ ! -e "$state/.afk" ] || return 1
+  [ "$(cat "$lock" 2>/dev/null)" = "$session_pid" ] || return 1
+  [ "$(fm_pid_identity "$session_pid")" = "$identity" ]
+}
+
+fm_session_transition_begin() {  # <state>
+  fm_lock_acquire_wait "$1/.session-generation-transition.lock"
+}
+
+fm_session_transition_end() {  # <state>
+  fm_lock_release "$1/.session-generation-transition.lock"
+}
+
+fm_session_transition_lock_write() {  # <state> <session-pid>
+  local state=$1 session_pid=$2 tmp written status
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  tmp=$(mktemp "$state/.lock.pending.XXXXXX") || return 1
+  printf '%s\n' "$session_pid" > "$tmp" || { rm -f "$tmp"; return 1; }
+  fm_session_transition_begin "$state" || { rm -f "$tmp"; return 1; }
+  if mv -f "$tmp" "$state/.lock"; then
+    written=$(cat "$state/.lock" 2>/dev/null || true)
+    [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] && [ "$written" = "$session_pid" ]
+    status=$?
+  else
+    status=1
+  fi
+  fm_session_transition_end "$state"
+  rm -f "$tmp" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_write() {  # <state>
+  local state=$1 pending status=1
+  pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
+  date '+%s' > "$pending" || { rm -f "$pending"; return 1; }
+  fm_session_transition_begin "$state" || { rm -f "$pending"; return 1; }
+  mv -f "$pending" "$state/.afk" && status=0
+  fm_session_transition_end "$state"
+  rm -f "$pending" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_restore() {  # <state> <saved-flag>
+  local state=$1 saved=$2 pending status=1
+  [ -f "$saved" ] && [ ! -L "$saved" ] || return 1
+  pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
+  cp "$saved" "$pending" || { rm -f "$pending"; return 1; }
+  fm_session_transition_begin "$state" || { rm -f "$pending"; return 1; }
+  mv -f "$pending" "$state/.afk" && status=0
+  fm_session_transition_end "$state"
+  rm -f "$pending" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_reset() {  # <state> [saved-flag]
+  local state=$1 saved=${2:-} pending='' status=0
+  if [ -n "$saved" ]; then
+    [ -f "$saved" ] && [ ! -L "$saved" ] || return 1
+    pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1
+    cp "$saved" "$pending" || { rm -f "$pending"; return 1; }
+  fi
+  fm_session_transition_begin "$state" || { [ -z "$pending" ] || rm -f "$pending"; return 1; }
+  if [ -n "$pending" ]; then
+    mv -f "$pending" "$state/.afk" || status=1
+  else
+    rm -f "$state/.afk" || status=1
+  fi
+  fm_session_transition_end "$state"
+  [ -z "$pending" ] || rm -f "$pending" 2>/dev/null || true
+  return "$status"
+}
+
+fm_session_transition_afk_clear() {  # <state>
+  local state=$1 status=0
+  fm_session_transition_begin "$state" || return 1
+  rm -f "$state/.afk" || status=1
+  fm_session_transition_end "$state"
+  return "$status"
+}
+
+fm_codex_stop_record_write() {  # <state> <session-pid> <identity> <phase> <successors> <expires> [cycle]
+  local state=$1 session_pid=$2 identity=$3 phase=$4 successors=$5 expires=$6
+  local cycle=${7:-} record="$1/.codex-stop-health" tmp
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$phase" in watching|handling) ;; *) return 1 ;; esac
+  case "$successors" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expires" in ''|*[!0-9]*) return 1 ;; esac
+  case "$identity" in ''|*$'\n'*|*$'\r'*) return 1 ;; esac
+  [ ! -L "$record" ] || return 1
+  tmp=$(mktemp "$state/.codex-stop-health.XXXXXX") || return 1
+  [ -n "$cycle" ] || cycle=${tmp##*.}
+  case "$cycle" in ''|*[!A-Za-z0-9._-]*) rm -f "$tmp"; return 1 ;; esac
+  {
+    printf 'schema=fm-codex-stop-health.v1\n'
+    printf 'generation_pid=%s\n' "$session_pid"
+    printf 'generation_identity=%s\n' "$identity"
+    printf 'cycle=%s\n' "$cycle"
+    printf 'phase=%s\n' "$phase"
+    printf 'successor_count=%s\n' "$successors"
+    printf 'expires_epoch=%s\n' "$expires"
+  } > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$record" && return 0
+  rm -f "$tmp"
+  return 1
+}
+
+fm_codex_stop_successor_begin() {  # <state> <session-pid> <identity>
+  local state=$1 session_pid=$2 identity=$3 record="$1/.codex-stop-health"
+  local schema recorded_pid recorded_identity phase successors expires cycle now
+  FM_CODEX_STOP_SUCCESSOR_ERROR=
+  if [ -e "$record" ]; then
+    if [ ! -f "$record" ] || [ -L "$record" ]; then
+      FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision found an invalid Stop health record; reconcile the session generation before continuing.'
+      return 1
+    fi
+    schema=$(fm_codex_stop_record_value "$record" schema || true)
+    recorded_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+    recorded_identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+    if [ "$schema" = fm-codex-stop-health.v1 ] \
+      && [ "$recorded_pid" = "$session_pid" ] \
+      && [ "$recorded_identity" = "$identity" ]; then
+      phase=$(fm_codex_stop_record_value "$record" phase || true)
+      successors=$(fm_codex_stop_record_value "$record" successor_count || true)
+      expires=$(fm_codex_stop_record_value "$record" expires_epoch || true)
+      cycle=$(fm_codex_stop_record_value "$record" cycle || true)
+      if [ "$phase" = handling ]; then
+        if [ "$successors" != 0 ]; then
+          FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision rejected a duplicate or invalid Stop successor: duplicate successor evidence; reconcile the session generation before continuing.'
+          return 1
+        fi
+        case "$expires" in
+          ''|*[!0-9]*)
+            FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision found an invalid handling deadline; reconcile the session generation before continuing.'
+            return 1
+            ;;
+        esac
+        now=$(date +%s)
+        if [ "$expires" -le "$now" ]; then
+          FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision handling window expired before its required Stop successor; start a replacement Codex session generation before continuing.'
+          return 1
+        fi
+        fm_codex_stop_record_write "$state" "$session_pid" "$identity" \
+          watching 1 "${expires:-0}" "$cycle"
+        return
+      fi
+      if [ "$phase" != watching ]; then
+        # shellcheck disable=SC2034 # Returned to callers as the failure detail.
+        FM_CODEX_STOP_SUCCESSOR_ERROR='Codex supervision found an invalid Stop phase; reconcile the session generation before continuing.'
+        return 1
+      fi
+    fi
+  fi
+  fm_codex_stop_record_write "$state" "$session_pid" "$identity" watching 0 0
+}
+
+fm_codex_stop_handling_open() {  # <state> <session-pid> <identity> <seconds>
+  local state=$1 session_pid=$2 identity=$3 seconds=$4 expires
+  case "$seconds" in ''|*[!0-9]*|0) return 1 ;; esac
+  expires=$(( $(date +%s) + seconds ))
+  fm_codex_stop_generation_current "$state" "$session_pid" "$identity" || return 1
+  fm_codex_stop_record_write "$state" "$session_pid" "$identity" handling 0 "$expires" || return 1
+  if ! fm_codex_stop_generation_current "$state" "$session_pid" "$identity"; then
+    fm_codex_stop_record_clear "$state" "$session_pid" "$identity" || true
+    return 1
+  fi
+}
+
+fm_codex_stop_record_clear() {  # <state> <session-pid> <identity>
+  local record="$1/.codex-stop-health" recorded_pid recorded_identity
+  [ -e "$record" ] || return 0
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  recorded_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+  recorded_identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+  [ "$recorded_pid" = "$2" ] && [ "$recorded_identity" = "$3" ] || return 0
+  rm -f "$record"
+}
+
+fm_codex_stop_handling_owned_by_session() {  # <state>
+  local record="$1/.codex-stop-health" lock="$1/.lock"
+  local schema session_pid identity phase current_identity
+  [ -f "$record" ] && [ ! -L "$record" ] && [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  schema=$(fm_codex_stop_record_value "$record" schema || true)
+  session_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+  identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+  phase=$(fm_codex_stop_record_value "$record" phase || true)
+  [ "$schema" = fm-codex-stop-health.v1 ] && [ "$phase" = handling ] || return 1
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(cat "$lock" 2>/dev/null)" = "$session_pid" ] || return 1
+  current_identity=$(fm_pid_identity "$session_pid") || return 1
+  [ "$current_identity" = "$identity" ]
+}
+
+fm_codex_stop_handling_healthy() {  # <state>
+  local state=$1 record="$1/.codex-stop-health" lock="$1/.lock"
+  local schema session_pid identity cycle phase successors expires current_identity now
+  [ -f "$record" ] && [ ! -L "$record" ] && [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  schema=$(fm_codex_stop_record_value "$record" schema || true)
+  session_pid=$(fm_codex_stop_record_value "$record" generation_pid || true)
+  identity=$(fm_codex_stop_record_value "$record" generation_identity || true)
+  cycle=$(fm_codex_stop_record_value "$record" cycle || true)
+  phase=$(fm_codex_stop_record_value "$record" phase || true)
+  successors=$(fm_codex_stop_record_value "$record" successor_count || true)
+  expires=$(fm_codex_stop_record_value "$record" expires_epoch || true)
+  [ "$schema" = fm-codex-stop-health.v1 ] && [ "$phase" = handling ] \
+    && [ "$successors" = 0 ] || return 1
+  case "$session_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expires" in ''|*[!0-9]*) return 1 ;; esac
+  case "$cycle" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "$(cat "$lock" 2>/dev/null)" = "$session_pid" ] || return 1
+  current_identity=$(fm_pid_identity "$session_pid") || return 1
+  [ "$current_identity" = "$identity" ] || return 1
+  now=$(date +%s)
+  [ "$expires" -gt "$now" ]
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
@@ -238,6 +464,9 @@ fm_pi_extension_owns_supervision() {
 #                                             absent (a genuine supervision lapse)
 # autoarm: a fresh beacon within grace is healthy even with no live watcher,
 # because the watcher only runs between turns; only a stale beacon is a lapse.
+# stop-managed: a live watcher is healthy while Stop is parked; after Stop
+# removes it, a fresh beacon is healthy only with a bounded handling record
+# bound to the live session generation and awaiting exactly one successor.
 # extension: a live identity-matched watcher is the ordinary healthy state, but a
 # genuinely unheld lock is also healthy while the beacon is fresh AND a live Pi
 # session provably owns continuity (fm_pi_extension_owns_supervision) - that is the
@@ -265,15 +494,20 @@ fm_watcher_supervision_verdict() {
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
   esac
   model=$(fm_supervision_model)
-  if [ "$model" = autoarm ]; then
-    [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
-    return 0
-  fi
+  case "$model" in
+    autoarm)
+      [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
+      return 0
+      ;;
+  esac
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
+    if [ "$model" = stop-managed ] && fm_codex_stop_handling_healthy "$state"; then
+      # shellcheck disable=SC2034 # Read by callers after the function returns.
+      FM_WATCHER_VERDICT_OK=true
+    elif [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
       && fm_pi_extension_owns_supervision "$state" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
@@ -471,6 +705,62 @@ fm_lock_recheck_stale_owner() {
     return 1
   fi
   return 0
+}
+
+fm_lock_existing_owner() {
+  local lockdir=$1
+  if [ -L "$lockdir" ]; then
+    fm_lock_link_owner "$lockdir"
+  elif [ -d "$lockdir" ]; then
+    printf '%s\n' "$lockdir"
+  else
+    return 1
+  fi
+}
+
+fm_watcher_lock_snapshot_matches() {
+  local lockdir=$1 expected_owner=$2 expected_pid=$3 expected_identity=$4
+  local expected_home=$5 expected_path=$6
+  [ -n "$expected_owner" ] || return 1
+  if [ "$expected_owner" = "$lockdir" ]; then
+    [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+  else
+    fm_lock_points_to_owner "$lockdir" "$expected_owner" || return 1
+  fi
+  [ "$(cat "$expected_owner/pid" 2>/dev/null || true)" = "$expected_pid" ] || return 1
+  [ "$(cat "$expected_owner/pid-identity" 2>/dev/null || true)" = "$expected_identity" ] || return 1
+  [ "$(cat "$expected_owner/fm-home" 2>/dev/null || true)" = "$expected_home" ] || return 1
+  [ "$(cat "$expected_owner/watcher-path" 2>/dev/null || true)" = "$expected_path" ]
+}
+
+fm_watcher_lock_owner_proven_stale() {
+  local pid=$1 expected_identity=$2 current_identity
+  fm_pid_alive "$pid" || return 0
+  current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$current_identity" ] && [ "$current_identity" != "$expected_identity" ]
+}
+
+fm_watcher_lock_clear_stale_exact() {
+  local marker=$1 lockdir=$2 expected_owner=$3 expected_pid=$4 expected_identity=$5
+  local expected_home=$6 expected_path=$7 kind=${8:-downtime} steal steal_owner status=1
+  case "$expected_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$expected_identity" ] && [ -n "$expected_home" ] && [ -n "$expected_path" ] || return 1
+  steal="$lockdir.steal"
+  fm_lock_try_acquire "$steal" || return 1
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
+  if fm_lock_points_to_owner "$steal" "$steal_owner" \
+    && fm_watcher_lock_snapshot_matches "$lockdir" "$expected_owner" "$expected_pid" \
+      "$expected_identity" "$expected_home" "$expected_path"; then
+    if fm_watcher_lock_owner_proven_stale "$expected_pid" "$expected_identity" \
+      && _fm_recovery_marker_publish "$marker" "$kind" \
+      && fm_watcher_lock_snapshot_matches "$lockdir" "$expected_owner" "$expected_pid" \
+        "$expected_identity" "$expected_home" "$expected_path" \
+      && fm_watcher_lock_owner_proven_stale "$expected_pid" "$expected_identity"; then
+      fm_lock_remove_path "$lockdir" && status=0
+    fi
+  fi
+  fm_lock_release "$steal"
+  return "$status"
 }
 
 FM_RECOVERY_MARKER_TOKEN=
@@ -773,7 +1063,7 @@ _fm_recovery_marker_announced_to_current_session_locked() {
 # buried note can be presented once more. Handling successors must not call
 # this, because Option B re-arm is not a new down stretch. Neither is an
 # ordinary next-turn start by the same live session that already saw this
-# generation announced, such as the next Codex foreground checkpoint or the
+# generation announced, such as the next Codex Stop-owned cycle or the
 # Claude Stop auto-arm, neither of which runs as a handling successor:
 # re-opening there re-announced on every turn while the queue stayed non-empty.
 # A crashed watcher still re-announces through the stale-lock recovery path in
@@ -831,11 +1121,6 @@ fm_recovery_transition() {
       fi
       fm_lock_release "$target"
       fm_lock_release "$lock"
-      ;;
-    clear-stale-lock)
-      [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
-      fm_lock_remove_path "$target"
       ;;
     *) return 2 ;;
   esac

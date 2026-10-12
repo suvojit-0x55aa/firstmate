@@ -72,6 +72,15 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+run_terminal() {  # <home> <command args...>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-terminal-reconcile.sh" "$@"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -91,6 +100,292 @@ write_origin_meta() {  # <home> <id> [kind]
     "harness=codex" \
     "kind=$kind" \
     "mode=$kind"
+}
+
+use_manual_reader() {  # <home>
+  local home=$1
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'tasks-axi 0.0.0'
+  exit 0
+fi
+exit 97
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+}
+
+archive_done_task_in_home() {  # <home> <task-id> <prefix>
+  local home=$1 id=$2 prefix=$3 filler
+  for filler in $(seq 1 11); do
+    tasks_in "$home" add "$prefix-filler-$filler" "$prefix filler $filler" >/dev/null
+    tasks_in "$home" 'done' "$prefix-filler-$filler" >/dev/null
+  done
+  if tasks_in "$home" show "$id" --full >/dev/null 2>&1; then
+    fail "$id did not cross the configured Done archive boundary"
+  fi
+}
+
+run_cycle_bound_teardown_control() {  # <backend> <held-or-answered>
+  local backend=$1 resolution=$2 home id call
+  home=$(make_home "cycle-control-$backend-$resolution")
+  id="sample-cycle-control-$backend-$resolution"
+  call="$id-call"
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Exact cycle control\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain cycle control pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  if [ "$resolution" = answered ]; then
+    printf 'Captain answered the exact persisted cycle.\n' > "$home/answer.txt"
+    run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null
+  fi
+  [ "$backend" != manual ] || use_manual_reader "$home"
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "$backend $resolution exact-cycle teardown failed: $(cat "$home/teardown.err")"
+}
+
+run_reused_cycle_teardown_refusal() {  # <backend>
+  local backend=$1 home id call meta report custody saved_calls bad_calls before_meta before_report before_custody rc
+  home=$(make_home "teardown-cycle-reuse-$backend")
+  id="sample-cycle-reuse-$backend"
+  call="$id-call"
+  meta="$home/state/$id.meta"
+  report="$home/data/$id/report.md"
+  custody="$home/projects/missing-$id/custody.marker"
+  mkdir -p "$home/data/$id" "$(dirname "$custody")"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Reused cycle teardown evidence\n' > "$report"
+  printf 'custody retained\n' > "$custody"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain original cycle pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  saved_calls=$(sed -n 's/^decision_call_cycles=//p' "$meta" | tail -1)
+  [ -n "$saved_calls" ] || fail "$backend reuse fixture omitted the original cycle"
+  tasks_in "$home" 'done' "$call" --no-prune >/dev/null
+  archive_done_task_in_home "$home" "$call" "$id-archive"
+  tasks_in "$home" add "$call" "$call replacement" >/dev/null
+  run_captain "$home" hold "$call" --reason "captain replacement cycle pending" >/dev/null
+  printf 'Captain answered only the replacement cycle.\n' > "$home/replacement-answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/replacement-answer.txt" >/dev/null
+
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/treehouse.log"
+exit 0
+SH
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/tmux.log"
+exit 0
+SH
+  chmod +x "$home/fakebin/treehouse" "$home/fakebin/tmux"
+  [ "$backend" != manual ] || use_manual_reader "$home"
+
+  before_meta=$(shasum -a 256 "$meta" | awk '{print $1}')
+  before_report=$(shasum -a 256 "$report" | awk '{print $1}')
+  before_custody=$(shasum -a 256 "$custody" | awk '{print $1}')
+  for rc in 1 2; do
+    if run_teardown "$home" "$id" > "$home/teardown-$rc.out" 2> "$home/teardown-$rc.err"; then
+      fail "$backend teardown accepted a replacement answer for an archived unresolved cycle"
+    fi
+  done
+  [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before_meta" ] \
+    || fail "$backend refused teardown mutated captain attestation metadata"
+  [ "$(shasum -a 256 "$report" | awk '{print $1}')" = "$before_report" ] \
+    || fail "$backend refused teardown mutated the scout report"
+  [ "$(shasum -a 256 "$custody" | awk '{print $1}')" = "$before_custody" ] \
+    || fail "$backend refused teardown removed worktree custody"
+  assert_no_grep 'return ' "$home/treehouse.log" \
+    "$backend refused teardown returned the worktree"
+  assert_no_grep 'kill-window' "$home/tmux.log" \
+    "$backend refused teardown removed the endpoint"
+
+  cp "$meta" "$meta.valid"
+  awk '!/^decision_call_cycles=/' "$meta.valid" > "$meta"
+  if run_captain "$home" verify "$id" > "$home/missing.out" 2> "$home/missing.err"; then
+    fail "$backend verification accepted missing cycle inventory"
+  fi
+  cp "$meta.valid" "$meta"
+  sed 's/^decision_call_cycles=.*/decision_call_cycles=not-json/' "$meta.valid" > "$meta"
+  if run_captain "$home" verify "$id" > "$home/corrupt.out" 2> "$home/corrupt.err"; then
+    fail "$backend verification accepted corrupt cycle inventory"
+  fi
+  cp "$meta.valid" "$meta"
+  bad_calls=$(printf '%s\n' "$saved_calls" | jq -c --arg id "$call" \
+    '. + [{id:$id,cycle:"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]')
+  awk '!/^decision_call_cycles=/' "$meta.valid" > "$meta"
+  printf 'decision_call_cycles=%s\n' "$bad_calls" >> "$meta"
+  if run_captain "$home" verify "$id" > "$home/ambiguous.out" 2> "$home/ambiguous.err"; then
+    fail "$backend verification accepted an unprovable additional cycle identity"
+  fi
+}
+
+test_teardown_verifies_persisted_call_cycles() {
+  run_reused_cycle_teardown_refusal tasks
+  run_reused_cycle_teardown_refusal manual
+  run_cycle_bound_teardown_control tasks held
+  run_cycle_bound_teardown_control manual answered
+  pass "scout teardown verifies exact persisted captain-call cycles"
+}
+
+test_active_rehold_preserves_prior_cycle_evidence() {
+  local home id call cycle_a cycle_b calls replay_calls unknown before
+  home=$(make_home active-rehold-cycle)
+  id=sample-active-rehold-origin
+  call=sample-active-rehold-call
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Active re-hold cycle evidence\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain first cycle pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  cycle_a=$(sed -n 's/^decision_call_cycles=//p' "$home/state/$id.meta" \
+    | tail -1 | jq -r --arg id "$call" '.[] | select(.id == $id) | .cycle')
+  [ -n "$cycle_a" ] || fail "first active cycle was not persisted"
+  printf 'Captain released the first authenticated cycle.\n' > "$home/first-answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/first-answer.txt" --release >/dev/null
+  run_captain "$home" hold "$call" --reason "captain second cycle pending" >/dev/null
+  cycle_b=$(run_captain "$home" normalize-inventory-cycles "$id" "$call" \
+    | jq -r --arg id "$call" '.[] | select(.id == $id) | .cycle')
+  [ -n "$cycle_b" ] && [ "$cycle_b" != "$cycle_a" ] \
+    || fail "re-hold did not create a distinct current cycle"
+
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "completion replay lost the resolved historical cycle"
+  calls=$(sed -n 's/^decision_call_cycles=//p' "$home/state/$id.meta" | tail -1)
+  printf '%s\n' "$calls" | jq -e --arg id "$call" --arg a "$cycle_a" --arg b "$cycle_b" '
+    sort_by(.id,.cycle) == ([{id:$id,cycle:$a},{id:$id,cycle:$b}] | sort_by(.id,.cycle))
+  ' >/dev/null || fail "completion replay did not retain both authenticated cycles"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verification could not validate historical A and current held B independently"
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "identical completion replay was not idempotent"
+  replay_calls=$(sed -n 's/^decision_call_cycles=//p' "$home/state/$id.meta" | tail -1)
+  [ "$replay_calls" = "$calls" ] || fail "completion replay changed the authenticated cycle inventory"
+
+  if run_captain "$home" terminal-ready "$id" "$call:$cycle_b" \
+    > "$home/held-ready.out" 2> "$home/held-ready.err"; then
+    fail "terminal readiness treated current held cycle B as answered"
+  fi
+  unknown=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  if run_captain "$home" terminal-ready "$id" "$call:$unknown" \
+    > "$home/unknown-ready.out" 2> "$home/unknown-ready.err"; then
+    fail "terminal readiness accepted an unknown historical cycle"
+  fi
+  cp "$home/state/$id.meta" "$home/state/$id.meta.valid"
+  before=$(shasum -a 256 "$home/state/$id.meta.valid" | awk '{print $1}')
+  printf '%s\n' "$calls" | jq -c --arg id "$call" --arg cycle "$unknown" \
+    '. + [{id:$id,cycle:$cycle}]' > "$home/calls.invalid"
+  awk '!/^decision_call_cycles=/' "$home/state/$id.meta.valid" > "$home/state/$id.meta"
+  printf 'decision_call_cycles=%s\n' "$(cat "$home/calls.invalid")" >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/unknown-verify.out" 2> "$home/unknown-verify.err"; then
+    fail "verification accepted an unknown persisted cycle"
+  fi
+  cp "$home/state/$id.meta.valid" "$home/state/$id.meta"
+  [ "$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')" = "$before" ] \
+    || fail "unknown-cycle refusal did not preserve the valid attestation"
+
+  printf 'Captain answered the current second cycle.\n' > "$home/second-answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/second-answer.txt" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "completion replay rejected the genuine second-cycle answer"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "verification rejected the resolved historical and current cycles"
+  run_captain "$home" terminal-ready "$id" "$call:$cycle_b" >/dev/null \
+    || fail "terminal readiness rejected the genuine current-cycle answer"
+  pass "active re-holds retain exact historical and current cycle evidence"
+}
+
+test_resolution_evidence_is_authenticated_before_lifecycle_progress() {
+  local home id call cycle variant meta report before_meta before_report
+  home=$(make_home resolution-authentication)
+  id=sample-resolution-auth-origin
+  call=sample-resolution-auth-call
+  meta="$home/state/$id.meta"
+  report="$home/data/$id/report.md"
+  mkdir -p "$home/data/$id" "$home/projects/missing-$id"
+  tasks_in "$home" add "$id" "$id" --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Authenticated resolution evidence\n' > "$report"
+  printf 'custody retained\n' > "$home/projects/missing-$id/custody.marker"
+  run_captain "$home" hold "$call" --title "$call" \
+    --reason "captain exact answer pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" "$call" >/dev/null
+  cycle=$(sed -n 's/^decision_call_cycles=//p' "$meta" \
+    | tail -1 | jq -r --arg id "$call" '.[] | select(.id == $id) | .cycle')
+  printf 'Captain authenticated this exact answer.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null
+  tasks_in "$home" show "$call" --full | sed -n 's/^  body: //p' \
+    | jq -r . > "$home/resolution.valid"
+
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "valid captain resolution failed durable verification"
+  run_captain "$home" terminal-ready "$id" "$call:$cycle" >/dev/null \
+    || fail "valid captain resolution failed terminal readiness"
+
+  for variant in changed-answer unsupported-mode malformed-schema; do
+    case "$variant" in
+      changed-answer)
+        sed 's/Captain authenticated this exact answer\./Captain text was altered after recording./' \
+          "$home/resolution.valid" > "$home/resolution.invalid"
+        ;;
+      unsupported-mode)
+        sed 's/^Resolution mode: answered$/Resolution mode: fabricated/' \
+          "$home/resolution.valid" > "$home/resolution.invalid"
+        ;;
+      malformed-schema)
+        sed '/^Decision digest:/d' "$home/resolution.valid" > "$home/resolution.invalid"
+        ;;
+    esac
+    cmp -s "$home/resolution.valid" "$home/resolution.invalid" \
+      && fail "$variant fixture did not alter the serialized resolution"
+    tasks_in "$home" update "$call" --body-file "$home/resolution.invalid" --archive-body >/dev/null
+    before_meta=$(shasum -a 256 "$meta" | awk '{print $1}')
+    before_report=$(shasum -a 256 "$report" | awk '{print $1}')
+    if run_captain "$home" verify "$id" \
+      > "$home/$variant.verify.out" 2> "$home/$variant.verify.err"; then
+      fail "$variant captain resolution passed durable verification"
+    fi
+    if run_captain "$home" terminal-ready "$id" "$call:$cycle" \
+      > "$home/$variant.ready.out" 2> "$home/$variant.ready.err"; then
+      fail "$variant captain resolution passed terminal readiness"
+    fi
+    if run_teardown "$home" "$id" \
+      > "$home/$variant.teardown.out" 2> "$home/$variant.teardown.err"; then
+      fail "$variant captain resolution authorized scout teardown"
+    fi
+    [ "$(shasum -a 256 "$meta" | awk '{print $1}')" = "$before_meta" ] \
+      || fail "$variant refusal mutated captain attestation metadata"
+    [ "$(shasum -a 256 "$report" | awk '{print $1}')" = "$before_report" ] \
+      || fail "$variant refusal mutated the scout report"
+    assert_present "$home/projects/missing-$id/custody.marker" \
+      "$variant refusal removed worktree custody"
+    [ ! -e "$home/treehouse.log" ] || assert_no_grep 'return ' "$home/treehouse.log" \
+      "$variant refusal returned the worktree"
+    [ ! -e "$home/tmux.log" ] || assert_no_grep 'kill-window' "$home/tmux.log" \
+      "$variant refusal removed the endpoint"
+    tasks_in "$home" update "$call" --body-file "$home/resolution.valid" --archive-body >/dev/null
+  done
+
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "restored authentic resolution failed durable verification"
+  run_captain "$home" terminal-ready "$id" "$call:$cycle" >/dev/null \
+    || fail "restored authentic resolution failed terminal readiness"
+  rm -f "$home/projects/missing-$id/custody.marker"
+  rmdir "$home/projects/missing-$id"
+  run_teardown "$home" "$id" >/dev/null \
+    || fail "restored authentic resolution failed the valid teardown control"
+  pass "captain resolution evidence is authenticated before lifecycle progress"
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
@@ -371,6 +666,415 @@ test_release_frees_held_work() {
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+test_answer_identity_is_hold_cycle_scoped() {
+  local home show records mismatch
+  home=$(make_home answer-cycle)
+  tasks_in "$home" add sample-cycle-work "Ship cycle-aware sample work" \
+    --kind ship --repo sample --body 'Cycle-aware work body.' >/dev/null \
+    || fail "could not create the cycle-aware held work"
+  printf 'spawn_gen=sample-cycle-one\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-cycle-work.meta"
+  run_captain "$home" hold sample-cycle-work --reason "captain cycle answer pending" >/dev/null \
+    || fail "could not establish the first captain hold cycle"
+  printf 'Captain repeats this exact release answer.\n' > "$home/cycle-answer.txt"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = unhold ] && [ -f "$FM_HOME/fail-unhold.once" ]; then
+  rm -f -- "$FM_HOME/fail-unhold.once"
+  exit 42
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/fail-unhold.once"
+  if run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release \
+    > "$home/interrupted.out" 2> "$home/interrupted.err"; then
+    fail "the interrupted release fixture did not interrupt after recording"
+  fi
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  assert_contains "$show" 'held: yes' "the interrupted release lost the active hold"
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "the interrupted release did not write exactly one resolution"
+  run_terminal "$home" merged sample-cycle-work https://github.com/o/r/pull/1
+  run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release >/dev/null \
+    || fail "same-cycle release retry did not accept its first authenticated receipt"
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "same-cycle retry duplicated the resolution record"
+
+  printf 'spawn_gen=sample-cycle-two\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-cycle-work.meta"
+  run_captain "$home" hold sample-cycle-work --reason "captain later cycle answer pending" >/dev/null \
+    || fail "could not establish the later captain hold cycle"
+  run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release >/dev/null \
+    || fail "the repeated answer was not recorded for the later hold cycle"
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the later hold cycle reused the historical resolution"
+  run_captain "$home" answer sample-cycle-work \
+    --decision-file "$home/cycle-answer.txt" --release >/dev/null \
+    || fail "the later same-cycle replay was not idempotent"
+  show=$(tasks_in "$home" show sample-cycle-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the later same-cycle replay duplicated its resolution"
+  assert_contains "$show" 'state: queued' "the later release completed resumed work"
+  assert_contains "$show" 'held: no' "the later release retained its hold"
+
+  mismatch=sample-cycle-mismatch
+  tasks_in "$home" add "$mismatch" "Reject a mismatched same-cycle receipt" \
+    --kind ship --repo sample --start >/dev/null
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\n' "$mismatch" \
+    > "$home/state/$mismatch.meta"
+  run_captain "$home" hold "$mismatch" --reason "captain mismatch answer pending" >/dev/null
+  printf 'Captain approved the original incarnation.\n' > "$home/mismatch-answer.txt"
+  : > "$home/fail-unhold.once"
+  if run_captain "$home" answer "$mismatch" \
+    --decision-file "$home/mismatch-answer.txt" --release \
+    > "$home/mismatch-interrupted.out" 2> "$home/mismatch-interrupted.err"; then
+    fail "the mismatched-incarnation fixture did not interrupt after recording"
+  fi
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\n' "$mismatch" \
+    > "$home/state/$mismatch.meta"
+  run_terminal "$home" merged "$mismatch" https://github.com/o/r/pull/2
+  if run_captain "$home" answer "$mismatch" \
+    --decision-file "$home/mismatch-answer.txt" --release \
+    > "$home/mismatch-retry.out" 2> "$home/mismatch-retry.err"; then
+    fail "a same-cycle release borrowed another terminal incarnation"
+  fi
+  printf 'Captain gave a different same-cycle answer.\n' > "$home/mismatch-drift.txt"
+  if run_captain "$home" answer "$mismatch" \
+    --decision-file "$home/mismatch-drift.txt" --release \
+    > "$home/mismatch-drift.out" 2> "$home/mismatch-drift.err"; then
+    fail "a different same-cycle answer replaced the recorded decision"
+  fi
+  show=$(tasks_in "$home" show "$mismatch" --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "mismatched same-cycle retries duplicated the resolution record"
+  assert_contains "$show" 'held: yes' "mismatched same-cycle retries released the held task"
+  pass "captain answer identity is scoped to one durable hold cycle"
+}
+
+test_release_uses_existing_terminal_evidence_only() {
+  local home id show key record replacement_id replacement_release_key replacement_key replacement_record
+  local later_id old_key new_key
+  home=$(make_home release-terminal-evidence)
+  id=sample-preterminal-release
+  tasks_in "$home" add "$id" "Ship after a live captain gate" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the preterminal release fixture"
+  printf 'spawn_gen=%s\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/1\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" > "$home/state/$id.meta"
+  run_captain "$home" hold "$id" --reason "captain live release pending" >/dev/null \
+    || fail "could not hold the live preterminal worker"
+  printf 'Captain released the live worker to finish.\n' > "$home/preterminal-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/preterminal-answer.txt" --release >/dev/null \
+    || fail "could not release the live worker before its first receipt"
+  run_captain "$home" answer "$id" --decision-file "$home/preterminal-answer.txt" --release >/dev/null \
+    || fail "preterminal release replay was not idempotent"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" 'Terminal receipt: none' \
+    "preterminal release did not record the absence of prior terminal evidence"
+  assert_contains "$show" 'Terminal incarnation: ' \
+    "preterminal release did not bind its future receipt identity"
+  if run_terminal "$home" receipt-key "$id" > "$home/preterminal-key.out" 2> "$home/preterminal-key.err"; then
+    fail "terminal owner reported a receipt before the first terminal event"
+  fi
+  run_terminal "$home" merged "$id" https://github.com/o/r/pull/1
+  key=$(run_terminal "$home" receipt-key "$id") \
+    || fail "terminal owner did not authenticate the first receipt"
+  run_terminal "$home" retired "$id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  record="$home/state/terminal-delivery/$key.json"
+  jq -e '.backlog == true and .refill == true and .reviewed != true' "$record" >/dev/null \
+    || fail "first same-incarnation receipt did not advance the preterminal release"
+  assert_contains "$(tasks_in "$home" show "$id" --full)" 'state: done' \
+    "preterminal release did not complete through terminal reconciliation"
+  run_terminal "$home" refill-reviewed "$key"
+  run_terminal "$home" refill-reviewed "$key"
+  jq -e '.backlog == true and .refill == true and .reviewed == true' "$record" >/dev/null \
+    || fail "preterminal release refill acknowledgement did not replay safely"
+
+  replacement_id=sample-preterminal-replacement
+  tasks_in "$home" add "$replacement_id" "Reject another incarnation after a live captain gate" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the preterminal replacement fixture"
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/3\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$replacement_id" > "$home/state/$replacement_id.meta"
+  run_captain "$home" hold "$replacement_id" --reason "captain replacement release pending" >/dev/null \
+    || fail "could not hold the preterminal replacement fixture"
+  printf 'Captain released only this live incarnation.\n' > "$home/replacement-answer.txt"
+  run_captain "$home" answer "$replacement_id" \
+    --decision-file "$home/replacement-answer.txt" --release >/dev/null \
+    || fail "could not release the original preterminal incarnation"
+  replacement_release_key=$(run_terminal "$home" current-incarnation "$replacement_id") \
+    || fail "terminal owner did not expose the released future incarnation"
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/3\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$replacement_id" > "$home/state/$replacement_id.meta"
+  run_terminal "$home" merged "$replacement_id" https://github.com/o/r/pull/3
+  replacement_key=$(run_terminal "$home" receipt-key "$replacement_id") \
+    || fail "terminal owner did not authenticate the replacement receipt"
+  [ "$replacement_key" != "$replacement_release_key" ] \
+    || fail "replacement fixture reused the released incarnation identity"
+  run_terminal "$home" retired "$replacement_id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  replacement_record="$home/state/terminal-delivery/$replacement_key.json"
+  jq -e '.backlog != true and .refill != true' "$replacement_record" >/dev/null \
+    || fail "replacement incarnation borrowed a preterminal captain release"
+  assert_contains "$(tasks_in "$home" show "$replacement_id" --full)" 'state: in_flight' \
+    "replacement incarnation advanced backlog using another incarnation's release"
+
+  later_id=sample-postreceipt-release
+  tasks_in "$home" add "$later_id" "Require a successor after terminal evidence" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the post-receipt release fixture"
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/2\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$later_id" > "$home/state/$later_id.meta"
+  run_terminal "$home" merged "$later_id" https://github.com/o/r/pull/2
+  old_key=$(run_terminal "$home" receipt-key "$later_id") \
+    || fail "terminal owner did not expose the real pre-release receipt"
+  run_captain "$home" hold "$later_id" --reason "captain post-receipt release pending" >/dev/null \
+    || fail "could not hold the worker after terminal evidence"
+  printf 'Captain required this terminal worker to resume.\n' > "$home/postreceipt-answer.txt"
+  run_captain "$home" answer "$later_id" --decision-file "$home/postreceipt-answer.txt" --release >/dev/null \
+    || fail "could not release the worker after terminal evidence"
+  run_captain "$home" answer "$later_id" --decision-file "$home/postreceipt-answer.txt" --release >/dev/null \
+    || fail "post-receipt release replay was not idempotent"
+  show=$(tasks_in "$home" show "$later_id" --full)
+  assert_contains "$show" "Terminal receipt: $old_key" \
+    "release after terminal evidence lost its exact receipt identity"
+  run_terminal "$home" retired "$later_id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  jq -e '.backlog != true and .refill != true' \
+    "$home/state/terminal-delivery/$old_key.json" >/dev/null \
+    || fail "same-receipt stale evidence advanced a post-terminal release"
+  assert_contains "$(tasks_in "$home" show "$later_id" --full)" 'state: in_flight' \
+    "same-receipt stale evidence completed the resumed worker"
+
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\npr=https://github.com/o/r/pull/2\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$later_id" > "$home/state/$later_id.meta"
+  run_terminal "$home" merged "$later_id" https://github.com/o/r/pull/2
+  new_key=$(run_terminal "$home" receipt-key "$later_id") \
+    || fail "terminal owner did not authenticate the successor receipt"
+  [ "$new_key" != "$old_key" ] || fail "successor terminal incarnation reused stale receipt identity"
+  run_terminal "$home" retired "$later_id" normal
+  run_terminal "$home" reconcile
+  run_terminal "$home" reconcile
+  jq -e '.backlog == true and .refill == true' \
+    "$home/state/terminal-delivery/$new_key.json" >/dev/null \
+    || fail "verified successor receipt did not advance the released worker"
+  pass "captain release requires a successor only after real terminal evidence"
+}
+
+test_answer_markers_cannot_replace_hold_cycle() {
+  local home id show records forged_cycle
+  home=$(make_home marker-shaped-answer)
+  id=sample-marker-shaped-answer
+  forged_cycle=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  tasks_in "$home" add "$id" "Preserve marker-shaped captain words" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the marker-shaped answer fixture"
+  printf 'spawn_gen=%s-one\nkind=ship\nmode=no-mistakes\n' "$id" > "$home/state/$id.meta"
+  run_captain "$home" hold "$id" --reason "captain marker-shaped answer pending" >/dev/null \
+    || fail "could not establish the genuine hold cycle"
+  cat > "$home/marker-answer.txt" <<EOF
+Captain quoted this multi-line example and then approved the work:
+Captain hold opened by fm-captain-hold.
+Hold cycle: $forged_cycle
+Captain hold marker end.
+
+Keep the quoted marker exactly as written.
+EOF
+  run_captain "$home" answer "$id" --decision-file "$home/marker-answer.txt" --release >/dev/null \
+    || fail "marker-shaped captain text replaced the genuine hold cycle"
+  run_captain "$home" answer "$id" --decision-file "$home/marker-answer.txt" --release >/dev/null \
+    || fail "marker-shaped answer retry did not use the genuine hold cycle"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "Hold cycle: $forged_cycle" \
+    "marker-shaped captain words were not preserved exactly"
+  assert_contains "$show" 'held: no' "marker-shaped answer left the work held"
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "marker-shaped answer retry duplicated its resolution"
+
+  printf 'spawn_gen=%s-two\nkind=ship\nmode=no-mistakes\n' "$id" > "$home/state/$id.meta"
+  run_captain "$home" hold "$id" --reason "captain ordinary re-hold answer pending" >/dev/null \
+    || fail "could not establish a genuine later hold cycle"
+  printf 'Captain approved the ordinary later release.\n' > "$home/ordinary-answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/ordinary-answer.txt" --release >/dev/null \
+    || fail "ordinary answer after marker-shaped text did not use the later hold cycle"
+  run_captain "$home" answer "$id" --decision-file "$home/ordinary-answer.txt" --release >/dev/null \
+    || fail "ordinary later answer retry was not idempotent"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" 'Captain approved the ordinary later release.' \
+    "ordinary later answer was not preserved"
+  assert_contains "$show" 'Keep the quoted marker exactly as written.' \
+    "genuine re-hold erased the earlier captain words"
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "genuine re-hold did not retain one resolution per cycle"
+  pass "captain text cannot spoof structurally owned hold-cycle identity"
+}
+
+test_rehold_cycle_is_interruption_safe() {
+  local home show initial_cycle interrupted_cycle active_cycle replay_cycle records rc
+  local first_show first_cycle first_replay first_records
+  home=$(make_home rehold-interruption)
+  tasks_in "$home" add sample-interrupted-work "Ship interruption-safe work" \
+    --kind ship --repo sample --body 'Interruption-safe work body.' >/dev/null \
+    || fail "could not create the interruption-safe work"
+  printf 'spawn_gen=interruption-one\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-interrupted-work.meta"
+  run_captain "$home" hold sample-interrupted-work --reason "captain first answer pending" >/dev/null \
+    || fail "could not establish the initial hold cycle"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  initial_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$initial_cycle" ] || fail "the initial hold did not persist its cycle"
+  printf 'Captain approved the initial release.\n' > "$home/initial-answer.txt"
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/initial-answer.txt" --release >/dev/null \
+    || fail "could not release the initial hold"
+
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/tasks-axi.log"
+if [ "${1:-}" = update ] && [ "${2:-}" != --help ] \
+   && [ -f "$FM_HOME/fail-update-after.once" ]; then
+  rm -f -- "$FM_HOME/fail-update-after.once"
+  "$REAL_TASKS_AXI" "$@" || exit $?
+  exit 42
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" != --help ] \
+   && [ -f "$FM_HOME/fail-hold-after.once" ]; then
+  rm -f -- "$FM_HOME/fail-hold-after.once"
+  "$REAL_TASKS_AXI" "$@" || exit $?
+  exit 43
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/tasks-axi.log"
+
+  tasks_in "$home" add sample-first-interrupted-work "Ship first-cycle interruption-safe work" \
+    --kind ship --repo sample --body 'First-cycle work body.' >/dev/null \
+    || fail "could not create the first-cycle interruption fixture"
+  printf 'spawn_gen=first-interruption\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-first-interrupted-work.meta"
+  : > "$home/fail-update-after.once"
+  rc=0
+  run_captain "$home" hold sample-first-interrupted-work --reason "captain first-cycle answer pending" \
+    > "$home/first-update-interruption.out" 2> "$home/first-update-interruption.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the first hold-cycle persistence interruption did not stop the hold command"
+  first_show=$(tasks_in "$home" show sample-first-interrupted-work --full)
+  assert_contains "$first_show" 'held: no' "the first-cycle interruption applied an unconfirmed hold"
+  first_cycle=$(printf '%s\n' "$first_show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$first_cycle" ] || fail "the first-cycle interruption did not preserve its intent"
+  if run_captain "$home" terminal-ready sample-first-interrupted-work \
+    --receipt first-interrupted > "$home/first-ready.out" 2> "$home/first-ready.err"; then
+    fail "an unmatched first hold-cycle intent authorized terminal readiness"
+  fi
+  run_captain "$home" hold sample-first-interrupted-work --reason "captain first-cycle answer pending" >/dev/null \
+    || fail "the interrupted first hold-cycle did not retry safely"
+  first_show=$(tasks_in "$home" show sample-first-interrupted-work --full)
+  first_replay=$(printf '%s\n' "$first_show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$first_replay" ] && [ "$first_replay" != "$first_cycle" ] \
+    || fail "the inactive first hold retry reused its unmatched cycle intent"
+  first_records=$(printf '%s\n' "$first_show" | grep -o 'Captain hold opened by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$first_records" = 2 ] || fail "the first hold retry did not preserve distinct interruption history"
+  printf 'Captain approved the first interrupted task.\n' > "$home/first-answer.txt"
+  run_captain "$home" answer sample-first-interrupted-work \
+    --decision-file "$home/first-answer.txt" >/dev/null \
+    || fail "the genuine first-cycle answer was not accepted"
+  run_captain "$home" terminal-ready sample-first-interrupted-work \
+    --receipt first-answered >/dev/null \
+    || fail "the genuine first-cycle answer did not authorize readiness"
+  run_captain "$home" answer sample-first-interrupted-work \
+    --decision-file "$home/first-answer.txt" >/dev/null \
+    || fail "the genuine first-cycle answer replay failed"
+  first_show=$(tasks_in "$home" show sample-first-interrupted-work --full)
+  [ "$(printf '%s\n' "$first_show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the genuine first-cycle answer replay duplicated its resolution"
+
+  printf 'spawn_gen=interruption-two\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-interrupted-work.meta"
+  : > "$home/fail-update-after.once"
+  rc=0
+  run_captain "$home" hold sample-interrupted-work --reason "captain second answer pending" \
+    > "$home/update-interruption.out" 2> "$home/update-interruption.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the cycle-persistence interruption did not stop the hold command"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  assert_contains "$show" 'held: no' "cycle persistence failure left the task actively held"
+  interrupted_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ -n "$interrupted_cycle" ] && [ "$interrupted_cycle" != "$initial_cycle" ] \
+    || fail "the interrupted cycle persistence did not leave a distinct durable intent"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt interrupted-update > "$home/update-ready.out" 2> "$home/update-ready.err"; then
+    fail "a persisted cycle without its hold reused the historical answer"
+  fi
+  run_captain "$home" hold sample-interrupted-work --reason "captain second answer pending" >/dev/null \
+    || fail "the cycle-persistence interruption did not retry safely"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  assert_contains "$show" 'held: yes' "the cycle-persistence retry did not establish the hold"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt retried-update > "$home/retried-ready.out" 2> "$home/retried-ready.err"; then
+    fail "the retried hold reused the historical answer"
+  fi
+  printf 'Captain approved the second release.\n' > "$home/second-answer.txt"
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/second-answer.txt" --release >/dev/null \
+    || fail "could not release the retried hold"
+
+  printf 'spawn_gen=interruption-three\nkind=ship\nmode=no-mistakes\n' \
+    > "$home/state/sample-interrupted-work.meta"
+  : > "$home/fail-hold-after.once"
+  rc=0
+  run_captain "$home" hold sample-interrupted-work --reason "captain final answer pending" \
+    > "$home/hold-interruption.out" 2> "$home/hold-interruption.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "the hold-application interruption did not stop the hold command"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  assert_contains "$show" 'held: yes' "the hold-application interruption fixture did not apply the hold"
+  active_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  records=$(printf '%s\n' "$show" | grep -o 'Captain hold opened by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ -n "$active_cycle" ] || fail "the interrupted active hold had no durable cycle"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt interrupted-hold > "$home/hold-ready.out" 2> "$home/hold-ready.err"; then
+    fail "the interrupted active hold reused the historical answer"
+  fi
+  run_captain "$home" hold sample-interrupted-work --reason "captain final answer pending" >/dev/null \
+    || fail "the hold-application interruption did not retry safely"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  replay_cycle=$(printf '%s\n' "$show" | grep -Eo 'Hold cycle: [0-9a-f]{64}' | head -1 | awk '{print $3}')
+  [ "$replay_cycle" = "$active_cycle" ] \
+    || fail "an active same-cycle hold retry minted a different cycle"
+  [ "$(printf '%s\n' "$show" | grep -o 'Captain hold opened by fm-captain-hold\.' | wc -l | tr -d ' ')" = "$records" ] \
+    || fail "an active same-cycle hold retry duplicated its cycle record"
+
+  tasks_in "$home" 'done' sample-interrupted-work >/dev/null \
+    || fail "could not reproduce the out-of-band completion"
+  if run_captain "$home" terminal-ready sample-interrupted-work \
+    --receipt out-of-band > "$home/out-of-band-ready.out" 2> "$home/out-of-band-ready.err"; then
+    fail "out-of-band completion reused a historical captain answer"
+  fi
+  printf 'Captain approved the final completed state.\n' > "$home/final-answer.txt"
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/final-answer.txt" >/dev/null \
+    || fail "the genuine current answer was not accepted"
+  run_captain "$home" terminal-ready sample-interrupted-work --receipt current-answer >/dev/null \
+    || fail "the genuine current answer did not authorize terminal readiness"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  records=$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  run_captain "$home" answer sample-interrupted-work \
+    --decision-file "$home/final-answer.txt" >/dev/null \
+    || fail "the current answer replay was not accepted"
+  show=$(tasks_in "$home" show sample-interrupted-work --full)
+  [ "$(printf '%s\n' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')" = "$records" ] \
+    || fail "the current answer replay duplicated its resolution"
+  pass "re-hold cycles survive persistence and application interruptions"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -487,10 +1191,52 @@ test_out_of_band_close_is_recordable() {
   pass "an out-of-band close is recordable with the captain's word and nothing else"
 }
 
-# A post-teardown visual review completes against the surviving report and
-# durable tasks, with no volatile task metadata and no second decision database.
+test_terminal_resolution_mode_is_whitelisted() {
+  local home id call pristine
+  home=$(make_home resolution-mode-validation)
+  id=sample-resolution-review
+  call=sample-resolution-call
+  tasks_in "$home" add "$id" "Review resolution validation" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the resolution validation origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$call" --title "Choose the resolution path" \
+    --reason "captain resolution choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not create the resolution validation call"
+  run_captain "$home" complete "$id" "$call" >/dev/null \
+    || fail "could not attest the resolution validation inventory"
+  printf 'Captain selected the supported path.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "could not record the supported answered mode"
+  run_captain "$home" terminal-ready "$id" "$call" >/dev/null \
+    || fail "the supported answered mode did not authorize readiness"
+
+  pristine="$home/backlog-pristine.md"
+  cp "$home/data/backlog.md" "$pristine"
+  sed -i.bak 's/Resolution mode: answered/Resolution mode: garbage/' "$home/data/backlog.md"
+  rm -f "$home/data/backlog.md.bak"
+  if run_captain "$home" terminal-ready "$id" "$call" \
+    > "$home/garbage.out" 2> "$home/garbage.err"; then
+    fail "an unknown resolution mode authorized terminal readiness"
+  fi
+
+  cp "$pristine" "$home/data/backlog.md"
+  sed -i.bak '/Resolution mode: answered/d' "$home/data/backlog.md"
+  rm -f "$home/data/backlog.md.bak"
+  if run_captain "$home" terminal-ready "$id" "$call" \
+    > "$home/missing.out" 2> "$home/missing.err"; then
+    fail "a missing resolution mode authorized terminal readiness"
+  fi
+  cp "$pristine" "$home/data/backlog.md"
+  run_captain "$home" terminal-ready "$id" "$call" >/dev/null \
+    || fail "restoring the supported answered mode did not restore readiness"
+  pass "terminal readiness accepts only supported captain resolution modes"
+}
+
+# A post-teardown visual review still uses the shared hold owner, while the
+# completed receipt keeps its authenticated captain inventory immutable.
 test_visual_review_uses_shared_completion_owner() {
-  local home id json
+  local home id json receipt before out
   home=$(make_home visual-review)
   id=sample-board-review
   mkdir -p "$home/data/$id"
@@ -503,21 +1249,30 @@ test_visual_review_uses_shared_completion_owner() {
   run_teardown "$home" "$id" >/dev/null 2> "$home/visual-teardown.err" \
     || fail "completed investigation teardown failed: $(cat "$home/visual-teardown.err")"
   tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null
+  receipt=$(jq -r --arg id "$id" \
+    'select(.id==$id and ((.superseded_by // "") == "")) | .key' \
+    "$home/state/terminal-delivery/"*.json)
+  before=$(jq -cS . "$home/state/terminal-delivery/$receipt.json")
 
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
   run_captain "$home" hold sample-layout-call --title "Choose the sample layout" \
     --reason "captain layout choice pending" --repo sample --origin "$id" >/dev/null \
     || fail "post-teardown visual review could not use the shared hold owner"
-  run_captain "$home" complete "$id" sample-layout-call >/dev/null \
-    || fail "post-teardown visual review could not use the shared completion owner"
+  if out=$(run_captain "$home" complete "$id" --receipt "$receipt" sample-layout-call 2>&1); then
+    fail "post-teardown visual review changed a completed receipt's captain inventory"
+  fi
+  assert_contains "$out" 'keep its captain inventory unchanged' \
+    "post-teardown visual review did not name the immutable receipt boundary"
+  [ "$before" = "$(jq -cS . "$home/state/terminal-delivery/$receipt.json")" ] \
+    || fail "rejected post-teardown review mutated the completed receipt"
   json=$(run_bearings "$home") || fail "Bearings failed after the ended visual review"
   printf '%s' "$json" | jq -e '
     .decisions_open | any(.id == "sample-layout-call" and .verb == "captain-hold")
   ' >/dev/null || fail "ended visual review did not leave its durable Captain Call: $json"
   [ ! -e "$home/data/visual-review-decisions.json" ] \
     || fail "visual review created a second decision database"
-  pass "ended visual review follows the same captain-hold completion owner"
+  pass "ended visual review uses the shared hold owner without reopening completed receipt inventory"
 }
 
 test_none_inventory_and_resolved_prose_do_not_create_holds() {
@@ -544,35 +1299,55 @@ EOF
   pass "resolved findings and decision-like prose do not create captain-held tasks"
 }
 
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
-  local home id open secondmate
-  home=$(make_home stale-terminal-decision)
-  id=sample-terminal-review
+test_terminal_status_requires_explicit_resolution_or_transfer() {
+  local home id before after resolved
+  home=$(make_home terminal-decision-attestation)
+  id=sample-terminal-transfer-review
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$home" "$id"
+  run_captain "$home" hold sample-prior-call --title "Choose the prior route" \
+    --reason "prior captain route pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" sample-prior-call >/dev/null \
+    || fail "could not establish the prior reviewed inventory"
   printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
     > "$home/state/$id.status"
-  printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
-  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  assert_contains "$open" "default" "fixture must retain the raw stale status decision"
-  run_captain "$home" complete "$id" --none >/dev/null \
-    || fail "terminal single-owner stale status decision blocked empty inventory completion"
-  run_captain "$home" verify "$id" >/dev/null \
-    || fail "terminal single-owner stale status decision blocked inventory verification"
-  run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
-    || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
-
-  secondmate=sample-secondmate
-  write_origin_meta "$home" "$secondmate" secondmate
-  printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
-    > "$home/state/$secondmate.status"
-  if run_captain "$home" complete "$secondmate" --none \
-    > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
-    fail "secondmate terminal status decision was incorrectly cleared"
+  before=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  if run_captain "$home" complete "$id" --none \
+    > "$home/done-none.out" 2> "$home/done-none.err"; then
+    fail "a terminal done line authorized an incomplete historical inventory"
   fi
-  pass "terminal single-owner stale status decisions do not block empty inventory"
+  after=$(shasum -a 256 "$home/state/$id.meta" | awk '{print $1}')
+  [ "$before" = "$after" ] || fail "refused terminal attestation mutated the prior inventory"
+  if run_captain "$home" verify "$id" > "$home/done-verify.out" 2> "$home/done-verify.err"; then
+    fail "verification ignored the raw unresolved decision after done"
+  fi
+  run_captain "$home" hold sample-current-call --title "Choose the current route" \
+    --reason "current captain route pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" complete "$id" sample-current-call >/dev/null \
+    || fail "terminal done decision could not transfer to current reviewed inventory"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "transferred terminal done decision did not verify"
+  assert_grep 'decision_keys=sample-current-call,sample-prior-call' "$home/state/$id.meta" \
+    "current terminal transfer replaced the prior inventory"
+
+  resolved=sample-terminal-resolved-review
+  mkdir -p "$home/data/$resolved"
+  tasks_in "$home" add "$resolved" "Review a resolved terminal finding" \
+    --kind scout --repo sample --start >/dev/null
+  write_origin_meta "$home" "$resolved"
+  printf 'needs-decision [key=route]: choose route A or route B\nfailed: review stopped\n' \
+    > "$home/state/$resolved.status"
+  if run_captain "$home" complete "$resolved" --none \
+    > "$home/failed-none.out" 2> "$home/failed-none.err"; then
+    fail "a terminal failed line authorized an unresolved empty inventory"
+  fi
+  printf 'resolved [key=route]: captain chose route A\n' >> "$home/state/$resolved.status"
+  run_captain "$home" complete "$resolved" --none >/dev/null \
+    || fail "an explicit keyed resolution did not authorize empty inventory"
+  run_captain "$home" verify "$resolved" >/dev/null \
+    || fail "explicitly resolved terminal failed decision did not verify"
+  pass "terminal status cannot fabricate an empty or incomplete captain attestation"
 }
 
 test_secondmate_hold_stays_in_authoritative_home() {
@@ -799,9 +1574,9 @@ EOF
   pass "a channel source with no decision binding closes nothing"
 }
 
-# Everything a pre-collapse install already has keeps working: composed
-# identities through the shim, short decision keys in recorded metadata, a
-# concrete-origin binding, and the chat fallback for old rows.
+# Everything a pre-collapse install already has keeps working when authentic
+# cycle identity can be recorded: composed identities through the shim, fresh
+# short decision-key intake, a concrete-origin binding, and the chat fallback.
 test_legacy_identities_keep_working() {
   local home id hold out show legacy_text legacy_digest old_hold
   home=$(make_home legacy-compat)
@@ -824,11 +1599,22 @@ test_legacy_identities_keep_working() {
   show=$(tasks_in "$home" show "$hold" --full)
   assert_contains "$show" "hold_kind: captain" "the shim-created row is not a plain captain-held task"
 
-  # A pre-collapse metadata attestation records SHORT keys; verify must resolve
-  # them through the legacy composed identity.
+  # A non-empty pre-collapse attestation without cycle identity cannot be
+  # rebound through mutable current task state. Fresh short-key intake resolves
+  # the legacy identity once and persists the authenticated cycle.
   printf 'decisions_reviewed=1\ndecision_keys=keep-two,pick-one\n' >> "$home/state/$id.meta"
+  if run_captain "$home" verify "$id" > "$home/legacy-verify.out" 2> "$home/legacy-verify.err"; then
+    fail "legacy short-key metadata without hold-cycle identity verified"
+  fi
+  awk '!/^decisions_reviewed=/ && !/^decision_keys=/' "$home/state/$id.meta" \
+    > "$home/state/$id.meta.tmp"
+  mv "$home/state/$id.meta.tmp" "$home/state/$id.meta"
+  run_captain "$home" complete "$id" keep-two pick-one >/dev/null \
+    || fail "fresh legacy short-key intake did not persist composed identities"
+  assert_grep 'decision_call_cycles=' "$home/state/$id.meta" \
+    "fresh legacy short-key intake omitted authenticated cycles"
   run_captain "$home" verify "$id" >/dev/null \
-    || fail "legacy short-key metadata did not verify against composed identities"
+    || fail "authenticated legacy short-key inventory did not verify"
 
   # The shim's routed close records the routed work inside the captain decision
   # and clears the recorded edge.
@@ -913,11 +1699,24 @@ test_legacy_identities_keep_working() {
     "$legacy_digest" "$legacy_text" > "$home/legacy-body.txt"
   tasks_in "$home" update "$id-decision-fourth-choice" --body-file "$home/legacy-body.txt" --archive-body >/dev/null
   tasks_in "$home" "done" "$id-decision-fourth-choice" >/dev/null
+  if run_captain "$home" terminal-ready "$id" fourth-choice \
+    > "$home/legacy-ready.out" 2> "$home/legacy-ready.err"; then
+    fail "a cycle-less legacy resolution authorized a terminal transition"
+  fi
   out=$(printf 'fourth-choice\toption c\t\n' \
     | run_captain "$home" answers "$id" --source "legacy replay") \
-    || fail "an identical pre-collapse keyed answer was not idempotent"
+    || fail "a real captain answer did not recover the pre-collapse record"
   assert_contains "$out" "closed: $id-decision-fourth-choice" \
-    "the pre-collapse keyed answer digest was treated as drift"
+    "the pre-collapse keyed answer was not recorded under a current cycle"
+  show=$(tasks_in "$home" show "$id-decision-fourth-choice" --full)
+  assert_contains "$show" 'Resolution recorded by fm-captain-hold.' \
+    "legacy recovery did not add the current owner's resolution"
+  assert_contains "$show" 'Resolution mode: repaired' \
+    "legacy recovery did not identify its out-of-band close"
+  assert_contains "$show" 'Resolution recorded by fm-decision-hold.' \
+    "legacy recovery discarded the historical resolution"
+  run_captain "$home" terminal-ready "$id" fourth-choice >/dev/null \
+    || fail "the cycle-aware legacy recovery did not authorize terminal readiness"
   out=$(printf '%s-decision-fourth-choice\toption c\t\n' "$id" \
     | run_captain "$home" answers --source "legacy replay") \
     || fail "a full legacy task-id replay without an origin was not idempotent"
@@ -1168,18 +1967,71 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+case "${FM_CAPTAIN_HOLD_FOCUSED_TEST:-}" in
+  release-boundaries)
+    test_answer_identity_is_hold_cycle_scoped
+    test_release_uses_existing_terminal_evidence_only
+    test_answer_markers_cannot_replace_hold_cycle
+    exit 0
+    ;;
+  rehold-interruption)
+    test_rehold_cycle_is_interruption_safe
+    exit 0
+    ;;
+  terminal-status-attestation)
+    test_terminal_status_requires_explicit_resolution_or_transfer
+    exit 0
+    ;;
+  resolution-mode-validation)
+    test_terminal_resolution_mode_is_whitelisted
+    test_out_of_band_close_is_recordable
+    test_release_uses_existing_terminal_evidence_only
+    exit 0
+    ;;
+  review-recovery)
+    test_rehold_cycle_is_interruption_safe
+    test_visual_review_uses_shared_completion_owner
+    exit 0
+    ;;
+  teardown-cycle-identity)
+    test_teardown_verifies_persisted_call_cycles
+    test_legacy_identities_keep_working
+    exit 0
+    ;;
+  active-rehold-cycle-evidence)
+    test_active_rehold_preserves_prior_cycle_evidence
+    run_reused_cycle_teardown_refusal tasks
+    exit 0
+    ;;
+  resolution-authentication)
+    test_resolution_evidence_is_authenticated_before_lifecycle_progress
+    test_active_rehold_preserves_prior_cycle_evidence
+    exit 0
+    ;;
+  '') ;;
+  *) fail "unknown focused captain-hold test: $FM_CAPTAIN_HOLD_FOCUSED_TEST" ;;
+esac
+
 test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_answer_identity_is_hold_cycle_scoped
+test_release_uses_existing_terminal_evidence_only
+test_answer_markers_cannot_replace_hold_cycle
+test_rehold_cycle_is_interruption_safe
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
+test_terminal_resolution_mode_is_whitelisted
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_terminal_status_requires_explicit_resolution_or_transfer
 test_secondmate_hold_stays_in_authoritative_home
 test_bound_channel_answers_close_at_answer_time
 test_unbound_source_closes_no_hold
+test_teardown_verifies_persisted_call_cycles
+test_active_rehold_preserves_prior_cycle_evidence
+test_resolution_evidence_is_authenticated_before_lifecycle_progress
 test_legacy_identities_keep_working
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction

@@ -60,9 +60,24 @@ if [ -n "${FM_TIMING_LOG:-}" ]; then
 fi
 [ -z "${FM_FAKE_BOOTSTRAP_SLEEP:-}" ] || sleep "$FM_FAKE_BOOTSTRAP_SLEEP"
 [ -z "${FM_FAKE_BOOTSTRAP_OUT:-}" ] || printf '%s\n' "$FM_FAKE_BOOTSTRAP_OUT"
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" = 1 ] && [ -n "${FM_FAKE_BOOTSTRAP_BARRIER:-}" ]; then
+  mkdir -p "$FM_FAKE_BOOTSTRAP_BARRIER"
+  : > "$FM_FAKE_BOOTSTRAP_BARRIER/entered"
+  while [ ! -e "$FM_FAKE_BOOTSTRAP_BARRIER/release" ]; do
+    sleep 0.05
+  done
+fi
 exit "${FM_FAKE_BOOTSTRAP_RC:-0}"
 SH
   chmod +x "$root/bin/fm-bootstrap.sh"
+  rm -f "$root/bin/fm-herdr-session-cleanup.sh"
+  cat > "$root/bin/fm-herdr-session-cleanup.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf 'cleanup lock_pid=%s\n' "${FM_BOOTSTRAP_NETWORK_LOCK_PID:-}" \
+  >> "${FM_FAKE_BOOTSTRAP_LOG:?}"
+SH
+  chmod +x "$root/bin/fm-herdr-session-cleanup.sh"
   cat > "$root/bin/ps" <<'SH'
 #!/usr/bin/env bash
 pid=
@@ -95,6 +110,15 @@ await_worker_record() {  # <home>
     waited=$((waited + 1))
   done
   [ -s "$home/state/.startup-network.status" ] || fail "the detached worker never recorded itself"
+}
+
+await_path() {  # <path>
+  local path=$1 waited=0
+  while [ ! -e "$path" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$path" ] || fail "timed out waiting for $path"
 }
 
 test_wait_fails_without_a_published_stage() {
@@ -456,6 +480,145 @@ EOF
   pass "fm-startup-network: a second start never launches a competing worker"
 }
 
+test_stronger_request_is_handed_to_the_probe_worker_exactly_once() {
+  local rec home root log barrier generation worker_pid final_generation final_pid
+  local probe_runs sweep_runs cleanup_runs probe_line sweep_line
+  rec=$(new_world stronger-handoff)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  barrier="$TMP_ROOT/stronger-handoff/barrier"
+  mkdir -p "$barrier"
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_BARRIER="$barrier" \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+  await_path "$barrier/entered"
+  generation=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  worker_pid=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+
+  printf 'version=1\ngeneration=' > "$home/state/.startup-network.request"
+  run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+
+  [ "$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")" = "$generation" ] \
+    || fail "a stronger or repeated request replaced the live probe generation"
+  [ "$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")" = "$worker_pid" ] \
+    || fail "a stronger or repeated request launched a competing worker"
+  probe_runs=$(grep -c 'network=only detect_only=1' "$log" || true)
+  sweep_runs=$(grep -c 'network=only detect_only=0' "$log" || true)
+  cleanup_runs=$(grep -c '^cleanup ' "$log" || true)
+  [ "$probe_runs" -eq 1 ] && [ "$sweep_runs" -eq 0 ] && [ "$cleanup_runs" -eq 0 ] \
+    || fail "the queued request silently upgraded the live probe: $(cat "$log")"
+
+  : > "$barrier/release"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the stronger handoff never published"
+
+  final_generation=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  final_pid=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+  [ "$final_generation" = "$generation" ] && [ "$final_pid" = "$worker_pid" ] \
+    || fail "the stronger handoff changed worker ownership"
+  probe_runs=$(grep -c 'network=only detect_only=1' "$log" || true)
+  sweep_runs=$(grep -c 'network=only detect_only=0' "$log" || true)
+  cleanup_runs=$(grep -c '^cleanup ' "$log" || true)
+  [ "$probe_runs" -eq 1 ] && [ "$sweep_runs" -eq 1 ] && [ "$cleanup_runs" -eq 1 ] \
+    || fail "stronger work did not execute exactly once: $(cat "$log")"
+  probe_line=$(grep -n 'network=only detect_only=1' "$log" | cut -d: -f1)
+  sweep_line=$(grep -n 'network=only detect_only=0' "$log" | cut -d: -f1)
+  [ "$probe_line" -lt "$sweep_line" ] || fail "the stronger phase ran before the probe completed"
+  assert_grep "cleanup lock_pid=$$" "$log" \
+    "the stronger phase did not retain the requesting lock owner"
+  assert_grep 'locked=1' "$home/state/.startup-network.status" \
+    "the published status omitted the stronger phase coverage"
+  assert_grep 'phases=probe,sweeps' "$home/state/.startup-network.status" \
+    "the published status did not describe both completed phases"
+  assert_absent "$home/state/.startup-network.request" \
+    "the worker left its claimed stronger request pending"
+  pass "fm-startup-network: stronger same-owner requests hand off once after the live probe"
+}
+
+test_reused_pid_cannot_receive_a_stronger_handoff() {
+  local rec home root log generation sweep_runs cleanup_runs unrelated_pid
+  rec=$(new_world reused-worker-pid)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  sleep 45 &
+  unrelated_pid=$!
+  cat > "$home/state/.startup-network.status" <<EOF
+state=running
+pid=$unrelated_pid
+identity=retired-worker-generation
+started=$(date +%s)
+locked=0
+phases=probe
+generation=retired-probe-generation
+lock_pid=$$
+EOF
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" wait 30 >/dev/null \
+    || fail "the replacement locked worker never published: $(cat "$home/state/.startup-network.status")"
+
+  kill -0 "$unrelated_pid" 2>/dev/null || fail "startup handoff killed the unrelated reused PID"
+  kill "$unrelated_pid" 2>/dev/null || true
+  wait "$unrelated_pid" 2>/dev/null || true
+  generation=$(sed -n 's/^generation=//p' "$home/state/.startup-network.status")
+  [ "$generation" != retired-probe-generation ] \
+    || fail "the locked start handed mandatory sweeps to a reused PID"
+  sweep_runs=$(grep -c 'network=only detect_only=0' "$log" || true)
+  cleanup_runs=$(grep -c '^cleanup ' "$log" || true)
+  [ "$sweep_runs" -eq 1 ] && [ "$cleanup_runs" -eq 1 ] \
+    || fail "the replacement worker did not run mandatory locked work exactly once: $(cat "$log")"
+  assert_absent "$home/state/.startup-network.request" \
+    "the reused PID stranded a stronger startup request"
+  assert_grep 'phases=probe,sweeps' "$home/state/.startup-network.status" \
+    "the replacement worker omitted mandatory phase coverage"
+  pass "fm-startup-network: reused PIDs cannot inherit stronger startup handoffs"
+}
+
+test_truncated_stronger_request_fails_closed_and_retries() {
+  local rec home root log barrier report sweep_runs cleanup_runs
+  rec=$(new_world truncated-handoff)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  barrier="$TMP_ROOT/truncated-handoff/barrier"
+  mkdir -p "$barrier"
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_BARRIER="$barrier" \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+  await_path "$barrier/entered"
+  printf 'version=1\ngeneration=' > "$home/state/.startup-network.request"
+  : > "$barrier/release"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the truncated handoff did not settle"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = failed ] \
+    || fail "a truncated stronger request was silently treated as success"
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "queued stronger startup request was unreadable" \
+    "a truncated stronger request had no actionable recovery result"
+  sweep_runs=$(grep -c 'network=only detect_only=0' "$log" || true)
+  cleanup_runs=$(grep -c '^cleanup ' "$log" || true)
+  [ "$sweep_runs" -eq 0 ] && [ "$cleanup_runs" -eq 0 ] \
+    || fail "a truncated request authorized mutating work: $(cat "$log")"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the retry after a truncated handoff never published"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
+    || fail "the retry after a truncated handoff did not recover"
+  sweep_runs=$(grep -c 'network=only detect_only=0' "$log" || true)
+  cleanup_runs=$(grep -c '^cleanup ' "$log" || true)
+  [ "$sweep_runs" -eq 1 ] && [ "$cleanup_runs" -eq 1 ] \
+    || fail "the recovered stronger request did not execute exactly once: $(cat "$log")"
+  assert_absent "$home/state/.startup-network.request" \
+    "the recovered run retained the truncated request"
+  pass "fm-startup-network: a truncated stronger handoff fails closed and is retryable"
+}
+
 test_start_reserves_its_generation_before_returning() {
   local rec home root log report
   rec=$(new_world generation-reservation)
@@ -691,6 +854,16 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
   pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
 }
 
+case "${FM_STARTUP_NETWORK_FOCUSED_TEST:-}" in
+  worker-identity-handoff)
+    test_stronger_request_is_handed_to_the_probe_worker_exactly_once
+    test_reused_pid_cannot_receive_a_stronger_handoff
+    exit 0
+    ;;
+  '') ;;
+  *) fail "unknown focused startup-network test: $FM_STARTUP_NETWORK_FOCUSED_TEST" ;;
+esac
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
@@ -702,6 +875,9 @@ test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
 test_start_is_single_flight
+test_stronger_request_is_handed_to_the_probe_worker_exactly_once
+test_reused_pid_cannot_receive_a_stronger_handoff
+test_truncated_stronger_request_fails_closed_and_retries
 test_start_reserves_its_generation_before_returning
 test_new_lock_owner_does_not_reuse_the_previous_owners_worker
 test_lock_takeover_stays_read_only_while_a_sweep_holds_the_lease

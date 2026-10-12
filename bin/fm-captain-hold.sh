@@ -26,8 +26,12 @@
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
-#   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
+#   fm-captain-hold.sh complete <origin-id> [--receipt <receipt-key>] (--none | <task-id>...)
+#   fm-captain-hold.sh normalize-inventory <origin-id> [<task-id>...]
+#   fm-captain-hold.sh normalize-inventory-cycles <origin-id> [<task-id>...]
+#   fm-captain-hold.sh origin-obligation <origin-id>
 #   fm-captain-hold.sh verify <origin-id>
+#   fm-captain-hold.sh terminal-ready <origin-id> [--receipt <receipt-key>] [--origin-cycle <cycle|none>] [--origin-resolved] [<captain-task-id>...]
 #   fm-captain-hold.sh diverged
 #
 # `hold` places an existing task under an active captain hold, or creates the
@@ -40,13 +44,15 @@
 # a "revisit later" answer is stored as a date instead of a live card.
 #
 # `answer` records the captain's exact words and closes the call in the same
-# act. It requires a non-empty captain decision file of at most 8192 bytes,
-# writes a resolution block at the top of the task body (the previous body is
-# preserved below the block and archived through tasks-axi --archive-body),
-# then closes the task with `tasks-axi done` - or, with `--release`, lifts the
-# hold with `tasks-axi unhold` so a captain-gated WORK item resumes instead of
-# closing. An exact retry is idempotent only when its requested close mode
-# matches the newest record; a changed decision or a mode mismatch is rejected.
+# act. Each hold carries a durable cycle identity, and every resolution records
+# that identity. It requires a non-empty captain decision file of at most 8192
+# bytes, writes a resolution block at the top of the task body (the previous
+# body is preserved below the block and archived through tasks-axi
+# --archive-body), then closes the task with `tasks-axi done` - or, with
+# `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated WORK
+# item resumes instead of closing. An exact retry is idempotent only within the
+# same hold cycle and compatible terminal receipt; a later cycle records a new
+# answer even when the captain repeats the same words.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
 # when the task still carries the captain-hold provenance tasks-axi preserves
@@ -64,11 +70,13 @@
 # task id - no identity arithmetic. The optional fourth field selects the close:
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A key that names no task, a task that is
-# not held for the captain, or a task already closed is reported as `skipped:`
-# and feeds nothing. A replayed delivery whose answer digest and requested
-# close mode both match the newest record is reported `closed:` and is a no-op;
-# a mode mismatch is skipped. The command exits nonzero when any key was
-# skipped. `--source` is provenance text recorded in the
+# not held for the captain, or an ordinary task already closed is reported as
+# `skipped:` and feeds nothing. A closed task with surviving captain-hold
+# provenance may record the supplied answer through the same repair path as
+# direct `answer`. A replayed delivery whose current-cycle answer digest and
+# requested close mode both match the newest record is reported `closed:` and
+# is a no-op; a mode mismatch is skipped. The command exits nonzero when any
+# key was skipped. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
@@ -104,25 +112,27 @@
 # the inventory is unioned idempotently into the metadata, and every still-open
 # keyed status decision is transferred to its durable owner with a
 # `captain-held [key=...]` status close naming the inventory. Later review
-# passes may add ids. A post-teardown visual review can complete against the
-# surviving report and tasks without recreating task state.
-# `verify` is read-only and is called by scout teardown, so teardown cannot
-# erase a source before this gate has succeeded: every recorded inventory
-# entry must still be durable and no keyed status decision may be open.
+# passes may add ids. After metadata retirement, `--receipt` binds recovery to
+# the exact authenticated terminal incarnation and persists the reviewed
+# inventory there without recreating task state or advancing delivery.
+# `verify` is read-only and is called by every non-forced ship and scout
+# teardown, so teardown cannot erase a source before this gate has succeeded:
+# every recorded inventory entry must still be durable and no keyed status
+# decision may be open.
 # Metadata compatibility: the attestation keeps the historical
-# `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
-# names no existing task resolves through the legacy `<origin>-decision-<entry>`
-# identity, so pre-collapse metadata written by fm-decision-hold.sh verifies
-# unchanged. An entry that exists as a task id is always that task.
+# `decisions_reviewed=1` and `decision_keys=` keys and binds every non-empty
+# inventory entry to its authenticated hold cycle in `decision_call_cycles=`.
+# Legacy short entries resolve through `<origin>-decision-<entry>` only during
+# fresh intake; persisted non-empty inventory without cycle identity fails closed.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, or repaired.
-# Records written by the retired fm-decision-hold.sh (routed, declined,
-# answered, repaired) are recognized everywhere a record is read, so nothing
-# already closed needs rewriting.
+# decision digest, hold cycle, and a `Resolution mode:` of answered, released,
+# or repaired. A legacy record without a provable hold cycle never authorizes a
+# terminal transition; replaying the captain's actual answer records a current
+# repair without fabricating a closure.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -130,6 +140,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -225,7 +236,298 @@ require_tasks_axi() {
 }
 
 task_show() {  # <id>
-  tasks_axi show "$1" --full 2>/dev/null
+  manual_task_show "$1"
+}
+
+archived_task_show() {  # <id>
+  local archive="$DATA/done-archive.md"
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 3
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    use open qw(:encoding(UTF-8));
+    my ($wanted, $path) = @ARGV;
+    open my $fh, "<", $path or exit 3;
+    my (@matches, $current_id, $tail, @body);
+    my $finish = sub {
+      return unless defined $current_id;
+      if ($current_id eq $wanted) {
+        pop @body while @body && $body[-1] eq "";
+        push @matches, [$tail, join("\n", @body)];
+      }
+      undef $current_id;
+      $tail = "";
+      @body = ();
+    };
+    while (my $line = <$fh>) {
+      $line =~ s/\r?\n\z//;
+      if ($line =~ /^- \[x\] ([A-Za-z0-9][A-Za-z0-9._-]*) - (.*)\z/) {
+        $finish->();
+        ($current_id, $tail) = ($1, $2);
+      } elsif ($line =~ /^## Archived /) {
+        $finish->();
+      } elsif (defined $current_id) {
+        if ($line =~ /^  (.*)\z/) {
+          push @body, $1;
+        } elsif ($line eq "") {
+          push @body, "";
+        }
+      }
+    }
+    $finish->();
+    exit 3 unless @matches;
+    exit 1 unless @matches == 1;
+    my ($matched_tail, $matched_body) = @{$matches[0]};
+    my @hold_kinds = ($matched_tail =~ /(?:^|\s)\(hold-kind:\s*([^)]+)\)/g);
+    exit 1 if @hold_kinds > 1;
+    exit 1 if @hold_kinds == 1 && $hold_kinds[0] ne "captain";
+    print "  id: $wanted\n";
+    print "  title: -\n";
+    print "  state: done\n";
+    print "  hold_kind: ", (@hold_kinds ? "captain" : "-"), "\n";
+    print "  body: ", JSON::PP->new->encode($matched_body), "\n";
+  ' "$1" "$archive"
+}
+
+archived_task_show_cycle() {  # <id> <hold-cycle>
+  local archive="$DATA/done-archive.md"
+  [ -f "$archive" ] && [ ! -L "$archive" ] || return 3
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    use open qw(:encoding(UTF-8));
+    my ($wanted, $cycle, $path) = @ARGV;
+    open my $fh, "<", $path or exit 3;
+    my (@matches, $current_id, $tail, @body);
+    my $finish = sub {
+      return unless defined $current_id;
+      if ($current_id eq $wanted) {
+        pop @body while @body && $body[-1] eq "";
+        my $body = join("\n", @body);
+        my ($found);
+        if ($body =~ /^Captain hold opened by fm-captain-hold\.\nHold cycle: ([0-9a-f]{64})\nCaptain hold marker end\./) {
+          $found = $1;
+        } elsif ($body =~ /^Resolution recorded by fm-(?:captain|decision)-hold\.\n(?:(?!\nCaptain decision:\n)[\s\S])*?^Hold cycle: ([0-9a-f]{64})$/m) {
+          $found = $1;
+        }
+        push @matches, [$tail, $body] if defined $found && $found eq $cycle;
+      }
+      undef $current_id;
+      $tail = "";
+      @body = ();
+    };
+    while (my $line = <$fh>) {
+      $line =~ s/\r?\n\z//;
+      if ($line =~ /^- \[x\] ([A-Za-z0-9][A-Za-z0-9._-]*) - (.*)\z/) {
+        $finish->();
+        ($current_id, $tail) = ($1, $2);
+      } elsif ($line =~ /^## Archived /) {
+        $finish->();
+      } elsif (defined $current_id) {
+        if ($line =~ /^  (.*)\z/) {
+          push @body, $1;
+        } elsif ($line eq "") {
+          push @body, "";
+        }
+      }
+    }
+    $finish->();
+    exit 3 unless @matches;
+    exit 1 unless @matches == 1;
+    my ($matched_tail, $matched_body) = @{$matches[0]};
+    my @hold_kinds = ($matched_tail =~ /(?:^|\s)\(hold-kind:\s*([^)]+)\)/g);
+    exit 1 if @hold_kinds > 1;
+    exit 1 if @hold_kinds == 1 && $hold_kinds[0] ne "captain";
+    print "  id: $wanted\n";
+    print "  title: -\n";
+    print "  state: done\n";
+    print "  hold_kind: ", (@hold_kinds ? "captain" : "-"), "\n";
+    print "  body: ", JSON::PP->new->encode($matched_body), "\n";
+  ' "$1" "$2" "$archive"
+}
+
+task_evidence_show() {  # <id>
+  local id=$1 show rc
+  if show=$(task_show "$id"); then
+    printf '%s\n' "$show"
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 3 ] || return 1
+  if show=$(archived_task_show "$id"); then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    return 1
+  fi
+  if task_show "$id" >/dev/null 2>&1; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 3 ] || return 1
+  printf '%s\n' "$show"
+}
+
+authenticated_resolution_body_for_cycle() {  # <shown-body> <hold-cycle>
+  local decoded
+  decoded=$(decode_shown_value "$1") || return 1
+  printf '%s' "$decoded" | perl -MDigest::SHA=sha256_hex -MEncode=decode,encode,FB_CROAK -MJSON::PP -e '
+    use strict;
+    use warnings;
+    my ($wanted) = @ARGV;
+    local $/;
+    my $rest = decode("UTF-8", <STDIN> // "", FB_CROAK);
+    my @matches;
+    while (length $rest) {
+      if ($rest =~ /\ACaptain hold opened by fm-captain-hold\.\nHold cycle: [0-9a-f]{64}\nCaptain hold marker end\./) {
+        my $end = $+[0];
+        last if $end == length $rest;
+        my ($separator) = substr($rest, $end) =~ /\A(\n+)/;
+        exit 1 unless defined $separator;
+        $rest = substr($rest, $end + length($separator));
+        next;
+      }
+      if ($rest =~ /\AResolution recorded by fm-(?:captain|decision)-hold\.\nDecision digest: ([0-9a-f]{64})\nResolution mode: ([^\n]+)\nHold cycle: ([0-9a-f]{64})\n(?:Terminal receipt: ([^\n]+)\n)?(?:Terminal incarnation: ([^\n]+)\n)?\n?Captain decision:\n/) {
+        my ($digest, $mode, $cycle, $receipt, $incarnation) = ($1, $2, $3, $4, $5);
+        if ($mode eq "released") {
+          exit 1 unless defined $receipt && ($receipt eq "none" || $receipt =~ /\A[0-9a-f]{64}\z/);
+          exit 1 if defined $incarnation && ($receipt ne "none" || $incarnation !~ /\A[0-9a-f]{64}\z/);
+        } elsif ($mode eq "answered" || $mode eq "repaired") {
+          exit 1 if defined $receipt || defined $incarnation;
+        } else {
+          exit 1;
+        }
+        my $answer_start = $+[0];
+        my @ends;
+        push @ends, [length($rest), length($rest)]
+          if length($rest) > $answer_start
+          && sha256_hex(encode("UTF-8", substr($rest, $answer_start))) eq $digest;
+        pos($rest) = $answer_start;
+        while ($rest =~ /\n+/g) {
+          my $end = $-[0];
+          next if $end <= $answer_start;
+          push @ends, [$end, $+[0]]
+            if sha256_hex(encode("UTF-8", substr($rest, $answer_start, $end - $answer_start))) eq $digest;
+        }
+        exit 1 unless @ends == 1;
+        my ($end, $next) = @{$ends[0]};
+        push @matches, substr($rest, 0, $end) if $cycle eq $wanted;
+        last if $next == length $rest;
+        $rest = substr($rest, $next);
+        next;
+      }
+      if ($rest =~ /\AResolution recorded by fm-decision-hold\.\nDecision digest: ([0-9a-f]{64})\nRouted identities: (none|[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*)\nResolution mode: (answered|routed)\n\nCaptain decision:\n/) {
+        my ($digest, $routes, $mode) = ($1, $2, $3);
+        my $answer_start = $+[0];
+        my @matches;
+        if ($mode eq "answered") {
+          exit 1 unless $routes eq "none";
+          my $answer = substr($rest, $answer_start);
+          push @matches, 1 if length($answer) && sha256_hex(encode("UTF-8", $answer)) eq $digest;
+          exit 1 unless @matches == 1;
+          $rest = "";
+          next;
+        }
+        exit 1 if $routes eq "none";
+        pos($rest) = $answer_start;
+        while ($rest =~ /\n\nRouted work:\n/g) {
+          my ($answer_end, $routes_start) = ($-[0], $+[0]);
+          next unless sha256_hex(encode("UTF-8", substr($rest, $answer_start, $answer_end - $answer_start))) eq $digest;
+          my $route_body = substr($rest, $routes_start);
+          my @body_routes = ($route_body =~ /^- ([A-Za-z0-9._-]+)$/mg);
+          next unless @body_routes && join("\n", map { "- $_" } @body_routes) eq $route_body;
+          my @recorded_routes = split /,/, $routes;
+          next unless join(",", sort @recorded_routes) eq join(",", @recorded_routes);
+          next unless join(",", @body_routes) eq $routes;
+          push @matches, 1;
+        }
+        exit 1 unless @matches == 1;
+        $rest = "";
+        next;
+      }
+      exit 1 if $rest =~ /\A(?:Captain hold opened by fm-captain-hold\.|Resolution recorded by fm-(?:captain|decision)-hold\.)/;
+      last;
+    }
+    exit 3 unless @matches;
+    exit 1 unless @matches == 1;
+    print JSON::PP->new->utf8->encode($matches[0]);
+  ' "$2"
+}
+
+active_task_show_cycle() {  # <show-output> <id> <hold-cycle>
+  local show=$1 id=$2 cycle=$3 body historical rc
+  body=$(show_field "$show" body)
+  if [ "$(current_hold_cycle "$body" || true)" = "$cycle" ]; then
+    printf '%s\n' "$show"
+    return 0
+  fi
+  if historical=$(authenticated_resolution_body_for_cycle "$body" "$cycle"); then
+    printf '  id: %s\n  title: %s\n  state: %s\n  hold_kind: -\n  body: %s\n' \
+      "$id" "$(show_field "$show" title)" "$(show_field "$show" state)" "$historical"
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 3 ] && return 3
+  return 1
+}
+
+task_cycle_evidence_show() {  # <id> <hold-cycle>
+  local id=$1 cycle=$2 active='' archived='' active_match=0 archived_match=0 rc
+  if active=$(task_show "$id"); then
+    if active=$(active_task_show_cycle "$active" "$id" "$cycle"); then
+      active_match=1
+    else
+      rc=$?
+      [ "$rc" -eq 3 ] || return 1
+    fi
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || return 1
+  fi
+  if archived=$(archived_task_show_cycle "$id" "$cycle"); then
+    archived_match=1
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || return 1
+  fi
+  [ $((active_match + archived_match)) -eq 1 ] || return 1
+  if [ "$active_match" -eq 1 ]; then
+    printf '%s\n' "$active"
+  else
+    printf '%s\n' "$archived"
+  fi
+}
+
+manual_task_show() {  # <id>
+  local snapshot
+  snapshot=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-fleet-snapshot.sh" --backlog-json 2>/dev/null) \
+    || return 1
+  printf '%s\n' "$snapshot" | jq -er --arg id "$1" '
+    [.records[] | select(.structured == true and .id == $id)]
+    | if length == 0 then halt_error(3)
+      elif length != 1 then halt_error(1)
+      else .[0]
+      | "  id: \(.id)\n  title: \(.title // "-")\n  state: \(.state)\n  hold_kind: \(.hold_kind // "-")\n  body: \((.body_lines | join("\n")) | @json)"
+      end
+  '
+}
+
+require_task_reader() {
+  if fm_tasks_axi_compatible; then
+    require_tasks_axi
+  else
+    fm_backlog_backend_manual "$CONFIG" \
+      || fail "compatible tasks-axi is required"
+  fi
+  command -v jq >/dev/null 2>&1 \
+    || fail "jq is required to verify the backlog"
+  [ -f "$DATA/backlog.md" ] && [ ! -L "$DATA/backlog.md" ] \
+    || fail "backlog is absent or unsafe: $DATA/backlog.md"
 }
 
 show_field() {  # <show-output> <field>
@@ -260,7 +562,7 @@ show_field_value() {  # <show-output> <field>
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
-  task_show "$1" >/dev/null 2>&1
+  task_evidence_show "$1" >/dev/null 2>&1
 }
 
 list_has_key() {  # <comma-list> <key>
@@ -278,77 +580,236 @@ sorted_key_union() {  # <comma-list> <newline-or-space-separated-new-keys>
   } | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
 }
 
-meta_value() {  # <meta> <key>
-  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+normalized_inventory() {  # <origin> <comma-list>
+  local origin=$1 input=$2 entry resolved normalized=''
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    resolved=$(resolve_entry "$origin" "$entry") || return 1
+    normalized="${normalized}${normalized:+ }$resolved"
+  done <<EOF
+$(printf '%s\n' "$input" | tr ',' '\n')
+EOF
+  sorted_key_union '' "$normalized"
 }
 
-origin_open_decisions() {  # <origin-id>
-  local origin=$1 meta="$STATE/$1.meta" status_file="$STATE/$1.status" open kind last verb
-  open=$(status_open_decisions "$status_file")
-  [ -n "$open" ] || return 0
-  [ -f "$meta" ] || { printf '%s' "$open"; return 0; }
-  kind=$(meta_value "$meta" kind)
-  [ -n "$kind" ] || kind=ship
-  if [ "$kind" != secondmate ]; then
-    last=$(last_status_line "$status_file")
-    verb=$(status_line_verb "$last")
-    case "$verb" in
-      done|failed) return 0 ;;
-    esac
-  fi
-  printf '%s' "$open"
+inventory_includes_previous() {  # <origin> <preserved-comma-list> <supplied-space-list>
+  local origin=$1 preserved=$2 supplied=$3 entry required candidate resolved found
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    required=$(resolve_entry "$origin" "$entry") || return 1
+    found=0
+    for candidate in $supplied; do
+      resolved=$(resolve_entry "$origin" "$candidate") || return 1
+      if [ "$resolved" = "$required" ]; then
+        found=1
+        break
+      fi
+    done
+    [ "$found" = 1 ] || return 1
+  done <<EOF
+$(printf '%s\n' "$preserved" | tr ',' '\n')
+EOF
+}
+
+meta_value() {  # <meta> <key>
+  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 # A resolution record written by this script or by the retired
 # fm-decision-hold.sh. Both carry the same leader-then-captain-decision shape.
 body_has_resolution_record() {  # <task-body>
-  case "$1" in
-    *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
-    *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
-  esac
-  return 1
+  newest_resolution_header "$1" >/dev/null
 }
 
-# The recorded decision digest of either record format, from the show-escaped
-# body (multi-line bodies print as one quoted line with \n escapes). Records
-# are prepended, so the first match is the newest record.
+current_hold_cycle() {  # <task-body>
+  local decoded
+  decoded=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$decoded" | awk '
+    NR == 1 && /^Captain hold opened by fm-captain-hold\.$/ {
+      if ((getline cycle) <= 0 || index(cycle, "Hold cycle: ") != 1) next
+      token = substr(cycle, 13)
+      if (length(token) != 64 || token ~ /[^0-9a-f]/) next
+      if ((getline end) <= 0 || end != "Captain hold marker end.") next
+      print token
+      exit
+    }
+    NR == 1 && /^Resolution recorded by fm-(captain|decision)-hold\.$/ {
+      while ((getline line) > 0 && line != "Captain decision:") {
+        if (index(line, "Hold cycle: ") == 1) token = substr(line, 13)
+      }
+      if (length(token) == 64 && token !~ /[^0-9a-f]/) print token
+      exit
+    }
+    NR == 1 { exit }
+  '
+}
+
+body_has_current_resolution() {  # <task-body>
+  local current
+  current=$(current_hold_cycle "$1" || true)
+  [ -n "$current" ] && authenticated_resolution_body_for_cycle "$1" "$current" >/dev/null
+}
+
+release_resolution_matches_current() {  # <task-id> <task-body>
+  local current current_incarnation incarnation_rc receipt receipt_rc recorded_incarnation
+  body_has_current_resolution "$2" || return 1
+  if current=$(terminal_receipt_key "$1"); then
+    :
+  else
+    receipt_rc=$?
+    [ "$receipt_rc" = 3 ] || return 1
+    current=''
+  fi
+  receipt=$(recorded_release_receipt "$2" || true)
+  if [ -z "$current" ]; then
+    [ "$receipt" = none ] || return 1
+    recorded_incarnation=$(recorded_release_incarnation "$2" || true)
+    if current_incarnation=$(terminal_incarnation_key "$1"); then
+      [ "$recorded_incarnation" = "$current_incarnation" ]
+    else
+      incarnation_rc=$?
+      [ "$incarnation_rc" = 3 ] && [ -z "$recorded_incarnation" ]
+    fi
+  else
+    if [ "$receipt" = none ]; then
+      recorded_incarnation=$(recorded_release_incarnation "$2" || true)
+      [ "$recorded_incarnation" = "$current" ]
+    else
+      [ "$receipt" = "$current" ]
+    fi
+  fi
+}
+
+terminal_resolution_is_current() {  # <task-body> <hold-kind> <receipt-key> <origin-0-or-1> <task-id>
+  local mode release_receipt release_incarnation cycle
+  if ! body_has_resolution_record "$1"; then
+    cycle=$(current_hold_cycle "$1" || true)
+    [ -z "$cycle" ]
+    return
+  fi
+  body_has_current_resolution "$1" || return 1
+  mode=$(recorded_resolution_mode "$1" || true)
+  case "$mode" in
+    answered|repaired) return 0 ;;
+    released) ;;
+    *) return 1 ;;
+  esac
+  [ "$2" != captain ] || return 1
+  release_receipt=$(recorded_release_receipt "$1" || true)
+  [ -n "$release_receipt" ] || return 1
+  if [ "$release_receipt" = none ]; then
+    release_incarnation=$(recorded_release_incarnation "$1" || true)
+    [ "${#release_incarnation}" -eq 64 ] || return 1
+    case "$release_incarnation" in *[!0-9a-f]*) return 1 ;; esac
+    if [ "$4" = 1 ]; then
+      [ -n "$3" ] && [ "$release_incarnation" = "$3" ]
+      return
+    fi
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+      completed-exact "$5" "$release_incarnation" >/dev/null 2>&1
+    return
+  fi
+  [ "${#release_receipt}" -eq 64 ] || return 1
+  case "$release_receipt" in *[!0-9a-f]*) return 1 ;; esac
+  if [ "$4" = 1 ]; then
+    [ -n "$3" ] && [ "$release_receipt" != "$3" ]
+    return
+  fi
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+    completed-after "$5" "$release_receipt" >/dev/null 2>&1
+}
+
+newest_resolution_header() {  # <task-body>
+  local decoded
+  decoded=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$decoded" | awk '
+    NR == 1 && /^Resolution recorded by fm-(captain|decision)-hold\.$/ {
+      found = 1
+    }
+    NR == 1 && !found { exit 1 }
+    found {
+      print
+      if ($0 == "Captain decision:") {
+        complete = 1
+        exit
+      }
+    }
+    END {
+      if (!complete) exit 1
+    }
+  '
+}
+
+newest_resolution_field() {  # <task-body> <field>
+  newest_resolution_header "$1" | sed -n "s/^$2: //p" | head -1
+}
+
 recorded_decision_digest() {  # <task-body>
-  local rest=$1
-  case "$rest" in
-    *"Decision digest: "*) rest=${rest#*"Decision digest: "} ;;
-    *) return 1 ;;
-  esac
-  rest=${rest%%\\n*}
-  rest=${rest%%$'\n'*}
-  printf '%s' "$rest"
+  newest_resolution_field "$1" 'Decision digest'
 }
 
-# The newest record's `Resolution mode:` value; empty for a record predating it.
 recorded_resolution_mode() {  # <task-body>
-  local rest=$1
-  case "$rest" in
-    *"Resolution mode: "*) rest=${rest#*"Resolution mode: "} ;;
-    *) return 1 ;;
-  esac
-  rest=${rest%%\\n*}
-  rest=${rest%%$'\n'*}
-  printf '%s' "$rest"
+  newest_resolution_field "$1" 'Resolution mode'
 }
 
-resolution_block() {  # <mode>
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\nCaptain decision:\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$DECISION_TEXT"
+recorded_release_receipt() {  # <task-body>
+  newest_resolution_field "$1" 'Terminal receipt'
+}
+
+recorded_release_incarnation() {  # <task-body>
+  newest_resolution_field "$1" 'Terminal incarnation'
+}
+
+historical_release_matches() {  # <task-body> <hold-cycle> <terminal-receipt>
+  local record mode terminal incarnation
+  record=$(authenticated_resolution_body_for_cycle "$1" "$2") || return 1
+  mode=$(recorded_resolution_mode "$record" || true)
+  [ "$mode" = released ] || return 1
+  terminal=$(recorded_release_receipt "$record" || true)
+  [ "$terminal" != "$3" ] || return 0
+  incarnation=$(recorded_release_incarnation "$record" || true)
+  [ "$terminal" = none ] && [ "$incarnation" = "$3" ]
+}
+
+terminal_receipt_key() {  # <task-id>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+    receipt-key "$1"
+}
+
+terminal_incarnation_key() {  # <task-id>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+    current-incarnation "$1"
+}
+
+resolution_block() {  # <mode> <terminal-receipt> <hold-cycle> <terminal-incarnation>
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\nHold cycle: %s\n' \
+    "$DECISION_DIGEST" "$1" "$3"
+  [ -z "$2" ] || printf 'Terminal receipt: %s\n' "$2"
+  [ -z "$4" ] || printf 'Terminal incarnation: %s\n' "$4"
+  printf '\nCaptain decision:\n%s\n' "$DECISION_TEXT"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
-verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
-  show=$(task_show "$id") || fail "captain-held task $id is absent from $FM_HOME/data/backlog.md"
+verify_hold_durable() {  # <task-id> [hold-cycle]
+  local id=$1 cycle=${2:-} show state hold_kind body
+  if [ -n "$cycle" ]; then
+    show=$(task_cycle_evidence_show "$id" "$cycle") \
+      || fail "captain-held task $id has no unique active or archived evidence for hold cycle $cycle"
+  else
+    show=$(task_evidence_show "$id") \
+      || fail "captain-held task $id has no unique active or archived captain-answer record"
+  fi
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
   if body_has_resolution_record "$body"; then
+    body_has_current_resolution "$body" \
+      || fail "captain-held task $id has invalid captain-resolution evidence"
     return 0
   fi
   if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
@@ -360,24 +821,30 @@ verify_hold_durable() {  # <task-id>
 # Resolve one inventory entry or channel key to the task that carries it: the
 # exact task id when it exists, else the legacy derived identity.
 resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
-  local origin=$1 entry=$2 legacy
-  if task_show "$entry" >/dev/null 2>&1; then
+  local origin=$1 entry=$2 legacy rc
+  if task_evidence_show "$entry" >/dev/null 2>&1; then
     printf '%s' "$entry"
     return 0
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || fail "captain-held task $entry has ambiguous or invalid archived evidence"
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    if task_show "$legacy" >/dev/null 2>&1; then
+    if task_evidence_show "$legacy" >/dev/null 2>&1; then
       printf '%s' "$legacy"
       return 0
+    else
+      rc=$?
+      [ "$rc" -eq 3 ] || fail "legacy captain-held task $legacy has ambiguous or invalid archived evidence"
     fi
-    fail "no captain-held task $entry and no legacy identity $legacy in $FM_HOME/data/backlog.md"
+    fail "no active or archived captain-held task $entry and no legacy identity $legacy"
   fi
-  fail "no captain-held task $entry in $FM_HOME/data/backlog.md"
+  fail "no active or archived captain-held task $entry"
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind cycle was_captain=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -406,6 +873,8 @@ command_hold() {
   require_tasks_axi
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    [ "$hold_kind" != captain ] || was_captain=1
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
     if [ -n "$title" ]; then
@@ -430,7 +899,16 @@ command_hold() {
       tasks_axi add "$id" "$title" --repo "$repo" >/dev/null \
         || fail "could not create task $id"
     fi
+    show=$(task_show "$id") || fail "task $id disappeared after creation"
   fi
+  body=$(show_field "$show" body)
+  cycle=$(current_hold_cycle "$body" || true)
+  if [ "$was_captain" != 1 ] || [ -z "$cycle" ]; then
+    cycle=$(write_hold_cycle_record "$id" "$body")
+    show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
+  fi
+  [ "$(current_hold_cycle "$(show_field "$show" body)" || true)" = "$cycle" ] \
+    || fail "task $id did not retain its hold cycle"
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
       || fail "could not hold task $id for the captain"
@@ -441,30 +919,71 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
+  [ "$(current_hold_cycle "$(show_field "$show" body)" || true)" = "$cycle" ] \
+    || fail "task $id did not retain its hold cycle"
   printf '%s\n' "$id"
 }
 
-# Record a resolution block at the top of the task body, preserving the
-# previous body below it and archiving the pristine original.
-write_resolution_record() {  # <task-id> <mode> <shown-body>
-  local id=$1 mode=$2 body=$3 new_body tmp
-  new_body=$(resolution_block "$mode")
+prepend_body_record() {  # <task-id> <shown-body> <record>
+  local id=$1 body=$2 new_body=$3 tmp
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$body")
   fi
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-body.XXXXXX") \
-    || fail "cannot stage the resolution record"
+    || fail "cannot stage the captain-hold record"
   if ! printf '%s\n' "$new_body" > "$tmp"; then
     rm -f -- "$tmp"
-    fail "cannot stage the resolution record for $id"
+    fail "cannot stage the captain-hold record for $id"
   fi
   if ! tasks_axi update "$id" --body-file "$tmp" --archive-body >/dev/null; then
     rm -f -- "$tmp"
-    fail "could not record the captain decision on $id"
+    fail "could not record the captain-hold record on $id"
   fi
   rm -f -- "$tmp"
+}
+
+mint_hold_cycle() {  # <task-id>
+  local tmp cycle
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-cycle.XXXXXX") \
+    || fail "cannot mint a hold cycle"
+  cycle=$(sha256_text "$1|$tmp|$$|$(date +%s)")
+  rm -f -- "$tmp"
+  printf '%s' "$cycle"
+}
+
+write_hold_cycle_record() {  # <task-id> <shown-body>
+  local cycle record
+  cycle=$(mint_hold_cycle "$1")
+  record=$(printf 'Captain hold opened by fm-captain-hold.\nHold cycle: %s\nCaptain hold marker end.\n' "$cycle")
+  prepend_body_record "$1" "$2" "$record"
+  printf '%s' "$cycle"
+}
+
+write_resolution_record() {  # <task-id> <mode> <shown-body> <hold-cycle>
+  local id=$1 mode=$2 body=$3 cycle=$4 receipt='' receipt_rc incarnation='' incarnation_rc record
+  [ -n "$cycle" ] || fail "cannot record a captain answer without a hold cycle"
+  if [ "$mode" = released ]; then
+    if receipt=$(terminal_receipt_key "$id"); then
+      :
+    else
+      receipt_rc=$?
+      [ "$receipt_rc" = 3 ] \
+        || fail "cannot authenticate terminal receipt state for captain-held task $id"
+      receipt=none
+      if incarnation=$(terminal_incarnation_key "$id"); then
+        :
+      else
+        incarnation_rc=$?
+        [ "$incarnation_rc" = 3 ] \
+          || fail "cannot authenticate terminal incarnation for captain-held task $id"
+        incarnation=''
+      fi
+    fi
+  fi
+  record=$(resolution_block "$mode" "$receipt" "$cycle" "$incarnation")
+  prepend_body_record "$id" "$body" "$record"
 }
 
 close_answered() {  # <task-id> <release-0-or-1>
@@ -476,7 +995,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode cycle retry=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -497,7 +1016,7 @@ command_answer() {
   if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
 
   if [ "$state" = "done" ]; then
-    if body_has_resolution_record "$body"; then
+    if body_has_current_resolution "$body"; then
       # An exact compatible retry is an idempotent no-op; drift is rejected.
       [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
         || fail "captain-held task $id records a different captain decision"
@@ -515,10 +1034,16 @@ command_answer() {
     # this really was the captain's item rather than ordinary finished work.
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
-    write_resolution_record "$id" repaired "$body"
+    cycle=$(current_hold_cycle "$body" || true)
+    if [ -z "$cycle" ]; then
+      cycle=$(write_hold_cycle_record "$id" "$body")
+      show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
+      body=$(show_field "$show" body)
+    fi
+    write_resolution_record "$id" repaired "$body" "$cycle"
     show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
-    body_has_resolution_record "$(show_field "$show" body)" \
+    body_has_current_resolution "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
     printf 'repaired: %s\n' "$id"
     return 0
@@ -526,38 +1051,58 @@ command_answer() {
 
   if [ "$hold_kind" = captain ]; then
     # Actively the captain's item (a date-expired hold keeps its annotations
-    # and stays answerable). A matching record means an interrupted close to
-    # finish; a different digest is a NEW answer on a re-held task and gets
-    # its own record on top. Either way the close mode is the caller's flag,
-    # checked against an interrupted close's recorded mode so a retry cannot
-    # silently flip a release into a close.
-    if body_has_resolution_record "$body" \
-      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+    # and stays answerable). A retry belongs to the current hold cycle and, for
+    # release, the current terminal receipt, so a later cycle with the same
+    # answer records its own resolution.
+    cycle=$(current_hold_cycle "$body" || true)
+    if [ -z "$cycle" ]; then
+      cycle=$(write_hold_cycle_record "$id" "$body")
+      show=$(task_show "$id") || fail "task $id disappeared while recording its hold cycle"
+      body=$(show_field "$show" body)
+    fi
+    if body_has_current_resolution "$body"; then
+      [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+        || fail "captain-held task $id records a different captain decision"
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
-        released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
-        answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
+        released)
+          [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release"
+          release_resolution_matches_current "$id" "$body" \
+            || fail "task $id release belongs to a different terminal incarnation"
+          retry=1
+          ;;
+        answered)
+          [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release"
+          retry=1
+          ;;
+        *) fail "task $id records this answer with an unsupported resolution mode" ;;
       esac
+    fi
+    if [ "$retry" = 1 ]; then
       close_answered "$id" "$release"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
-    write_resolution_record "$id" "$outcome" "$body"
+    write_resolution_record "$id" "$outcome" "$body" "$cycle"
     close_answered "$id" "$release"
     show=$(task_show "$id") || fail "task $id disappeared after closing"
-    body_has_resolution_record "$(show_field "$show" body)" \
+    body_has_current_resolution "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
 
   # Not held and not closed: only an already-recorded release replays cleanly.
-  if body_has_resolution_record "$body"; then
+  if body_has_current_resolution "$body"; then
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
-    [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
-      || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    if [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
+      && release_resolution_matches_current "$id" "$body"; then
+      :
+    else
+      fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    fi
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -729,25 +1274,25 @@ command_answers() {
     body=$(show_field "$show" body)
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
-    if body_has_resolution_record "$body" \
+    if body_has_current_resolution "$body" \
       && { [ "$recorded_digest" = "$digest" ] \
         || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$recorded_mode" != released ]; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
-          && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
+          && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ] \
+          && release_resolution_matches_current "$id" "$body"; }; then
         printf 'closed: %s\n' "$id"
         closed=$((closed + 1))
         continue
       fi
     fi
-    if [ "$state" = "done" ]; then
-      printf 'skipped: %s (already closed)\n' "$id"
-      skipped=$((skipped + 1))
-      continue
-    fi
     if [ "$hold_kind" != captain ]; then
-      printf 'skipped: %s (not held for the captain)\n' "$id"
+      if [ "$state" = "done" ]; then
+        printf 'skipped: %s (already closed)\n' "$id"
+      else
+        printf 'skipped: %s (not held for the captain)\n' "$id"
+      fi
       skipped=$((skipped + 1))
       continue
     fi
@@ -767,20 +1312,44 @@ command_answers() {
 }
 
 command_complete() {
-  local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open raw_open has_meta=0 transfer_rc
+  local origin=${1:-} meta receipt='' receipt_state='' receipt_previous='' receipt_calls='[]' receipt_reviewed=false
+  local receipt_complete=false previous='' previous_calls='' supplied='' supplied_keys='' supplied_calls='[]' calls='[]'
+  local keys='' entry key status_file raw_open has_meta=0 transfer_rc origin_rc
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
+  if [ "${1:-}" = --receipt ]; then
+    [ "$#" -ge 3 ] || { usage >&2; exit 2; }
+    receipt=${2:-}
+    validate_slug receipt-key "$receipt"
+    shift 2
+  fi
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   meta="$STATE/$origin.meta"
-  [ -f "$meta" ] && has_meta=1
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
+      || fail "origin metadata is unsafe or unreadable: $meta"
+    has_meta=1
+  fi
   if [ "$has_meta" = 1 ]; then
     CAPTAIN_META_LOCK=$(fm_meta_lock_path "$meta") || fail "could not resolve task metadata lock"
     fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=1
-    [ -f "$meta" ] || fail "task metadata disappeared while recording completion"
+    [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] \
+      || fail "task metadata disappeared or became unsafe while recording completion"
   fi
-  require_tasks_axi
-  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  require_task_reader
+  if origin_exists_here "$origin"; then
+    :
+  else
+    origin_rc=$?
+    [ "$origin_rc" -ne 3 ] \
+      || fail "origin $origin has no active or archived evidence in $FM_HOME"
+    fail "origin $origin evidence is unreadable or ambiguous in $FM_HOME"
+  fi
+  if [ "$has_meta" != 1 ]; then
+    [ -n "$receipt" ] || fail "retired origin $origin requires its exact terminal receipt for completion recovery"
+  fi
   if [ "$#" -eq 1 ] && [ "$1" = --none ]; then
     supplied=''
   else
@@ -793,71 +1362,179 @@ command_complete() {
   fi
   if [ "$has_meta" = 1 ]; then
     previous=$(meta_value "$meta" decision_keys)
+    previous_calls=$(meta_value "$meta" decision_call_cycles)
+    if ! inventory_cycles_valid_for_keys "$previous" "${previous_calls:-null}"; then
+      [ -z "$previous" ] \
+        || fail "previously reviewed captain-call inventory for $origin has no authenticated hold-cycle identity"
+      previous_calls='[]'
+    fi
   fi
-  keys=$(sorted_key_union "$previous" "$supplied")
-  if [ -n "$keys" ]; then
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
-    done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
+  if [ -n "$receipt" ]; then
+    receipt_state=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+      captain-review-state "$origin" "$receipt") \
+      || fail "cannot authenticate terminal receipt $receipt for captain-call review"
+    receipt_previous=$(printf '%s\n' "$receipt_state" | jq -r '.captain_keys') \
+      || fail "cannot read preserved captain-call inventory from terminal receipt $receipt"
+    receipt_calls=$(printf '%s\n' "$receipt_state" | jq -c '.captain_calls') \
+      || fail "cannot read preserved captain-call cycles from terminal receipt $receipt"
+    inventory_cycles_valid_for_keys "$receipt_previous" "$receipt_calls" \
+      || fail "terminal receipt $receipt has no authenticated captain-call cycle inventory"
+    receipt_reviewed=$(printf '%s\n' "$receipt_state" | jq -r '.decisions_reviewed') \
+      || fail "cannot read captain-call review state from terminal receipt $receipt"
+    receipt_complete=$(printf '%s\n' "$receipt_state" | jq -r '.complete') \
+      || fail "cannot read captain-call lifecycle state from terminal receipt $receipt"
+    if [ "$receipt_reviewed" != true ] \
+      && ! inventory_includes_previous "$origin" "$receipt_previous" "$supplied"; then
+      fail "reviewed inventory must include every captain task preserved by terminal receipt $receipt"
+    fi
+    previous=$(sorted_key_union "$previous" "$receipt_previous")
+    previous_calls=$(printf '%s\n%s\n' "${previous_calls:-[]}" "$receipt_calls" | jq -sc \
+      '[.[][]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') \
+      || fail "cannot combine preserved captain-call cycles"
   fi
-
+  supplied_keys=$(normalized_inventory "$origin" "$(sorted_key_union '' "$supplied")")
+  supplied_calls=$(normalized_inventory_cycles "$origin" "$supplied_keys") \
+    || fail "cannot authenticate the reviewed captain-call cycles for $origin"
+  keys=$(sorted_key_union "$previous" "$supplied_keys")
+  calls=$(printf '%s\n%s\n' "${previous_calls:-[]}" "$supplied_calls" | jq -sc \
+    '[.[][]] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') \
+    || fail "cannot normalize the reviewed captain-call cycles for $origin"
+  verify_inventory_durable "$keys" "$calls" "$origin"
+  if [ "$receipt_complete" = true ] && [ "$keys" != "$receipt_previous" ]; then
+    fail "terminal receipt $receipt is complete; keep its captain inventory unchanged and register new calls against active originating work through fm-captain-hold.sh hold/complete"
+  fi
+  if [ "$receipt_complete" = true ] && [ "$calls" != "$receipt_calls" ]; then
+    fail "terminal receipt $receipt is complete; keep its captain hold-cycle identities unchanged"
+  fi
   status_file="$STATE/$origin.status"
   raw_open=$(status_open_decisions "$status_file")
-  open=$(origin_open_decisions "$origin")
-  if [ -n "$open" ] && [ -z "$keys" ]; then
-    fail "origin $origin still has open captain decisions in its status stream; hold a captain task for what remains, or answer them, before attesting --none"
+  if [ -n "$raw_open" ] && [ -z "$supplied" ]; then
+    fail "origin $origin still has open captain decisions in its status stream; supply the reviewed captain-held inventory, or answer them, before completing"
   fi
 
   if [ "$has_meta" = 1 ]; then
-    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+    if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ] \
+      || [ "$(meta_value "$meta" decision_call_cycles)" != "$calls" ]; then
+      printf 'decisions_reviewed=1\ndecision_keys=%s\ndecision_call_cycles=%s\n' "$keys" "$calls" >> "$meta"
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
+  fi
 
-    # Transfer every still-open status decision to the durable captain-held
-    # inventory so the live status fold does not duplicate the same Captain's
-    # Call item. The transfer line is this home's own bookkeeping close,
-    # written by the turn that just reviewed the inventory, so it uses the
-    # guarded self-announced append (bin/fm-wake-lib.sh) and does not wake this
-    # same session; an append failure still fails this command loudly.
-    if [ -n "$keys" ]; then
-      while IFS=$'\t' read -r key _verb _summary; do
-        [ -n "$key" ] || continue
-        transfer_rc=0
-        fm_wake_status_append_self_announced "$STATE" "$status_file" \
-          "captain-held [key=$key]: tracked by $keys" || transfer_rc=$?
-        [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
-      done <<EOF
+  if [ -n "$receipt" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-terminal-reconcile.sh" \
+      captain-reviewed "$origin" "$receipt" "$keys" "$calls" >/dev/null \
+      || fail "cannot persist the reviewed captain-call inventory to terminal receipt $receipt"
+  fi
+
+  # Transfer every still-open status decision to the durable captain-held
+  # inventory so the live status fold does not duplicate the same Captain's
+  # Call item. The transfer line is this home's own bookkeeping close,
+  # written by the turn that just reviewed the inventory, so it uses the
+  # guarded self-announced append (bin/fm-wake-lib.sh) and does not wake this
+  # same session; an append failure still fails this command loudly.
+  if [ -n "$keys" ]; then
+    while IFS=$'\t' read -r key _verb _summary; do
+      [ -n "$key" ] || continue
+      transfer_rc=0
+      fm_wake_status_append_self_announced "$STATE" "$status_file" \
+        "captain-held [key=$key]: tracked by $keys" || transfer_rc=$?
+      [ "$transfer_rc" -ne 2 ] || fail "cannot append the captain-held transfer for $origin/$key"
+    done <<EOF
 $raw_open
 EOF
-    fi
   fi
   printf 'complete: %s captain-call inventory reviewed%s\n' "$origin" "${keys:+ ($keys)}"
 }
 
+command_normalize_inventory() {
+  local origin=${1:-} supplied='' entry
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  shift
+  require_task_reader
+  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  for entry in "$@"; do
+    validate_slug task-id "$entry"
+    supplied="${supplied}${supplied:+ }$entry"
+  done
+  normalized_inventory "$origin" "$(sorted_key_union '' "$supplied")"
+}
+
+normalized_inventory_cycles() {  # <origin> <comma-list>
+  local origin=$1 input=$2 entry id show body cycle calls='[]'
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    validate_slug task-id "$entry"
+    id=$(resolve_entry "$origin" "$entry") || return 1
+    verify_hold_durable "$id"
+    show=$(task_evidence_show "$id") || return 1
+    body=$(show_field "$show" body)
+    cycle=$(current_hold_cycle "$body" || true)
+    [ -n "$cycle" ] || fail "captain-held task $id has no authenticated hold-cycle identity"
+    calls=$(printf '%s\n' "$calls" | jq -c --arg id "$id" --arg cycle "$cycle" \
+      '. + [{id:$id,cycle:$cycle}] | unique_by([.id,.cycle]) | sort_by(.id,.cycle)') \
+      || return 1
+  done <<EOF
+$(printf '%s\n' "$input" | tr ',' '\n')
+EOF
+  printf '%s\n' "$calls"
+}
+
+inventory_cycles_valid_for_keys() {  # <comma-list> <json-array>
+  printf '%s\n' "$2" | jq -e --arg keys "$1" '
+    type == "array" and
+    all(type == "object" and
+        (.id | type == "string" and test("^[A-Za-z0-9._-]+$")) and
+        (.cycle | type == "string" and test("^[0-9a-f]{64}$"))) and
+    ((map(.id) | unique | sort) == ($keys | split(",") | map(select(length > 0)) | unique | sort))
+  ' >/dev/null
+}
+
+verify_inventory_durable() {  # <comma-list> <json-array> <origin-id>
+  local keys=$1 calls=$2 origin=$3 rows id cycle
+  inventory_cycles_valid_for_keys "$keys" "$calls" \
+    || fail "reviewed captain-call cycles do not match the normalized inventory for $origin"
+  rows=$(printf '%s\n' "$calls" | jq -r '.[] | [.id,.cycle] | @tsv') \
+    || fail "cannot read the reviewed captain-call cycles for $origin"
+  while IFS=$'\t' read -r id cycle; do
+    [ -n "$id" ] || continue
+    verify_hold_durable "$id" "$cycle"
+  done <<EOF
+$rows
+EOF
+}
+
+command_normalize_inventory_cycles() {
+  local origin=${1:-} supplied='' entry
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  shift
+  require_task_reader
+  origin_exists_here "$origin" || fail "origin $origin is not owned by the active home $FM_HOME"
+  for entry in "$@"; do
+    validate_slug task-id "$entry"
+    supplied="${supplied}${supplied:+,}$entry"
+  done
+  normalized_inventory_cycles "$origin" "$supplied"
+}
+
 command_verify() {
-  local origin=${1:-} meta reviewed keys entry key open
+  local origin=${1:-} meta reviewed keys calls key open
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   meta="$STATE/$origin.meta"
   [ -f "$meta" ] || fail "origin metadata is absent: $meta"
-  require_tasks_axi
+  require_task_reader
   reviewed=$(meta_value "$meta" decisions_reviewed)
   [ "$reviewed" = 1 ] || fail "origin $origin has no completed captain-call inventory"
   keys=$(meta_value "$meta" decision_keys)
-  if [ -n "$keys" ]; then
-    while IFS= read -r entry; do
-      [ -n "$entry" ] || continue
-      verify_hold_durable "$(resolve_entry "$origin" "$entry")"
-    done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
-  fi
-  open=$(origin_open_decisions "$origin")
+  calls=$(meta_value "$meta" decision_call_cycles)
+  [ -n "$keys" ] || [ -n "$calls" ] || calls='[]'
+  verify_inventory_durable "$keys" "${calls:-null}" "$origin"
+  open=$(status_open_decisions "$STATE/$origin.status")
   while IFS=$'\t' read -r key _verb _summary; do
     [ -n "$key" ] || continue
     fail "open captain decision $origin/$key is not transferred to the captain-held inventory; re-run complete"
@@ -865,6 +1542,144 @@ EOF
 $open
 EOF
   printf 'verified: %s captain-call inventory\n' "$origin"
+}
+
+command_origin_obligation() {
+  local origin=${1:-} show state hold_kind body cycle rc decoded first
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  require_task_reader
+  if show=$(task_evidence_show "$origin"); then
+    :
+  else
+    rc=$?
+    [ "$rc" -ne 3 ] || fail "origin $origin has no active or archived evidence"
+    fail "origin $origin evidence is unreadable or ambiguous"
+  fi
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+  cycle=$(current_hold_cycle "$body" || true)
+  decoded=$(decode_shown_value "$body") || fail "origin $origin evidence body is unreadable"
+  first=$(printf '%s\n' "$decoded" | sed -n '1p')
+  if [ -n "$cycle" ]; then
+    if body_has_resolution_record "$body"; then
+      body_has_current_resolution "$body" \
+        || fail "origin $origin captain-cycle evidence is stale or corrupt"
+    elif [ "$hold_kind" != captain ] || [ "$state" = 'done' ]; then
+      fail "origin $origin captain-cycle evidence is inconsistent"
+    fi
+    printf '%s\n' "$cycle"
+    return
+  fi
+  if [ "$hold_kind" = captain ] || body_has_resolution_record "$body"; then
+    fail "origin $origin captain-cycle evidence has no authentic cycle identity"
+  fi
+  case "$first" in
+    'Captain hold opened by fm-captain-hold.'|'Resolution recorded by fm-captain-hold.'|'Resolution recorded by fm-decision-hold.')
+      fail "origin $origin captain-cycle evidence is legacy or corrupt"
+      ;;
+  esac
+  printf 'none\n'
+}
+
+command_terminal_ready() {
+  local origin=${1:-} receipt='' origin_cycle='' origin_resolved=0 entry id resolved seen show state hold_kind body rc cycle expected_cycle
+  local -a resolved_ids=()
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  shift
+  if [ "${1:-}" = --receipt ]; then
+    [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+    receipt=${2:-}
+    validate_slug receipt-key "$receipt"
+    shift 2
+  fi
+  if [ "${1:-}" = --origin-cycle ]; then
+    [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+    origin_cycle=${2:-}
+    if [ "$origin_cycle" != none ]; then
+      [ "${#origin_cycle}" -eq 64 ] || return 1
+      case "$origin_cycle" in *[!0-9a-f]*) return 1 ;; esac
+    fi
+    shift 2
+  fi
+  if [ "${1:-}" = --origin-resolved ]; then
+    origin_resolved=1
+    shift
+  fi
+  require_task_reader
+  [ -z "$(status_open_decisions "$STATE/$origin.status")" ] || return 1
+  if [ "$origin_resolved" = 1 ]; then
+    [ -n "$receipt" ] && [ -n "$origin_cycle" ] || return 1
+    if [ "$origin_cycle" != none ]; then
+      show=$(task_evidence_show "$origin") || return 1
+      body=$(show_field "$show" body)
+      historical_release_matches "$body" "$origin_cycle" "$receipt" || return 1
+    fi
+  elif show=$(task_evidence_show "$origin"); then
+    state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    body=$(show_field "$show" body)
+    if [ -n "$origin_cycle" ]; then
+      cycle=$(current_hold_cycle "$body" || true)
+      if [ "$origin_cycle" = none ]; then
+        if [ -n "$cycle" ] || [ "$hold_kind" = captain ] \
+          || body_has_resolution_record "$body"; then
+          return 1
+        fi
+      else
+        [ "$cycle" = "$origin_cycle" ] || return 1
+      fi
+    fi
+    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 1 "$origin" || return 1
+    if [ "$hold_kind" = captain ]; then
+      [ "$state" = "done" ] || return 1
+      body_has_resolution_record "$body" || return 1
+    fi
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && { [ -z "$origin_cycle" ] || [ "$origin_cycle" = none ]; } || return 1
+  fi
+  resolved_ids+=("$origin")
+  for entry in "$@"; do
+    expected_cycle=''
+    case "$entry" in
+      *:*)
+        id=${entry%%:*}
+        expected_cycle=${entry#*:}
+        validate_slug captain-task-id "$id"
+        [ "${#expected_cycle}" -eq 64 ] || return 1
+        case "$expected_cycle" in *[!0-9a-f]*) return 1 ;; esac
+        ;;
+      *)
+        [ -z "$receipt" ] || return 1
+        validate_slug captain-task-id "$entry"
+        id=$(resolve_entry "$origin" "$entry") || return 1
+        ;;
+    esac
+    seen=0
+    for resolved in "${resolved_ids[@]}"; do
+      [ "$resolved" != "$id:$expected_cycle" ] || seen=1
+    done
+    [ "$seen" = 1 ] || resolved_ids+=("$id:$expected_cycle")
+  done
+  for entry in "${resolved_ids[@]}"; do
+    [ "$entry" != "$origin" ] || continue
+    id=${entry%%:*}
+    expected_cycle=${entry#*:}
+    if [ -n "$expected_cycle" ]; then
+      show=$(task_cycle_evidence_show "$id" "$expected_cycle") || return 1
+    else
+      show=$(task_evidence_show "$id") || return 1
+    fi
+    state=$(show_field "$show" state)
+    hold_kind=$(show_field_value "$show" hold_kind)
+    body=$(show_field "$show" body)
+    [ "$state" = "done" ] || [ "$hold_kind" != captain ] || return 1
+    body_has_resolution_record "$body" || return 1
+    terminal_resolution_is_current "$body" "$hold_kind" "$receipt" 0 "$id" || return 1
+  done
 }
 
 # --- record divergence ------------------------------------------------------
@@ -994,7 +1809,11 @@ case "${1:-}" in
   unbind) shift; command_unbind "$@" ;;
   binding) shift; command_binding "$@" ;;
   complete) shift; command_complete "$@" ;;
+  normalize-inventory) shift; command_normalize_inventory "$@" ;;
+  normalize-inventory-cycles) shift; command_normalize_inventory_cycles "$@" ;;
+  origin-obligation) shift; command_origin_obligation "$@" ;;
   verify) shift; command_verify "$@" ;;
+  terminal-ready) shift; command_terminal_ready "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;

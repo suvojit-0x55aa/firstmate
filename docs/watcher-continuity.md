@@ -39,7 +39,7 @@ The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-Codex retains its bounded foreground checkpoint protocol.
+Codex continuation is owned by [`bin/fm-codex-stop.sh`](../bin/fm-codex-stop.sh).
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
@@ -50,7 +50,7 @@ The turn-end guard remains the final backstop rather than the normal continuity 
 A recovery episode is one generation of `state/.watcher-down`, and it is retired only by the generation-bound acknowledgement the drain prints as `WAKE_ACK_REQUIRED`.
 An unacknowledged downtime generation is announced at most once: the first recovery marks that generation announced, and later arms wait until a new down stretch mints a new generation.
 A non-successor watcher start after an announced-but-unacked episode is a new down stretch and mints a fresh generation so buried decisions still resurface once.
-The exception is an ordinary next-turn start by the same live session that already saw that generation announced, including the next Codex foreground checkpoint or a Claude Stop auto-arm, neither of which runs as a handling successor: that start keeps the generation instead of re-announcing it every turn while the queue stays non-empty.
+The exception is an ordinary next-turn start by the same live session that already saw that generation announced, including the next Codex Stop-owned continuation cycle or a Claude Stop auto-arm, neither of which runs as a handling successor: that start keeps the generation instead of re-announcing it every turn while the queue stays non-empty.
 Arm-check records the announcing session-lock owner and its process identity beside the marker in `state/.watcher-down.announced-session`, and a different, dead, or unverifiable owner still reads as a new down stretch.
 A crashed watcher within the same session still re-announces through stale-lock recovery, independent of that record.
 Every watcher close and every durable queue append publishes downtime, so a downtime republication of any pending episode reuses its generation instead of minting a new one, and an already-announced generation stays announced.
@@ -117,6 +117,6 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex uses its synchronous Stop owner.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.

@@ -80,7 +80,7 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   local home=$1 state=$2 id=$3 url=$4 origin=$5
   local self='' self_rc=0 destination='' line lock status=0
-  local provider host path number
+  local provider host path number kind
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
@@ -92,6 +92,15 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin>
   path=$FM_PR_PATH
   number=$FM_PR_NUMBER
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
+
+  # Persistent secondmates own a long-lived endpoint, not terminal task
+  # delivery. Their PR watcher therefore retires only the poll; ordinary work
+  # must persist delivery proof before notification deduplication can return.
+  kind=$(sed -n 's/^kind=//p' "$state/$id.meta" 2>/dev/null | tail -1)
+  if [ "$kind" != secondmate ]; then
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      "$_FM_MERGE_OUTCOME_LIB_DIR/fm-terminal-reconcile.sh" merge-observed "$id" "$url" || return 1
+  fi
 
   if self=$(fm_merge_outcome_home_id "$home"); then
     fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 3
