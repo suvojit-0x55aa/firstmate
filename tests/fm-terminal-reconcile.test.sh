@@ -1720,6 +1720,85 @@ test_supersession_preserves_unresolved_captain_inventory() {
     'answered inherited captain inventory did not unblock replacement completion'
   pass 'receipt supersession preserves unresolved captain inventory and cycle'
 }
+test_verified_merge_refuses_retired_fallback_for_current_metadata() {
+  local id=verified-merge-current-failure pr=https://github.com/o/r/pull/506
+  local old_key new_key old_record new_record rc=0
+  make_unreviewed_task "$id"
+  "$owner" observe "$id" done "$pr"
+  "$owner" retired "$id" normal
+  old_key=$("$owner" receipt-key "$id")
+  old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
+  rm "$FM_HOME/state/$id.meta"
+  printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" "$pr" > "$FM_HOME/state/$id.meta"
+  set +e
+  "$owner" merged "$id" "$pr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'verified merge fell back to a retired receipt after current selection failed'
+  new_key=$("$owner" receipt-key "$id")
+  new_record="$FM_HOME/state/terminal-delivery/$new_key.json"
+  [ "$old_key" != "$new_key" ] || fail 'verified merge fixture did not create a replacement receipt'
+  jq -e '.merged == false and ((.superseded_by // "") == "")' "$old_record" >/dev/null \
+    || fail 'failed current merge mutated retired merge evidence'
+  jq -e '.merged == false and .retired == false' "$new_record" >/dev/null \
+    || fail 'failed current merge mutated replacement merge evidence'
+  rm "$FM_HOME/state/$id.meta"
+  "$owner" merged "$id" "$pr" \
+    || fail 'verified merge could not use exact retired evidence without current metadata'
+  jq -e '.merged == true' "$old_record" >/dev/null \
+    || fail 'metadata-absent verified merge did not update the exact retired receipt'
+  jq -e '.merged == false' "$new_record" >/dev/null \
+    || fail 'metadata-absent verified merge mutated an unretired replacement receipt'
+  pass 'verified merge fails closed for current incarnation selection errors'
+}
+test_same_cycle_obligation_updates_preserve_inherited_calls() {
+  local id=same-cycle-obligation call=same-cycle-obligation-call
+  local pr=https://github.com/o/r/pull/507 old_key new_key old_record new_record cycle
+  make_task "$id"
+  tx add "$call" "$call" --json >/dev/null
+  hold_captain_task "$id"
+  hold_captain_task "$call"
+  printf 'decision_keys=%s\ndecisions_reviewed=1\n' "$call" >> "$FM_HOME/state/$id.meta"
+  "$owner" observe "$id" done "$pr"
+  "$owner" retired "$id" normal
+  old_key=$("$owner" receipt-key "$id")
+  old_record="$FM_HOME/state/terminal-delivery/$old_key.json"
+  cycle=$(jq -r .origin_captain_cycle "$old_record")
+  rm "$FM_HOME/state/$id.meta"
+  printf 'spawn_gen=%s-reused\nkind=ship\nmode=no-mistakes\npr=%s\ndecisions_reviewed=1\ndecision_keys=\n' \
+    "$id" "$pr" > "$FM_HOME/state/$id.meta"
+  "$owner" observe "$id" done "$pr"
+  new_key=$("$owner" receipt-key "$id")
+  new_record="$FM_HOME/state/terminal-delivery/$new_key.json"
+  jq -e --arg key "$new_key" '.superseded_by == $key' "$old_record" >/dev/null \
+    || fail 'same-cycle replacement did not supersede its predecessor'
+  jq -e --arg call "$call" --arg cycle "$cycle" --arg key "$new_key" '
+    .captain_keys == $call and
+    ([.captain_obligations[] | select(.receipt==$key and .origin_cycle==$cycle and .captain_keys==$call and .origin_resolved==false)] | length) == 1
+  ' "$new_record" >/dev/null || fail 'same-cycle replacement did not inherit unresolved captain inventory'
+  captain complete "$id" --none >/dev/null \
+    || fail 'active empty inventory review could not be recorded'
+  "$owner" prepare-retirement "$id"
+  "$owner" merged "$id" "$pr"
+  "$owner" retired "$id" normal
+  jq -e --arg call "$call" --arg cycle "$cycle" --arg key "$new_key" '
+    .captain_keys == $call and
+    ([.captain_obligations[] | select(.receipt==$key and .origin_cycle==$cycle and .captain_keys==$call and .origin_resolved==false)] | length) == 1 and
+    .backlog == false and .refill == false
+  ' "$new_record" >/dev/null || fail 'empty retirement metadata erased inherited captain inventory'
+  answer_captain_task "$id"
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == false and .refill == false' "$new_record" >/dev/null \
+    || fail 'unresolved inherited captain call advanced replacement backlog state'
+  answer_captain_task "$call"
+  "$owner" reconcile
+  "$owner" reconcile
+  jq -e '.backlog == true and .refill == true' "$new_record" >/dev/null \
+    || fail 'answered inherited captain call did not unblock replacement completion'
+  pass 'same-cycle obligation updates preserve inherited captain calls'
+}
 case "${FM_TERMINAL_FOCUSED_TEST:-}" in
   '') ;;
   captain-attestation-report)
@@ -1798,6 +1877,11 @@ EOF
     ;;
   supersession-inventory)
     test_supersession_preserves_unresolved_captain_inventory
+    exit
+    ;;
+  terminal-selection-obligations)
+    test_verified_merge_refuses_retired_fallback_for_current_metadata
+    test_same_cycle_obligation_updates_preserve_inherited_calls
     exit
     ;;
   *) fail "unknown focused terminal test: $FM_TERMINAL_FOCUSED_TEST" ;;

@@ -129,7 +129,7 @@ set_current_captain_obligation() {
       ([.[] | select(.receipt == $receipt and .origin_resolved == false)] | length) as $matches
       | if $matches == 1 then
           map(if .receipt == $receipt and .origin_resolved == false
-              then .captain_keys=$keys | .origin_cycle=$cycle else . end)
+              then .captain_keys=([.captain_keys,$keys] | join(",") | split(",") | map(select(length > 0)) | unique | join(",")) | .origin_cycle=$cycle else . end)
         elif $matches == 0 then
           . + [{receipt:$receipt,origin_cycle:$cycle,captain_keys:$keys,origin_resolved:false}]
         else error("ambiguous current captain obligation") end
@@ -524,8 +524,10 @@ case "$mode" in
     if [ "$mode" = merge-observed ]; then
       select_merge_observation_record "$2" "$3" || exit $?
     elif [ "$mode" = merged ]; then
-      if ! select_record "$2" && ! select_retired_record "$2" "$3"; then
-        exit 1
+      if [ -e "$STATE/$2.meta" ] || [ -L "$STATE/$2.meta" ]; then
+        select_record "$2" || exit $?
+      else
+        select_retired_record "$2" "$3" || exit $?
       fi
     else
       select_record "$2" || exit $?
