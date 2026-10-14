@@ -152,6 +152,8 @@ def owner(lock):
     output = None
     phase = 'idle'
     deadline = time.monotonic() + 5
+    next_probe = time.monotonic()
+    supervision_needed = True
     pending = {}
     acknowledged = False
     published = {}
@@ -174,7 +176,7 @@ def owner(lock):
                 os.unlink(tmp)
 
     def cancel_arm():
-        nonlocal arm, output
+        nonlocal arm, arm_identity, output
         if arm is not None:
             # An unreaped direct child cannot have a reused PID. It started its
             # own process group; attached foreign watchers are never members.
@@ -186,6 +188,7 @@ def owner(lock):
                     os.killpg(arm.pid, signal.SIGKILL)
                     arm.wait(timeout=1)
             arm = None
+            arm_identity = ''
         if output is not None:
             output.close()
             output = None
@@ -224,7 +227,7 @@ def owner(lock):
         listener.setblocking(False)
         selector.register(listener, selectors.EVENT_READ)
         publish('idle', 5)
-        while generation_current():
+        while True:
             for key, _events in selector.select(0.2):
                 if key.fileobj is listener:
                     conn, _address = listener.accept()
@@ -256,14 +259,16 @@ def owner(lock):
                     continue
                 if request.get('op') == 'healthy':
                     send(conn, dict(token=token, healthy=request.get('record') == published and
-                                    phase in ('watching', 'handling') and time.monotonic() < deadline))
+                                    phase in ('watching', 'handling') and time.monotonic() < deadline and
+                                    generation_current()))
                     close(conn)
                 elif conn is active and request.get('op') == 'accepted' and phase == 'delivering':
-                    # Only a successfully delivered native response opens handling.
-                    # The transport has no record or lock mutation authority.
+                    send(conn, dict(accepted=True, token=token))
+                elif conn is active and request.get('op') == 'commit' and phase == 'delivering':
+                    if not generation_current():
+                        return
                     publish('handling', handling_grace)
                     acknowledged = True
-                    send(conn, dict(accepted=True, token=token))
                 elif request.get('op') == 'stop':
                     if (request.get('session_pid'), request.get('session_identity'), request.get('session_id')) != (
                             session_pid, session_identity, session_id):
@@ -290,24 +295,34 @@ def owner(lock):
             for conn, (_buf, expires) in list(pending.items()):
                 if conn is not active and time.monotonic() >= expires:
                     close(conn)
+            now = time.monotonic()
+            probe_due = now >= next_probe or (phase == 'watching' and now >= deadline)
+            if probe_due:
+                if not generation_current():
+                    return
+                supervision_needed = needed()
+                next_probe = now + 1
             if phase == 'watching' and active is not None:
                 reason = 'durable wake pending' if queued() else ''
                 if output is not None:
                     text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
                     if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat')) for line in text.splitlines()):
                         reason = 'watcher delivered an actionable wake'
-                if not reason and not needed():
+                if not reason and probe_due and not supervision_needed:
                     send(active, dict(rc=0, reason='', token=token))
                     return
-                if not reason and arm is not None and (arm.poll() is not None or not arm_identity or identity(arm.pid) != arm_identity):
+                if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
-                if not reason and time.monotonic() >= deadline:
-                    reason = 'quiet checkpoint elapsed; supervision is still needed'
+                if not reason and now >= deadline:
+                    if arm is not None and identity(arm.pid) != arm_identity:
+                        reason = 'watcher failed; inspect its startup and ownership before continuing'
+                    else:
+                        reason = 'quiet checkpoint elapsed; supervision is still needed'
                 if reason and not finish(reason):
                     return
-            elif time.monotonic() >= deadline:
+            elif now >= deadline:
                 return
-            elif phase == 'handling' and not queued() and not needed():
+            elif phase == 'handling' and probe_due and not queued() and not supervision_needed:
                 return
     except (OSError, ValueError, InterruptedError, subprocess.TimeoutExpired) as error:
         with open('.codex-stop-error', 'w') as stream:
@@ -414,6 +429,15 @@ try:
             accepted = receive(conn)
             if accepted != dict(accepted=True, token=record['token']):
                 raise OSError('continuation was not accepted')
+            if os.environ.get('FM_CODEX_STOP_TEST_INTERRUPT_AFTER_ACCEPTED') == '1':
+                os.kill(os.getpid(), signal.SIGTERM)
+            blocked = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
+            signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+            if signal.sigpending().intersection(blocked):
+                conn.close()
+                os._exit(0)
+            send(conn, dict(op='commit', token=record['token']))
+            os._exit(2)
     sys.exit(rc)
 except (OSError, ValueError, KeyError):
     print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)

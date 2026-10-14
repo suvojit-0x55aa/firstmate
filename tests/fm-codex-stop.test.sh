@@ -195,6 +195,35 @@ test_expired_successor_requires_replacement_generation() {
   pass 'expired handling proof fails closed; successor binds its own generation'
 }
 
+test_health_challenge_rejects_replaced_generation() {
+  local dir
+  dir=$(fixture health-replacement)
+  append_wake "$dir/state" check health-replacement 'check: retained event'
+  run_stop "$dir"
+  wait_file "$dir/rc"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_codex_stop_handling_healthy "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" || fail 'current generation did not report healthy'
+  printf '99999999\n' > "$dir/state/.lock"
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_codex_stop_handling_healthy "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state"; then
+    fail 'replaced generation retained healthy handling proof'
+  fi
+  finish "$dir"
+  pass 'health challenge fails closed immediately after generation replacement'
+}
+
+test_post_accept_interruption_revokes_owner() {
+  local dir
+  dir=$(fixture post-accept-interruption)
+  append_wake "$dir/state" check post-accept 'check: retained event'
+  FM_CODEX_STOP_TEST_INTERRUPT_AFTER_ACCEPTED=1 run_stop "$dir"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 0 ] || fail 'post-accept interruption committed a continuation'
+  for _ in $(seq 1 60); do [ ! -e "$dir/state/.codex-stop.json" ] && break; sleep 0.1; done
+  [ ! -e "$dir/state/.codex-stop.json" ] || fail 'post-accept interruption retained healthy ownership'
+  [ -s "$dir/state/.wake-queue" ] || fail 'post-accept interruption acknowledged queued work'
+  finish "$dir"
+  pass 'post-accept interruption revokes the owner before continuation commit'
+}
+
 test_uncertain_session_inert() {
   local dir pid
   for pid in '' 99999999 malformed; do
@@ -341,6 +370,8 @@ test_cleanup_cancellation_revokes_handling
 test_singleton
 
 test_expired_successor_requires_replacement_generation
+test_health_challenge_rejects_replaced_generation
+test_post_accept_interruption_revokes_owner
 test_uncertain_session_inert
 
 test_identity_mismatch_never_waits_on_live_process
