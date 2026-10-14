@@ -72,12 +72,12 @@ wait_condition() {
   sleep 1
  done
 }
-wait_condition '[ -s "$PROJECT/state/.watch.lock/pid" ] && [ -f "$PROJECT/state/.last-watcher-beat" ]' 120
+wait_condition "[ -s \"\$PROJECT/state/.watch.lock/pid\" ] && [ -f \"\$PROJECT/state/.last-watcher-beat\" ]" 120
 printf '%s watcher-start\n' "$(date +%s)" >> "$PROJECT/timeline"
 printf 'done: native Claude post-turn event\n' > "$PROJECT/state/event.status"
 printf '%s event-written\n' "$(date +%s)" >> "$PROJECT/timeline"
-wait_condition '[ -s "$PROJECT/handled" ]' 120
-wait_condition '[ ! -e "$PROJECT/state/.watch.lock" ]' 15
+wait_condition "[ -s \"\$PROJECT/handled\" ]" 120
+wait_condition "[ ! -e \"\$PROJECT/state/.watch.lock\" ]" 15
 [ ! -e "$PROJECT/codex-invoked" ] || { echo 'not ok - Claude invoked Codex adapter'; exit 1; }
 [ ! -e "$PROJECT/state/.codex-stop.json" ] || { echo 'not ok - Claude created Codex handling state'; exit 1; }
 [ ! -s "$PROJECT/state/.wake-queue" ] || { echo 'not ok - model did not acknowledge event'; exit 1; }

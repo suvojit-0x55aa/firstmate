@@ -340,7 +340,7 @@ test_replacement_session_fails_closed_on_old_owner() {
 }
 
 test_record_mutation_interruption_clears_ownership() {
-  local dir owner before
+  local dir owner
   dir=$(fixture dead-owner)
   append_wake "$dir/state" check dead 'check: dead owner'
   run_stop "$dir"
