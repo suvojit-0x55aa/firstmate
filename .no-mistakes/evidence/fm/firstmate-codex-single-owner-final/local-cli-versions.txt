@@ -1,0 +1,4 @@
+codex-cli 0.162.1
+2.1.299 (Claude Code)
+GNU bash, version 3.2.57(1)-release (arm64-apple-darwin25)
+Python 3.14.7

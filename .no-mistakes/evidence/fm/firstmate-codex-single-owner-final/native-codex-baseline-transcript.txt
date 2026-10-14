@@ -1,0 +1,28 @@
+Verified on 2026-10-14 with `codex-cli 0.162.1`, macOS Bash `3.2.57(1)-release`, and Python `3.14.7`.
+The opt-in guard uses the named-session Herdr lab helper, installs its teardown trap before provisioning, and checks the default-fleet tripwire after teardown.
+It preserves the tracked Stop command and timeout while substituting isolated session initialization.
+
+```sh
+HERDR_LAB_HELPER='/Users/shin/Documents/Project/firstmate/bin/fm-herdr-lab.sh' FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh
+```
+
+Exact successful output:
+
+```text
+codex-cli 0.162.1
+1791995010 stop-start
+1791995013 watcher-start
+1791995192 stop-end 2
+182 quiet-renewal-seconds
+1791995198 stop-start
+1791995199 stop-end 2
+1791995199 event-enqueued
+1791995206 stop-start
+1791995208 deliberate-interrupt
+1791995194 handled
+1791995203 handled
+ok - native Codex Stop delivered quiet renewal and post-turn event, then cancelled on Escape
+```
+
+The two `handled` entries come from real model tool calls following native Stop feedback, not from hook output alone.
+The guard checks the watcher's process identity after Escape and refuses an extra continuation or a resurrected watcher.

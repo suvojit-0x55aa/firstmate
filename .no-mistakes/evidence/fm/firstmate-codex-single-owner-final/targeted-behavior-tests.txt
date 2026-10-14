@@ -1,0 +1,487 @@
+FM_TEST_BEGIN 2026-10-14T19:18:24Z tests/fm-codex-stop.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - Codex Stop delivers queued work with or without remaining tasks, without acknowledgement
+ok - quiet checkpoint requests native renewal and leaves bounded handling proof
+ok - post-turn final wake survives loss of supervision need
+case - cancellation TERM
+case - cancellation KILL
+/var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-codex-stop.lBEB6j/codex: line 12: 71081 Killed: 9               "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload" > "$FM_HOME/out" 2>&1
+case - cancellation afk
+case - cancellation replacement
+case - cancellation no-need
+ok - cancellation, forced death, away mode, generation replacement and no need stand down
+ok - competing session cannot displace the singleton Stop owner
+ok - expired handling proof fails closed; successor binds its own generation
+ok - health challenge fails closed immediately after generation replacement
+ok - post-accept interruption revokes the owner before continuation commit
+ok - dead, malformed and uncertain session owners remain inert
+ok - identity mismatch fails closed and reaps the adapter-owned child group
+ok - stale, reused and uncertain record identities cannot confer ownership or block successor
+ok - one live owner serializes native response and successor handoff without acknowledging work
+ok - record refusal fails closed and releases exclusion for a later successor
+ok - a replacement generation cannot inherit an old frozen owner
+ok - owner death revokes health without an orphan record writer; kernel releases successor exclusion
+FM_TEST_END 2026-10-14T19:19:17Z tests/fm-codex-stop.test.sh exit=0 duration_ms=53439 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:19:17Z tests/fm-turnend-guard.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - fm_supervision_unhealthy: false with no state/*.meta at all
+ok - fm_supervision_unhealthy: true with in-flight task and no beacon ever
+ok - fm_supervision_unhealthy: true with in-flight task and a beacon far outside the grace window
+ok - fm_supervision_unhealthy: false with in-flight task and a fresh beacon
+ok - fm_supervision_status: FM_SUP_QUEUE_PENDING tracks state/.wake-queue
+ok - fm_supervision_needed: X-mode relay poll needs supervision
+ok - fm_supervision_unhealthy: source-only home needs supervision
+ok - fm-turnend-guard: silent no-op with nothing in flight
+ok - fm-turnend-guard: blocks when a fresh beacon has no live watcher lock
+ok - fm-turnend-guard: non-Claude path blocks a source-only home
+ok - fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh
+ok - fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon
+ok - fm-turnend-guard: healthy non-Claude harness paths ignore Claude episode contention
+ok - fm-turnend-guard: blocks on a live watcher lock with an ancient beacon
+ok - fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy
+ok - fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state
+ok - fm-turnend-guard: X-mode repair reason sources the cadence config
+ok - fm-turnend-guard: X-mode-only supervision remains guarded in default mode
+ok - fm-turnend-guard: ignores stale repo-root state when FM_HOME is set
+ok - fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state
+ok - fm-turnend-guard default mode: stop_hook_active=true keeps the bounded Grok retry
+ok - fm-turnend-guard --codex: repeated Stop routes to native adapter and unowned sessions stay inert
+ok - fm-turnend-guard: blocks a blind turn end in a secondmate's own home (.fm-secondmate-home no longer excludes it)
+ok - fm-turnend-guard: idle-by-default - silent in a secondmate home with nothing in flight
+ok - fm-turnend-guard: stop_hook_active=true allows the stop in a secondmate home (never blocks twice in one turn)
+ok - fm-turnend-guard: secondmate deferred-death recovery - silent while watched, forces re-arm once the watcher exits
+ok - fm-turnend-guard: inert in a secondmate's own child worktree (linked git worktree) even when unhealthy
+ok - fm-turnend-guard: blocks a blind turn end in a treehouse-leased LINKED secondmate home (marker force-include)
+ok - fm-turnend-guard: an invalid (empty) marker cannot spoof inclusion; linked worktree stays exempt
+ok - fm-turnend-guard: a non-ASCII marker cannot spoof inclusion; linked worktree stays exempt
+ok - fm-turnend-guard: inert in a crewmate/scout task worktree (linked git worktree) even when unhealthy
+ok - fm-turnend-guard: fails open (never blocks) when jq is missing
+ok - fm-turnend-guard: silent no-op on empty stdin
+ok - fm-turnend-guard: runs well under the generous timing margin (0s)
+ok - fm-turnend-guard-grok: forces one explicitly marked same-session resume when the shared predicate blocks
+ok - fm-turnend-guard-grok: legacy environment loop guard prevents a nested resume loop
+ok - fm-turnend-guard-grok: native false delegates blocking feedback with zero resume processes
+ok - fm-turnend-guard-grok: native true remains bounded and starts no resume process
+ok - fm-turnend-guard-grok: both spellings are typed and camelCase has deterministic precedence
+ok - fm-turnend-guard-grok: malformed, invalidly typed, and missing-prerequisite payloads start neither path
+ok - fm-turnend-guard-grok: missing jq and no-supervision-needed stops stay silent and bounded
+ok - tracked .claude/settings.json entries: 5 inert under grok, the documented subagent exception still armed, all live under Claude
+ok - .codex/hooks.json: Stop hook uses hook process root when payload cwd is outside
+ok - .codex/hooks.json: Stop hook ignores nested git root guard scripts
+ok - .opencode primary plugin: guard path is anchored to worktree, not directory
+ok - .pi primary extension: no-tool and multi-tool runs each inject exactly one guard follow-up
+ok - .pi primary extension: delivery failure resets the logical-run latch
+ok - fm-turnend-guard --claude: re-blocks a loop-guarded stop while unhealthy and unclaimed (incident regression)
+ok - fm-turnend-guard --claude: X-mode-only homes re-block when auto-arm recovery is absent
+ok - fm-turnend-guard --claude: a live arming epoch advances once and repeated observation is idempotent
+ok - fm-turnend-guard --claude: repeated failed-to-arming races make bounded monotonic progress
+ok - fm-turnend-guard --claude: terminal owner boundary excludes a concurrent start without deadlock
+ok - fm-turnend-guard --claude: fresh rewake epoch prevents a duplicate continuation for the same event
+ok - fm-turnend-guard --claude: an abandoned auto-arm claim no longer allows a blind stop (incident regression)
+ok - fm-turnend-guard --claude: a claim whose pid was reused stops counting as recovery even while its entry reads arming
+ok - fm-turnend-guard --claude: a hung owner frozen at arming with no watcher beat no longer allows a blind stop
+ok - fm-turnend-guard --claude: a live open generation claim owns recovery with no lock held
+ok - fm-turnend-guard --claude: a stuck generation claim no longer allows a blind stop
+ok - fm-turnend-guard --claude: the terminal path clears an abandoned claim instead of stepping aside silently
+ok - fm-turnend-guard --claude: fresh failed epochs preserve and advance monotonic fail-open progression
+ok - fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery
+ok - fm-turnend-guard --claude: reset contention preserves all episode state until retry
+ok - fm-turnend-guard --claude: concurrent auto-arm and guard resets are idempotent and deadlock-free
+ok - fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop
+ok - fm-turnend-guard --claude: budget exhaustion alone cannot permit a blind stop
+ok - fm-turnend-guard --claude: verified fail-open is loud, bounded, attended, and non-repeating
+ok - fm-turnend-guard --claude: fail-open requires both exhausted retries and consumed notice
+ok - fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open
+ok - fm-turnend-guard --claude: positive watcher recovery resets failure episode state
+ok - fm-turnend-guard --claude: bounded claim wait avoids a token-consuming forced continuation
+ok - fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops
+FM_TEST_END 2026-10-14T19:20:24Z tests/fm-turnend-guard.test.sh exit=0 duration_ms=66338 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:20:24Z tests/fm-supervision-instructions.test.sh family=pure-contract-unit expected_gate_skip=none
+ok - renderer prints exactly the selected harness block
+ok - renderer falls back to unknown.md for unverified harness names
+ok - renderer includes read-only, afk, and effective x-mode current-state stanzas
+ok - renderer repair-line mode is harness-aware and honors conditional state
+ok - renderer preserves every harness ordinary-continuation and missing-cycle repair path
+ok - pi-signed keeps its identity while sharing Pi's supervision protocol
+ok - grok supervision is Claude-shaped background notify with passive Stop-hook backstop
+ok - grok rendered command sources the effective x-mode config
+ok - pi supervision snippet renders the effective extension path
+FM_TEST_END 2026-10-14T19:20:24Z tests/fm-supervision-instructions.test.sh exit=0 duration_ms=736 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:20:24Z tests/fm-secondmate-harness.test.sh family=secondmate expected_gate_skip=none
+ok - A1 fm-harness.sh secondmate resolves the fallback chain; crew mode unchanged
+ok - fm-harness detects only Cursor Agent CLI's exact invocation marker
+ok - C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)
+ok - pi-signed identity: authoritative launch selection distinguishes shared wrapper ancestry
+ok - harness identity: dash-leading ps command names are basename operands, not options
+ok - B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics
+ok - B2 spawn: secondmate runs the secondmate harness; its home inherits declared config
+ok - B3 spawn: an absent secondmate-harness falls back to the crew harness (backward-compat)
+ok - B4 spawn: no config at all -> own harness and no propagation side effects
+ok - B5 spawn: an explicit per-spawn harness arg overrides config/secondmate-harness
+ok - B6 spawn: an unverified resolved secondmate harness is refused (guard intact)
+skip: cursor executable not resolvable in this environment, so the launch could not be built
+ok - B5b spawn: FM_BACKEND wins over inherited config/backend
+ok - B5c spawn: explicit --backend wins over FM_BACKEND and inherited config/backend
+ok - C2 spawn: a bare harness-only secondmate-harness file launches with no model/effort flag (backward-compat)
+ok - C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta
+ok - C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta
+ok - C5 spawn: an explicit --model overrides config/secondmate-harness's model token; the file's effort token still applies
+ok - C6 spawn: an explicit --effort overrides config/secondmate-harness's effort token; the file's model token still applies
+ok - C7 spawn: an explicit --harness starts with clean model/effort defaults
+ok - C8 spawn: an explicit --harness still honors explicit model/effort flags
+ok - C9 spawn: secondmate launch pins supervision to its own harness
+ok - C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature
+ok - B7 bootstrap sweep pushes, re-converges, and mirrors absence; never inherits secondmate-harness
+ok - B8 bootstrap sweep propagates config even when the home's tracked files are already current
+ok - B9 bootstrap sweep defers new inherited config until the home ignores it
+ok - B10 bootstrap sweep materializes and inherits the startup-memory default while fast-forwarding
+ok - B12b backend inheritance: present values and primary absence converge exactly
+ok - B12c presentation inheritance: the primary default converges on, and only an explicit opt-out propagates off
+ok - B11 bootstrap sweep surfaces config propagation failures
+ok - B11 bootstrap rereads completed config writes after partial propagation
+ok - B12 config-push propagates via shared live discovery, reports items, rereads on change only, and does not fast-forward
+ok - B13 config-push reports dirty, non-allowing, and invalid homes without failing warnings-only runs
+ok - B14 config-push exits nonzero on real propagation errors
+ok - B14 config-push rereads completed config writes after partial propagation
+ok - B15 config reread is per-home, exact-byte, ordered, and pointer-only
+ok - B16 config reread isolation, ABSENT, generation safety, send failure, and retry
+ok - B20 config reread publication failures retain exact generations for retry
+ok - B21 config reread instruction-write failures retain exact retry generations
+ok - B21 config reread preserves exact bytes when temporary adoption also fails
+ok - B21 config reread serializes concurrent propagation and delivery
+ok - B22 full config reread retry queues drain before new publication
+ok - B23 mixed config reread delivery failures still bound sent history
+ok - B26 config reread delivery stops after the oldest failed generation
+ok - B17 config reread skips unchanged homes and reads destination post-write bytes
+ok - B18 bootstrap config reread path works; spawn flexibility remains defaults-only
+ok - B19 bootstrap respawns before inherited-config reread
+ok - B25 spawn quarantines stale rereads without blocking relaunch
+ok - B24 bootstrap detect-only mode remains filesystem read-only
+# all fm-secondmate-harness tests passed
+FM_TEST_END 2026-10-14T19:25:06Z tests/fm-secondmate-harness.test.sh exit=0 duration_ms=281152 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:25:06Z tests/fm-claude-stop-autoarm.test.sh family=unclassified expected_gate_skip=none
+ok - auto-arm: inert in a linked child worktree even when in-flight
+ok - auto-arm: inert with no session lock
+ok - auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming
+ok - auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home
+ok - auto-arm: inert while AFK owns supervision
+ok - auto-arm: stale-owner recovery leaves the AFK and supervision-need gates unchanged
+ok - auto-arm: resolves the outermost pid of a nested contiguous claude ancestry (bg-spare chain)
+ok - auto-arm: inert with nothing in flight and no X-mode need
+ok - auto-arm: actionable close translates to exactly one exit-2 rewake with reason
+ok - auto-arm: actionable close survives a healthy successor without duplicate delivery
+ok - auto-arm: bounded failure verification emits one automatic-mechanism alarm
+ok - auto-arm: consecutive failures keep Stop-owned retry without repeating notice
+ok - auto-arm: marker-write refusal defers delivery until one successor commits the notice
+ok - auto-arm: unverified clean close exhausts retries and fails closed
+ok - auto-arm: post-alarm actionable outcomes cannot continue or reset failure state
+ok - auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle
+ok - auto-arm: budget contention preserves the episode and forces a reset retry
+ok - auto-arm: owner-mutex contention preserves successor episode state
+ok - auto-arm: X-mode poll need arms the cycle even with no tasks in flight
+ok - auto-arm: concurrent firings admit one owner and one rewake translation
+ok - auto-arm: an abandoned owner claim is reclaimed so a lapsed cycle re-arms
+ok - auto-arm: a legacy owner still arming is never reclaimed while its watcher keeps beating
+ok - auto-arm: a fresh legacy arming claim is never reclaimed while its startup window is still open
+ok - auto-arm: a live claim the ledger does not name is never reclaimed
+ok - auto-arm: a claim whose pid was reused is reclaimed even while its ledger entry still reads arming
+ok - auto-arm: a reused-pid claim is reclaimed even with no ledger entry to prove it
+ok - auto-arm: an identity-matched owner still arming is never reclaimed
+ok - auto-arm: the guard's terminal-check claim is never reclaimed
+ok - auto-arm: a stuck live legacy owner is retired via TERM and its lock reclaimed
+ok - auto-arm: a SIGSTOPped legacy owner is reclaimed with TERM pending and dies on continue
+ok - auto-arm: a live open generation claim defers concurrent firings with no lock held
+ok - auto-arm: a hung generation owner with no watcher beat is superseded so re-arming self-heals
+ok - auto-arm: an identityless arming ledger never defers the gate (reused-pid loophole closed)
+ok - auto-arm: a superseded owner never re-invokes the arm and leaves its successor's claim untouched
+ok - auto-arm: a superseded owner goes silent - one supersession episode, one translation, no held mutex
+ok - auto-arm: need vanishing mid-cycle closes without a rewake
+ok - auto-arm: mid-cycle AFK hands triage to the daemon with no rewake
+ok - auto-arm: active in a marked secondmate home
+ok - fm-lock: shared session-lock lib preserves the status path
+FM_TEST_END 2026-10-14T19:26:09Z tests/fm-claude-stop-autoarm.test.sh exit=0 duration_ms=63303 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:26:09Z tests/fm-wake-queue.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - an abandoned same-process lock hold is reclaimed; a parent's live hold is not
+ok - actual shell pid owns the lock, including subshell reclaim and release
+ok - foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy
+ok - secondmate stall markers reject symlinks without touching their targets
+ok - stall publication acknowledgement closes the pre-marker crash window
+ok - empty prefix mate cleanup preserves another mate's stall receipt
+ok - self-announced appends suppress only their own bytes and fail toward waking
+ok - historical annotations replay nothing already announced and keep everything new
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 40 --recovery-generation 43586.1792005996.9aAOQe
+ok - concurrent append plus drain preserves durable records through acknowledgement
+ok - signal written while no watcher runs is caught on next run
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 11035.1792006028.gfdnK6
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 4s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  After draining queued wakes, repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - stale wake is queued before suppressor state is advanced
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 20071.1792006032.7MMj5A
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 2s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  After draining queued wakes, repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else.
+ok - a not-provably-working stale wake is queued before its suppressor is advanced
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 28024.1792006036.kAK6sc
+ok - registered custom check output is queued before cadence suppression
+ok - concurrent drains replay until one post-handling acknowledgement consumes records
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 4 --recovery-generation 36950.1792006040.TM1YE1
+ok - drain collapses obvious duplicate heartbeat and signal records
+ok - drain asserts watcher liveness: warns on a lapse, stays silent for a live watcher with a fresh beacon
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 8 --recovery-generation 41957.1792006043.zS8Jxb
+ok - structural signal enrichment is separate, deduped, home-local, and tier-zero for other wakes
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 13 --recovery-generation 46921.1792006046.ZohA0M
+ok - every readable unread status line is annotated in full while invalid status files preserve their raw wakes
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 55665.1792006050.VS5weC
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 55665.1792006050.VS5weC
+ok - slow annotation releases the append lock and a deleted status file fails open
+ok - a branch-actor scoped ack never swallows an unacked main-owned row, and main's later drain sees exactly what remains
+ok - main drain and acknowledgement exclude an active branch grant
+ok - branch grant cannot take a row already claimed by main
+ok - actor ownership filtering precedes same-key deduplication
+ok - main reclaims rows granted to an exited branch owner
+ok - a branch-actor drain with no eligible-row snapshot refuses loudly instead of draining nothing
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation existing
+ok - wake append publishes atomic recovery evidence before durable rows
+ok - wake drain: generation-less legacy wakes are adopted and acknowledged
+ok - wake drain: a stale acknowledgement cannot retire or consume a newer recovery episode
+ok - wake drain: recovery acknowledgement failures are explicit and retryable
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 3486.1792006086.GAfJAV
+ok - interruptions preserve durable rows until post-handling acknowledgement
+FM_TEST_END 2026-10-14T19:28:14Z tests/fm-wake-queue.test.sh exit=0 duration_ms=125365 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:28:14Z tests/fm-watch-checkpoint.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - quiet checkpoint exits 124 with a clean checkpoint line and no live lock
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 14125.1792006099.AmRFgZ
+ok - checkpoint passes through a real watcher wake and leaves the queue for drain
+ok - checkpoint preserves watcher environment for registered custom checks
+ok - checkpoint rejects an existing watcher singleton as unowned
+ok - Codex continuity: two native actionable exits each preserve acknowledgement and reject a duplicate owner
+FM_TEST_END 2026-10-14T19:28:41Z tests/fm-watch-checkpoint.test.sh exit=0 duration_ms=26298 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:28:41Z tests/fm-session-lock-ancestry.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - session-lock: a version-named Claude Code session is identified from its install path and argv[0]
+ok - session-lock: ordinary script paths under a harness directory are not harness processes
+ok - session-lock: ownership stops at the first non-harness gap above the contiguous run
+ok - session-lock: a live version-named session holding the lock is not mistaken for a stale owner
+ok - session-lock e2e: a version-named session claims the home and arms supervision
+ok - session-lock e2e: a session parented by a harness-named daemon claims the home and arms supervision
+ok - session-lock e2e: a version-named session under a harness-named daemon keeps its own lock
+FM_TEST_END 2026-10-14T19:28:48Z tests/fm-session-lock-ancestry.test.sh exit=0 duration_ms=7096 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:28:48Z tests/fm-session-start.test.sh family=session-bootstrap expected_gate_skip=none
+ok - context digest distinguishes ABSENT, empty-but-present, and populated files
+ok - a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest
+ok - session start stays read-only when lock ownership cannot be published
+ok - locked session start freezes trace context and lock refusal leaves it unchanged
+ok - concurrent session-lock acquisition admits exactly one live harness
+ok - digest sections are ordered safety-preamble first, live fleet state before curated memory
+ok - the read-once contract is stated once, ahead of the sources it governs
+ok - session start: configured and auto-detected Herdr homes never require tmux
+ok - session start: an absent recorded tmux window relaunches its Pi secondmate exactly once, off the blocking path
+ok - session start: a deferred relaunch is always reported, so the digest's stale endpoint record cannot stand
+ok - session start: an unreachable host delays a reported check, not the digest
+ok - session start: a deferred result the digest outran still reaches the agent as a wake
+ok - session start: a read-only session declares its skipped network checks rather than dropping them
+ok - session start: the tasks-axi compatibility verdict is computed once and reused
+ok - session start: an existing ambiguous Pi process prevents duplicate recovery
+ok - session start: transient tmux unreadability never licenses a relaunch
+ok - session start: the proven bare-shell recovery path remains intact
+ok - session start: a confirmed Herdr husk is closed and relaunched
+ok - status tail is bounded to the configured line count, with the full log path always printed
+ok - status tail lines are capped with a truncation marker while the full log stays reachable
+ok - orphan status logs are printed once with bounded tails
+ok - a secondmate charter without a ## Digest source heading changes nothing
+ok - an opted-in secondmate's digest source prints the correct overdue count and due-today title
+ok - a vault rooted under an Archive/ ancestor still counts its own tasks
+ok - an unreadable declared digest-source path discloses instead of reporting zero
+ok - a malformed or missing declared digest-source path fails safely and omits only that secondmate's section
+ok - a remote secondmate record is skipped rather than scanned against the local filesystem
+ok - a scan-failure disclosure keeps its reason when a long declared path hits the per-line cap
+ok - tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one
+ok - herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one
+ok - fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim
+ok - locked Pi session start replays unread branch outcomes once and sweeps only dead leases
+ok - non-Pi session start neither sweeps nor replays Pi branch state
+ok - compatible tasks-axi backlog rendering drops done rows and keeps every in-flight, held, and blocked row
+ok - the startup backlog bound cuts only dispatchable queued rows and discloses the remainder exactly
+ok - manual backlog rendering drops done rows, keeps every held or blocked title line, and bounds the rest
+ok - unavailable or incompatible tasks-axi falls back to compact manual backlog rendering
+ok - an empty fleet reports (none) for in-flight tasks and an absent AFK flag
+ok - session start emits X-mode cadence guidance in the harness supervision block
+ok - next step delegates watcher ownership to the AFK daemon
+ok - session start emits exactly one detected harness block and reports Pi extension load state
+ok - session start preserves pi-signed primary identity while applying Pi extension guarantees
+ok - session start rejects stale Pi loaded markers
+ok - session start accepts current Pi markers written before lock acquisition
+ok - session start rejects Pi sessions missing the turn-end guard marker
+ok - session start rejects Pi loaded markers from previous sessions
+ok - the pure-Bash watchdog bounds session start, kills its hung grandchild, and emits the truncation contract
+ok - the portable timeout path force-kills a command that ignores TERM
+ok - a session start inside its budget prints no truncation banner
+ok - the runtime bound leaves enough ancestry headroom for a deeply nested session to take the lock
+ok - --reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes
+ok - true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract
+ok - read-only Pi compact refreshes against the rebuilding session identity without mutation
+ok - Codex reset sources do not claim an unavailable instruction-refresh channel
+ok - instruction baselines require SHA-256 and successful startup completion
+ok - --reemit re-verifies lock ownership and keeps repair ownership with whoever holds it
+# fm-session-start.test.sh: all assertions passed
+FM_TEST_END 2026-10-14T19:34:55Z tests/fm-session-start.test.sh exit=0 duration_ms=367090 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:34:55Z tests/fm-watcher-lock.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - simultaneous watcher starts leave exactly one live process
+ok - fm_pid_identity real ps fallback is locale-invariant
+ok - fm_pid_identity is locale-invariant across LC_ALL/LC_TIME
+ok - /proc process identity ignores simulated btime changes
+ok - /proc process identity detects pid reuse
+ok - MSYS /proc process identity regression skipped on non-Windows host
+ok - killed watcher stale lock is reclaimed
+tests/fm-watcher-lock.test.sh: line 1061: 96598 Killed: 9               FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_remove_path() {
+      if [ "$1" = "$STATE/.watch.lock" ]; then
+        kill -KILL "${BASHPID:-$$}"
+      fi
+      return 1
+    }
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" > /dev/null 2>&1
+ok - stale watcher reclaim publishes durable recovery evidence before clear
+ok - live watcher lock with stale heartbeat is actionable
+ok - guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh
+ok - concurrent fm_lock_try_acquire yields exactly one winner
+ok - dead-pid stale lock is reclaimed by a single acquirer
+ok - concurrent stale-lock steal yields exactly one winner
+ok - live steal mutex is not reclaimed
+ok - live-held lock is not stolen
+ok - empty mid-acquire lock keeps a minimum grace
+ok - late original claimant cannot claim a recreated lock
+ok - paused mid-acquire claimant backs off to active stealer
+ok - watch restart preserves recovery without signaling a reused pid
+ok - watch restart attaches to a verified healthy peer and later surfaces a successor gap
+ok - watcher self-evicts when the lock pid no longer names it
+ok - arm turns clean self-eviction without a successor into a typed failure
+ok - arm attaches to a live fresh watcher and fails loudly when that cycle has no successor
+ok - attached arm signals record a classified lifecycle entry
+ok - arm starts cleanly and resurfaces recovery after a dead-pid lock
+ok - arm cleans child watcher and temp output on HUP
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 90978.1792006559.w805Ig
+ok - arm propagates an immediate watcher wake before confirmation
+ok - arm attaches to a peer watcher after child stands down and surfaces a missing successor
+watcher: lock held by live pid 10811 but heartbeat is stale for 845341573s (>300s); inspect or stop that watcher before re-arming.
+ok - arm reports FAILED and exits non-zero when no fresh watcher can be confirmed
+ok - cycle-exit ledger links a verified successor and remains size-capped
+ok - SIGSTOP distinguishes live PID from stale beacon and termination records the exit class
+FM_TEST_END 2026-10-14T19:36:49Z tests/fm-watcher-lock.test.sh exit=0 duration_ms=114098 gate_skip=false
+FM_TEST_BEGIN 2026-10-14T19:36:49Z tests/fm-teardown.test.sh family=pr-forge expected_gate_skip=none
+ok - local-only worktree with HEAD on a fork remote is torn down (fix holds)
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 1s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ok - teardown prompts tasks-axi backlog refresh when compatible
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ok - teardown honors config/backlog-backend=manual even when tasks-axi is compatible
+ok - local-only worktree with truly unpushed work is refused (safety preserved)
+ok - local-only worktree with work merged into local main is torn down (no regression)
+ok - no-mistakes worktree with HEAD on origin is torn down (no regression)
+ok - no-mistakes worktree with genuinely unlanded work is refused (safety preserved)
+ok - local-only worktree with unpushed work is torn down under --force (escape hatch)
+ok - teardown completes when an exact busy-state sidecar is already absent
+ok - herdr teardown removes pane-owned escalation dedupe state
+ok - herdr flat teardown refuses before returning the isolated copy under lock contention and the retry completes cleanly
+ok - herdr flat teardown never erases records when pane presence is unparseable
+ok - herdr flat teardown preflight refuses before every destructive change
+ok - forced secondmate teardown preflights every Herdr child before cleanup mutation
+ok - forced secondmate teardown holds every descendant lifecycle and metadata lock
+ok - forced secondmate teardown retains Herdr child identity until exact pane disappearance
+ok - forced teardown retains a nested secondmate home and its grandchild's Herdr identity when the grandchild close is unconfirmed
+ok - herdr projection teardown retires its journal only after confirming the exact recorded pane is gone
+ok - herdr projection teardown retains every record when post-close presence is unknown
+ok - herdr projection teardown surfaces failed focus restoration without turning confirmed cleanup into a hard failure
+ok - squash-merged + deleted-branch worktree (PR merged) is torn down (the fix)
+ok - squash-merged PR accepts a local HEAD that is an ancestor of the final PR head
+ok - teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded
+ok - squash-merged PR accepts replayed unpushed local patches contained in the PR head
+ok - merged PR does not allow teardown after a later local commit
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 1s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WARNING: watcher still down (same stale episode; last beat: 3s ago, grace 300s) - full banner already printed this episode.
+ok - fm-pr-check does not refresh PR head after HEAD moves
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ok - fm-pr-check records the remote PR head when the local worktree lags
+ok - worktree whose content already landed in the default branch is torn down (content fallback)
+ok - content fallback refreshes origin default before comparing trees
+ok - dirty worktree is refused even when its committed work has landed (dirty always wins)
+ok - gh lookup error with content not in default refuses (fail-safe)
+ok - provably-stale worktree index.lock (old, no live holder) is cleared and teardown succeeds
+ok - live-held worktree index.lock is never removed and teardown refuses
+ok - lsof errors leave worktree index.lock in place and refuse teardown
+ok - stale lock cleanup rechecks and refuses dirty worktree before return
+ok - normal repo index.lock is resolved from the worktree and cleared when stale
+ok - lock mtime read failures leave worktree index.lock in place and refuse teardown
+ok - transient index.lock cleared after first failed return is retried successfully without force-remove
+ok - persistent index.lock exhausts retries and refuses without force-removing the lock
+ok - empty retry wait overrides use the default without aborting teardown
+ok - fractional legacy retry wait remains supported without arithmetic
+ok - a task's own parked no-mistakes run is aborted, not orphaned, before the worker is removed
+ok - teardown refuses before reap or removal when a task-owned run remains parked
+ok - a different run cannot confirm the targeted abort
+ok - empty post-abort status is not accepted as confirmation
+ok - the CLI's exact run-not-found signal confirms completion
+ok - a parked run on another branch is never aborted by this task's teardown (ownership is precise)
+ok - a task-owned autonomous running step is left alone rather than aborted
+ok - a leaked descendant process rooted under the task's worktree is reaped by teardown, not left surviving
+ok - a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too
+ok - missing lsof falls back to reaping the tmux pane process group
+ok - an erroring lsof scan refuses teardown and preserves the task
+ok - a reused pid with a different start time is never force-killed
+ok - an exec change preserves birth identity and the process is reaped
+ok - a process spawned during grace is reaped on a later pass
+ok - persistent leaked processes refuse teardown after bounded retries
+ok - a process exiting during identity lookup does not block teardown
+ok - the run abort and the leaked-process reap both complete before the destructive worktree return
+FM_TEST_END 2026-10-14T19:41:14Z tests/fm-teardown.test.sh exit=0 duration_ms=264585 gate_skip=false
+FM_TEST_SUMMARY total=11 failed=0 skipped_gate=0 duration_ms=1370210
+FM_TEST_SUMMARY_FAMILY family=pr-forge count=1 duration_ms=264585 failed=0
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=736 failed=0
+FM_TEST_SUMMARY_FAMILY family=secondmate count=1 duration_ms=281152 failed=0
+FM_TEST_SUMMARY_FAMILY family=session-bootstrap count=1 duration_ms=367090 failed=0
+FM_TEST_SUMMARY_FAMILY family=unclassified count=1 duration_ms=63303 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=6 duration_ms=392634 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-session-start.test.sh duration_ms=367090
+FM_TEST_SLOWEST rank=2 script=tests/fm-secondmate-harness.test.sh duration_ms=281152
+FM_TEST_SLOWEST rank=3 script=tests/fm-teardown.test.sh duration_ms=264585
+FM_TEST_SLOWEST rank=4 script=tests/fm-wake-queue.test.sh duration_ms=125365
+FM_TEST_SLOWEST rank=5 script=tests/fm-watcher-lock.test.sh duration_ms=114098
+FM_TEST_SLOWEST rank=6 script=tests/fm-turnend-guard.test.sh duration_ms=66338
+FM_TEST_SLOWEST rank=7 script=tests/fm-claude-stop-autoarm.test.sh duration_ms=63303
+FM_TEST_SLOWEST rank=8 script=tests/fm-codex-stop.test.sh duration_ms=53439
+FM_TEST_SLOWEST rank=9 script=tests/fm-watch-checkpoint.test.sh duration_ms=26298
+FM_TEST_SLOWEST rank=10 script=tests/fm-session-lock-ancestry.test.sh duration_ms=7096
+FM_TEST_SLOWEST rank=11 script=tests/fm-supervision-instructions.test.sh duration_ms=736
