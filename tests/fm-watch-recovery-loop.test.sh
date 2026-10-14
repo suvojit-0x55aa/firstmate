@@ -3,7 +3,7 @@
 # handling successor that keeps supervising instead of going blind, and the
 # acked:* re-arm cooldown that keeps a merely non-empty wake queue from
 # forcing a fresh downtime announcement on every single poll, and the
-# same-session Codex checkpoint boundary that must not re-open an announced
+# same-session Codex Stop-owned watch boundary that must not re-open an announced
 # episode.
 set -u
 
@@ -282,7 +282,7 @@ test_acked_rearm_is_throttled_by_cooldown() {
 }
 
 # start_nonsuccessor_watcher <dir> <out>: start the real watcher the way the
-# Codex foreground checkpoint and Claude Stop auto-arm do between turns - a
+# Codex native Stop owner and Claude Stop auto-arm do between turns - a
 # plain start with no FM_WATCH_HANDLING_SUCCESSOR - and set WATCHER_CHILD to its
 # pid. It sets a variable instead of printing so the watcher stays this shell's
 # own child and `wait` really waits for it to exit.
@@ -336,8 +336,8 @@ marker_generation() {
 }
 
 # T4: an announced-but-unacked episode must not be re-opened by the next
-# ordinary turn of the SAME firstmate session. Each Codex foreground checkpoint
-# starts its watcher as a non-successor; before the fix, the checkpoint after a
+# ordinary turn of the SAME firstmate session. Each Codex Stop-owned watch
+# starts as a non-successor; before the fix, the watch after a
 # quiet close minted a fresh generation and re-fired check: rearm-resurface
 # while the queue stayed non-empty. A different or unverifiable session owner
 # (a genuinely new down stretch) must still re-open and re-announce, and a
