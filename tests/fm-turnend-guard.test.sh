@@ -108,6 +108,7 @@ install_guard_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-codex-stop.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
@@ -440,14 +441,25 @@ test_hook_loop_guard_allows_retry() {
   pass "fm-turnend-guard default mode: stop_hook_active=true keeps the bounded Grok retry"
 }
 
-test_hook_codex_reblocks_retry_until_successor_is_live() {
+test_hook_codex_routes_repeated_stop_to_native_adapter() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-loopguard")
   : > "$dir/state/task1.meta"
   out=$(run_codex_hook "$dir" true); status=$?
-  expect_code 2 "$status" "Codex retry must remain blocked without a live successor watcher"
-  assert_contains "$out" "TURN WOULD END BLIND" "Codex retry must retain the turn-end alarm"
-  pass "fm-turnend-guard --codex: stop_hook_active=true cannot bypass successor health"
+  expect_code 0 "$status" "Codex Stop without an owning session must remain inert"
+  [ -z "$out" ] || fail "Codex Stop without an owning session emitted a continuation"
+  # Public dispatch must invoke only the Codex adapter and preserve the payload.
+  cat > "$dir/bin/fm-codex-stop.sh" <<'SH'
+#!/usr/bin/env bash
+cat
+printf '\nnative adapter invoked\n'
+exit 2
+SH
+  out=$(run_codex_hook "$dir" true); status=$?
+  expect_code 2 "$status" "Codex guard swallowed native continuation"
+  assert_contains "$out" 'native adapter invoked' 'Codex guard did not route to native adapter'
+  assert_contains "$out" '"stop_hook_active":true' 'Codex guard did not preserve repeated Stop payload'
+  pass "fm-turnend-guard --codex: repeated Stop routes to native adapter and unowned sessions stay inert"
 }
 
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
@@ -1112,9 +1124,22 @@ EOF
 # claim, or a fresh rewake epoch; bounded re-block only when none materialize.
 
 run_hook_claude() {
-  local dir=$1 stop_active=$2 home
+  local dir=$1 stop_active=$2 home rc record
   home=$(cd "$dir" && pwd)
+  cat > "$dir/bin/fm-codex-stop.sh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_HOME/state/codex-adapter-invoked"
+exit 99
+SH
   printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
+  rc=$?
+  for record in "$dir/state/codex-adapter-invoked" "$dir/state"/.codex-stop*; do
+    if [ -e "$record" ]; then
+      printf 'Claude fixture touched Codex continuation state: %s\n' "$record" >&2
+      return 99
+    fi
+  done
+  return "$rc"
 }
 
 seed_claude_failure() {
@@ -1792,7 +1817,7 @@ test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
-test_hook_codex_reblocks_retry_until_successor_is_live
+test_hook_codex_routes_repeated_stop_to_native_adapter
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry

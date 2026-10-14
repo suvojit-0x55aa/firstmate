@@ -549,7 +549,11 @@ test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   [ "$raw_count" -eq 13 ] || fail "missing, unreadable, malformed, empty, or oversized status input hid a raw row"
 
   expected="wake annotation: latest wake-EVENT observed at drain, not current state: huge.status: $(cat "$state/huge.status")"
-  grep -Fx "$expected" "$out" >/dev/null \
+  # BSD grep -Fx can exhaust memory compiling this 20,000-character pattern.
+  # Compare the complete line as data, retaining exact equality and full length.
+  printf '%s\n' "$expected" > "$dir/expected-huge-line"
+  awk 'NR == FNR { expected = $0; next } $0 == expected { found = 1 } END { exit !found }' \
+    "$dir/expected-huge-line" "$out" \
     || fail "the oversized unread status line was truncated or omitted"
   i=1
   while [ "$i" -le 8 ]; do
@@ -1149,6 +1153,33 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
   pass "an abandoned same-process lock hold is reclaimed; a parent's live hold is not"
 }
 
+# Parent observes the kernel child PID independently of Bash's $$ expansion.
+test_lock_owner_pid_is_the_actual_shell() {
+  local dir state child recorded
+  dir=$(make_case actual-shell-owner)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    ( fm_lock_try_acquire "$2/child.lock" || exit 11
+      : > "$2/ready"
+      while [ ! -e "$2/release" ]; do sleep 0.02; done
+      fm_lock_try_acquire "$2/child.lock" || exit 12
+      fm_lock_release "$2/child.lock"
+    ) &
+    child=$!
+    printf "%s\n" "$child" > "$2/expected"
+    wait "$child"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" &
+  child=$!
+  for _ in $(seq 1 100); do [ -e "$state/ready" ] && break; sleep 0.02; done
+  recorded=$(cat "$state/child.lock/pid")
+  [ "$recorded" = "$(cat "$state/expected")" ] || fail 'subshell lock recorded its parent instead of the actual owner'
+  : > "$state/release"
+  wait "$child" || fail 'subshell abandoned-hold recovery or release failed'
+  [ ! -e "$state/child.lock" ] || fail 'subshell failed to release its own lock'
+  pass 'actual shell pid owns the lock, including subshell reclaim and release'
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -1199,6 +1230,7 @@ test_historical_annotation_skips_announced_status() {
 }
 
 test_self_held_lock_reclaims_instead_of_deadlocking
+test_lock_owner_pid_is_the_actual_shell
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash

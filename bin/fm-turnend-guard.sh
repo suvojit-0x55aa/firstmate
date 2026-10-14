@@ -151,6 +151,10 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+if [ "$CODEX_MODE" -eq 1 ]; then
+  exec "$SCRIPT_DIR/fm-codex-stop.sh" <<< "$PAYLOAD"
+fi
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"

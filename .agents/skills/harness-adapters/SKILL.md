@@ -103,7 +103,7 @@ Before inspecting or changing session-open behavior, read `docs/sessionstart-nud
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
 Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
-Codex uses bounded foreground checkpoints through `bin/fm-watch-checkpoint.sh` because Codex cannot reason while a foreground tool call is running.
+Codex uses the native Stop continuation procedure in [`docs/supervision-protocols/codex.md`](../../../docs/supervision-protocols/codex.md).
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
@@ -248,15 +248,14 @@ Raising the luminance threshold is not a fix because muse's real `⟩` sits at a
 `fm_composer_strip_shimmer` in `bin/fm-composer-lib.sh` owns the structural rule that blanks these cells on every styled capture before classification; plain captures cannot see the styling and defer as `unknown`.
 Regression coverage is `tests/fm-composer-lib.test.sh` (`test_matrix_codex_idle_shimmer_is_empty`, `test_matrix_codex_shimmer_keeps_typed_text_pending`, `test_matrix_codex_shimmer_merged_dots_bounded`, `test_matrix_muse_glyph_untouched_by_shimmer_rule`).
 
-**Primary-session guard fact (verified 2026-07-08, codex-cli 0.142.1; strict successor path revalidated 2026-10-10, codex-cli 0.155.1).**
+**Primary-session guard fact (root selection verified 2026-07-08, codex-cli 0.142.1; native continuation verified 2026-10-14, codex-cli 0.162.1).**
 The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh --codex`.
-Codex Stop hooks block on exit 2 and expose `stop_hook_active`, but the strict Codex mode rechecks successor health instead of treating a continuation as an unconditional allow.
+Codex Stop hooks block on exit 2 and expose `stop_hook_active`; the Codex guard delegates every applicable Stop to `bin/fm-codex-stop.sh`.
 Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
 Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
-Codex's primary watcher protocol is `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `bin/fm-watch-arm.sh`.
-The checkpoint is deliberately foreground and bounded so Codex regains control regularly to process user messages and queued wakes.
-Codex 0.155.1 was live-verified to honor repeated Stop continuations for one `turn_id`; the watcher singleton makes a competing checkpoint fail instead of creating concurrent supervision.
+The [Codex protocol](../../../docs/supervision-protocols/codex.md) owns native watcher continuation and cancellation.
+[Supervision verification](../../../docs/verification/supervision.md#codex-native-stop-continuation) records the current CLI proof and exact refresh command.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 

@@ -69,12 +69,9 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
 
-While supervision is needed, Codex runs the guard with `--codex` and may finish only when `fm_watcher_healthy` proves that a live identity-matched checkpoint owns the home.
-An actionable watcher close releases the singleton lock after durably queuing its wake, so handling and acknowledgement do not count as successor ownership.
-The next Stop stays blocked even when `stop_hook_active=true` until Codex starts the next foreground checkpoint and its live watcher acquires that lock.
-Codex 0.155.1 was live-verified to honor consecutive exit-2 Stop continuations for one `turn_id`, with payloads progressing from `stop_hook_active=false` to `true` and remaining `true` on later continuations.
-The first healthy retry allows the Stop, and a competing checkpoint cannot create a second owner because `bin/fm-watch.sh` refuses its singleton acquisition.
-No hook backgrounds a watcher, no actionable wake is suppressed, and the queue acknowledgement contract remains unchanged.
+Codex's `--codex` branch delegates to `bin/fm-codex-stop.sh`, the sole native continuation owner.
+The [Codex protocol](supervision-protocols/codex.md) owns the operating procedure; the adapter header owns its bounded wait, single-owner, cancellation and handling contract.
+The installed-CLI evidence and paired Claude limit are recorded in [supervision verification](verification/supervision.md#codex-native-stop-continuation).
 
 The default shared mode remains Grok's bounded native path.
 In that mode a true loop field lets the second stop finish after one forced continuation.
@@ -168,8 +165,8 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 
 ## Regression coverage
 
-`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, Codex retry blocking until successor ownership, the cooperative `--claude` open-generation claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, generation and legacy claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
-`tests/fm-watch-checkpoint.test.sh` drives two consecutive actionable watcher exits, durable drain acknowledgements, Codex turn-end refusal, successor checkpoint ownership, and duplicate-owner refusal through the public scripts.
+`tests/fm-turnend-guard.test.sh` covers the predicate, main and secondmate primary scope, child-worktree exclusion, `FM_HOME` and `FM_STATE_OVERRIDE` precedence, the live-lock and fresh-beacon guard predicate, Codex routing to native Stop continuation, the cooperative `--claude` open-generation claim wait, monotonic failed-epoch progression, bounded attended fail-open, post-alarm continuation suppression, positive recovery reset, generation and legacy claim cases that must block or clear instead of allowing a blind stop, Pi logical-run latching, missing-`jq` behavior, all five primary registrations, Grok native and legacy selection, typed field precedence, malformed input, and exactly-one-path safety.
+`tests/fm-watch-checkpoint.test.sh` preserves the foreground helper controls and drives two native actionable successors, durable drain acknowledgements, and duplicate-owner refusal through the public scripts.
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate, including the persistent-model fresh-leftover-beacon negative control, the auto-arm model's healthy fresh-beacon-without-a-watcher case and stale-beacon alarm, and the extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.
 `tests/fm-cursor-primary.test.sh` covers the Cursor park end to end over real processes with no harness installed: each tracked Claude-shaped entrypoint standing down on a Cursor payload, both follow-up sources, the bounded repair nag and its reset, the nested loop bounds, supersession, away-mode and lock-ownership inertness, Pi-host stand-down without Cursor identity and continued parking when `PI_CODING_AGENT` leaks alongside `CURSOR_AGENT` or `CURSOR_INVOKED_AS`, child-worktree exclusion, and that the adapter never exits 2.
@@ -177,5 +174,6 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
-`FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` is the opt-in installed-Codex guard for repeated Stop continuation and foreground checkpoint behavior.
+`FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh` is the opt-in installed-Codex guard for native quiet renewal, actionable delivery and deliberate interruption.
+`tests/fm-codex-continuity-live-e2e.test.sh` retains the legacy foreground-checkpoint experiment; it is not proof of the current native continuation owner.
 [`verification/supervision.md`](verification/supervision.md#turn-end-guard) records the active cross-harness empirical evidence, including the 2026-07-24 Claude `asyncRewake` revalidation.

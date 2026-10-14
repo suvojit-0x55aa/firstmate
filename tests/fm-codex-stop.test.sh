@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# Public Codex Stop behavior with real singleton watcher and process ownership.
+# shellcheck disable=SC2016 # variables expand inside the fake harness child
+set -u
+# shellcheck source=tests/wake-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+TMP_ROOT=$(fm_test_tmproot fm-codex-stop)
+ln -s /bin/bash "$TMP_ROOT/codex"
+export TEST_CODEX="$TMP_ROOT/codex" TEST_ROOT="$ROOT"
+cleanup_tests() {
+  local result=$? file pid
+  if [ "$result" -ne 0 ] && [ -n "${FM_CODEX_STOP_EVIDENCE:-}" ]; then
+    mkdir -p "$FM_CODEX_STOP_EVIDENCE"
+    cp -R "$TMP_ROOT" "$FM_CODEX_STOP_EVIDENCE/"
+  fi
+  for file in "$TMP_ROOT"/*/hook "$TMP_ROOT"/*/harness; do
+    [ -f "$file" ] || continue
+    pid=$(cat "$file")
+    if ps -p "$pid" -o args= 2>/dev/null | grep -E 'fm-codex-stop|fm-turnend-guard' >/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  fm_test_cleanup
+}
+trap cleanup_tests EXIT
+
+
+fixture() {
+  local dir="$TMP_ROOT/$1"
+  mkdir -p "$dir/state" "$dir/bin" "$dir/config"
+  git init -q "$dir"
+  : > "$dir/AGENTS.md"
+  printf '%s\n' "$dir"
+}
+run_stop() { # <home> [checkpoint]
+  local home=$1
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT="${2:-2}" \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL=1 FM_BACKEND=tmux \
+    "$TEST_CODEX" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "$$" > "$FM_HOME/harness"
+      printf "{\"session_id\":\"fixture\",\"stop_hook_active\":true}" > "$FM_HOME/payload"
+      "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload" > "$FM_HOME/out" 2>&1 &
+      hook=$!
+      printf "%s\n" "$hook" > "$FM_HOME/hook"
+      if [ "${FM_CODEX_DUPLICATE:-0}" = 1 ]; then
+        for _ in $(seq 1 100); do [ -s "$FM_HOME/state/.watch.lock/pid" ] && break; sleep 0.02; done
+        "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload" > "$FM_HOME/duplicate" 2>&1
+        printf "%s\n" "$?" > "$FM_HOME/duplicate-rc"
+      fi
+      wait "$hook"; rc=$?
+      printf "%s\n" "$rc" > "$FM_HOME/rc"
+      if [ "${FM_CODEX_REPEAT:-0}" = 1 ]; then
+        jq -r .owner "$FM_HOME/state/.codex-stop.json" > "$FM_HOME/first-owner"
+        "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload" > "$FM_HOME/repeat-out" 2>&1
+        echo "$?" > "$FM_HOME/repeat-rc"
+      fi
+      # Keep the session alive while the caller examines its handling proof.
+      while [ ! -f "$FM_HOME/release" ]; do sleep 0.1; done
+    ' &
+  HARNESS=$!
+}
+wait_file() {
+  local i=0
+  while [ ! -s "$1" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$1" ] || fail "timeout waiting for $1"
+}
+finish() { touch "$1/release"; wait "$HARNESS"; }
+assert_no_watcher() {
+  local pid
+  pid=$(cat "$1/state/.watch.lock/pid" 2>/dev/null || true)
+  # Cancellation during watcher initialization can retain a dead lock before
+  # the watcher's cleanup trap exists. Prove process death, not file absence.
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  ps -p "$pid" -o pid= -o ppid= -o stat= -o args= > "$1/watcher-after-cleanup" 2>/dev/null || true
+  if kill -0 "$pid" 2>/dev/null; then fail "owned watcher $pid survived Stop cleanup: $(cat "$1/watcher-after-cleanup")"; fi
+}
+
+test_public_stop_dispatches_pending_queue() {
+  local dir need
+  for need in yes no; do
+    dir=$(fixture "pending-$need")
+    [ "$need" != yes ] || : > "$dir/state/task.meta"
+    append_wake "$dir/state" check fixture 'check: fixture ready'
+    cp "$dir/state/.wake-queue" "$dir/queue-before"
+    run_stop "$dir"
+    wait_file "$dir/rc"
+    [ "$(cat "$dir/rc")" = 2 ] || fail 'queued wake did not request native continuation'
+    cmp "$dir/queue-before" "$dir/state/.wake-queue" || fail 'adapter acknowledged queued work'
+    assert_contains "$(cat "$dir/out")" 'durable wake pending' 'missing delivery reason'
+    assert_no_watcher "$dir"
+    finish "$dir"
+  done
+  pass 'Codex Stop delivers queued work with or without remaining tasks, without acknowledgement'
+}
+
+test_quiet_renewal() {
+  local dir
+  dir=$(fixture quiet)
+  : > "$dir/state/task.meta"
+  run_stop "$dir" 3
+  wait_file "$dir/state/.watch.lock/pid"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'quiet checkpoint did not request continuation'
+  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'quiet renewal reason missing'
+  assert_no_watcher "$dir"
+  FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" bash -c '. "$1"; fm_codex_stop_handling_healthy "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" || fail 'delivered handling interval is not healthy'
+  finish "$dir"
+  pass 'quiet checkpoint requests native renewal and leaves bounded handling proof'
+}
+
+test_final_source_wake_retains_continuation() {
+  local dir
+  dir=$(fixture final)
+  : > "$dir/state/task.meta"
+  run_stop "$dir" 15
+  wait_file "$dir/state/.watch.lock/pid"
+  append_wake "$dir/state" check final 'check: last source completed'
+  rm "$dir/state/task.meta"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'final event was lost with its supervision source'
+  [ -s "$dir/state/.wake-queue" ] || fail 'final event was acknowledged'
+  finish "$dir"
+  pass 'post-turn final wake survives loss of supervision need'
+}
+
+test_cleanup_cancellation_revokes_handling() {
+  local dir kind hook
+  for kind in TERM KILL afk replacement no-need; do
+    printf 'case - cancellation %s\n' "$kind"
+    dir=$(fixture "cancel-$kind")
+    : > "$dir/state/task.meta"
+    run_stop "$dir" 15
+    wait_file "$dir/state/.watch.lock/pid"
+    hook=$(cat "$dir/hook")
+    case "$kind" in
+      TERM|KILL) kill "-$kind" "$hook" ;;
+      afk) touch "$dir/state/.afk" ;;
+      replacement) printf '99999999\n' > "$dir/state/.lock" ;;
+      no-need) rm "$dir/state/task.meta" ;;
+    esac
+    wait_file "$dir/rc"
+    for _ in $(seq 1 80); do [ ! -e "$dir/state/.watch.lock" ] && break; sleep 0.1; done
+    assert_no_watcher "$dir"
+    for _ in $(seq 1 60); do [ ! -e "$dir/state/.codex-stop.json" ] && break; sleep 0.1; done
+    [ ! -e "$dir/state/.codex-stop.json" ] || fail "$kind retained continuation proof"
+    assert_not_contains "$(cat "$dir/out")" 'Firstmate Codex supervision:' "$kind delivered a continuation"
+    finish "$dir"
+  done
+  pass 'cancellation, forced death, away mode, generation replacement and no need stand down'
+}
+
+test_singleton() {
+  local dir owner
+  dir=$(fixture singleton)
+  : > "$dir/state/task.meta"
+  # Keep the first request watching until all duplicate assertions complete.
+  # A three-second expiry can turn a delayed duplicate into a valid successor.
+  FM_CODEX_DUPLICATE=1 run_stop "$dir" 30
+  wait_file "$dir/state/.watch.lock/pid"
+  wait_file "$dir/duplicate-rc"
+  [ "$(cat "$dir/duplicate-rc")" = 0 ] || fail 'same-session duplicate did not defer'
+  [ ! -s "$dir/duplicate" ] || fail 'same-session duplicate emitted a continuation'
+  owner=$(jq -r .owner "$dir/state/.codex-stop.json")
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" "$ROOT/bin/fm-codex-stop.sh" < "$dir/payload" > "$dir/competing" 2>&1
+  [ "$(jq -r .owner "$dir/state/.codex-stop.json")" = "$owner" ] || fail 'competing session displaced owner'
+  [ ! -s "$dir/competing" ] || fail 'competing session requested continuation'
+  append_wake "$dir/state" check singleton 'check: singleton assertions complete'
+  wait_file "$dir/rc"
+  finish "$dir"
+  pass 'competing session cannot displace the singleton Stop owner'
+}
+
+
+test_expired_successor_requires_replacement_generation() {
+  local dir
+  dir=$(fixture expiry)
+  append_wake "$dir/state" check expiry 'check: expiry'
+  FM_CODEX_HANDLING_GRACE=1 run_stop "$dir"
+  wait_file "$dir/rc"
+  sleep 2
+  if FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_codex_stop_handling_healthy "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state"; then
+    fail 'expired continuation still reports healthy'
+  fi
+  finish "$dir"
+  # A successor in a new process must replace the old handling identity.
+  rm "$dir/rc" "$dir/release"
+  run_stop "$dir"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'new generation did not deliver retained event'
+  [ "$(jq -r .session_pid "$dir/state/.codex-stop.json")" = "$(cat "$dir/harness")" ] || fail 'successor inherited old session identity'
+  finish "$dir"
+  pass 'expired handling proof fails closed; successor binds its own generation'
+}
+
+test_uncertain_session_inert() {
+  local dir pid
+  for pid in '' 99999999 malformed; do
+    dir=$(fixture "refused-$pid")
+    : > "$dir/state/task.meta"
+    printf '%s\n' "$pid" > "$dir/state/.lock"
+    FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" "$ROOT/bin/fm-turnend-guard.sh" --codex <<<'{"session_id":"refused"}' > "$dir/out" 2>&1
+    [ ! -e "$dir/state/.codex-stop.lock" ] || fail 'unowned session claimed Stop'
+    [ ! -e "$dir/state/.codex-stop.json" ] || fail 'unowned session published proof'
+    [ ! -s "$dir/out" ] || fail 'unowned session emitted feedback'
+  done
+  pass 'dead, malformed and uncertain session owners remain inert'
+}
+
+
+test_identity_mismatch_never_waits_on_live_process() {
+  local dir original_root=$TEST_ROOT arm
+  dir=$(fixture identity-change)
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/arm-pid"
+sleep 1
+exec /bin/sleep 30
+ARM
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  : > "$dir/state/task.meta"
+  TEST_ROOT="$dir" run_stop "$dir" 3
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'identity mismatch did not return bounded failure'
+  assert_contains "$(cat "$dir/out")" 'watcher failed' 'identity mismatch reported quiet success'
+  arm=$(cat "$dir/arm-pid")
+  kill -0 "$arm" 2>/dev/null || fail 'adapter signalled an identity-mismatched process'
+  # This fixture deliberately execs a different program; only the test that
+  # created it may clean it up after checking the mismatched identity stayed live.
+  if ps -p "$arm" -o args= | grep -Fx '/bin/sleep 30' >/dev/null; then kill -TERM "$arm"; fi
+  finish "$dir"
+  pass 'live identity mismatch returns without waiting or signalling uncertain process'
+}
+
+# The persisted record is an observation, never sufficient authority by itself.
+test_reused_or_uncertain_owner_is_reclaimed() {
+  local dir kind foreign
+  for kind in dead reused uncertain expired; do
+    dir=$(fixture "stale-$kind")
+    sleep 60 & foreign=$!
+    printf '{"owner":%s,"owner_identity":"unknown","session_pid":"%s","phase":"handling","deadline":9999999999,"token":"stale"}\n' "$foreign" "$foreign" > "$dir/state/.codex-stop.json"
+    if "$ROOT/bin/fm-codex-stop.sh" --healthy "$dir/state"; then fail "$kind stale record was healthy"; fi
+    append_wake "$dir/state" check stale 'check: retained event'
+    run_stop "$dir"
+    wait_file "$dir/rc"
+    [ "$(cat "$dir/rc")" = 2 ] || fail "$kind record blocked successor"
+    kill -0 "$foreign" || fail 'unrelated live process was signalled'
+    kill -TERM "$foreign"; wait "$foreign" 2>/dev/null || true
+    finish "$dir"
+  done
+  pass 'stale, reused and uncertain record identities cannot confer ownership or block successor'
+}
+
+test_native_continuation_commit_is_serialized() {
+  local dir owner
+  dir=$(fixture serialized)
+  append_wake "$dir/state" check serialized 'check: serialized'
+  FM_CODEX_REPEAT=1 run_stop "$dir"
+  wait_file "$dir/repeat-rc"
+  [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] || fail 'successor lost continuation'
+  owner=$(cat "$dir/first-owner")
+  [ "$(jq -r .owner "$dir/state/.codex-stop.json")" = "$owner" ] || fail 'successor introduced a second record writer'
+  [ -s "$dir/state/.wake-queue" ] || fail 'successor acknowledged unhandled work'
+  finish "$dir"
+  pass 'one live owner serializes native response and successor handoff without acknowledging work'
+}
+
+test_record_transition_fails_closed_and_recovers_identity() {
+  local dir
+  dir=$(fixture record-refused)
+  mkdir "$dir/state/.codex-stop.json"
+  append_wake "$dir/state" check record 'check: record'
+  run_stop "$dir"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'record refusal allowed blind Stop'
+  if "$ROOT/bin/fm-codex-stop.sh" --healthy "$dir/state"; then fail 'failed publication was healthy'; fi
+  [ -s "$dir/state/.wake-queue" ] || fail 'failed publication consumed wake'
+  finish "$dir"
+  rmdir "$dir/state/.codex-stop.json"
+  rm "$dir/rc" "$dir/release"
+  run_stop "$dir"
+  wait_file "$dir/rc"
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'successor failed to recover after refused publication'
+  finish "$dir"
+  pass 'record refusal fails closed and releases exclusion for a later successor'
+}
+
+test_replacement_session_fails_closed_on_old_owner() {
+  local dir old_harness owner replacement
+  dir=$(fixture replacement-owner)
+  : > "$dir/state/task.meta"
+  run_stop "$dir" 15
+  old_harness=$HARNESS
+  wait_file "$dir/state/.watch.lock/pid"
+  owner=$(jq -r .owner "$dir/state/.codex-stop.json")
+  kill -STOP "$owner"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_CODEX_WATCH_CHECKPOINT=2 "$TEST_CODEX" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex <<< "{\"session_id\":\"replacement\"}" > "$FM_HOME/replacement-out" 2>&1
+    echo "$?" > "$FM_HOME/replacement-rc"
+  ' & replacement=$!
+  wait_file "$dir/replacement-rc"
+  wait "$replacement"
+  [ "$(cat "$dir/replacement-rc")" = 2 ] || fail 'new session trusted frozen old owner'
+  kill -CONT "$owner"
+  wait_file "$dir/rc"
+  HARNESS=$old_harness
+  finish "$dir"
+  pass 'a replacement generation cannot inherit an old frozen owner'
+}
+
+test_record_mutation_interruption_clears_ownership() {
+  local dir owner before
+  dir=$(fixture dead-owner)
+  append_wake "$dir/state" check dead 'check: dead owner'
+  run_stop "$dir"
+  wait_file "$dir/rc"
+  owner=$(jq -r .owner "$dir/state/.codex-stop.json")
+  cp "$dir/state/.codex-stop.json" "$dir/before"
+  kill -KILL "$owner"
+  if "$ROOT/bin/fm-codex-stop.sh" --healthy "$dir/state"; then fail 'killed owner left healthy proof'; fi
+  cmp "$dir/before" "$dir/state/.codex-stop.json" || fail 'health reader mutated orphan state'
+  finish "$dir"
+  rm "$dir/rc" "$dir/release"
+  run_stop "$dir"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'kernel exclusion survived owner death'
+  [ "$(jq -r .owner "$dir/state/.codex-stop.json")" != "$owner" ] || fail 'successor reused dead owner'
+  finish "$dir"
+  pass 'owner death revokes health without an orphan record writer; kernel releases successor exclusion'
+}
+
+test_public_stop_dispatches_pending_queue
+test_quiet_renewal
+test_final_source_wake_retains_continuation
+test_cleanup_cancellation_revokes_handling
+test_singleton
+
+test_expired_successor_requires_replacement_generation
+test_uncertain_session_inert
+
+test_identity_mismatch_never_waits_on_live_process
+
+test_reused_or_uncertain_owner_is_reclaimed
+test_native_continuation_commit_is_serialized
+test_record_transition_fails_closed_and_recovers_identity
+test_replacement_session_fails_closed_on_old_owner
+test_record_mutation_interruption_clears_ownership

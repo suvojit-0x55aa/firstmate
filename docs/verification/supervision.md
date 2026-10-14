@@ -413,7 +413,7 @@ fm-claude-stop-autoarm: ok
 
 ## Watcher continuity
 
-The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Codex's strict successor path revalidated on 2026-10-10, all against isolated project and home state.
+The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Codex's native Stop continuation revalidated on 2026-10-14, all against isolated project and home state.
 No credential material was copied into a fixture.
 
 ```text
@@ -427,23 +427,62 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper, and one interactive turn honored Stop payloads `false,true,true` under two consecutive exit-2 continuations. |
+| Codex | `FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh` | Native Stop delivered a next turn after a full quiet checkpoint and a post-turn event, then Escape cancelled its owned watcher. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
-Codex strict successor continuity was refreshed on 2026-10-10 with the tracked opt-in guard.
-The fixture used an isolated project and home, accepted the fresh directory-trust dialog, ran the real one-second foreground checkpoint, and captured three real Stop payloads from one `turn_id`.
+### Codex native Stop continuation
+
+Verified on 2026-10-14 with `codex-cli 0.162.1`, macOS Bash `3.2.57(1)-release`, and Python `3.14.7`.
+The opt-in guard uses the named-session Herdr lab helper, installs its teardown trap before provisioning, and checks the default-fleet tripwire after teardown.
+It preserves the tracked Stop command and timeout while substituting isolated session initialization.
 
 ```sh
-FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh
+HERDR_LAB_HELPER='/Users/shin/Documents/Project/firstmate/bin/fm-herdr-lab.sh' FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh
 ```
 
-Observed output:
+Exact successful output:
 
 ```text
-ok - codex-cli 0.155.1 live E2E preserved the foreground checkpoint and honored Stop payloads false,true,true for one turn_id
+codex-cli 0.162.1
+1791995010 stop-start
+1791995013 watcher-start
+1791995192 stop-end 2
+182 quiet-renewal-seconds
+1791995198 stop-start
+1791995199 stop-end 2
+1791995199 event-enqueued
+1791995206 stop-start
+1791995208 deliberate-interrupt
+1791995194 handled
+1791995203 handled
+ok - native Codex Stop delivered quiet renewal and post-turn event, then cancelled on Escape
 ```
+
+The two `handled` entries come from real model tool calls following native Stop feedback, not from hook output alone.
+The guard checks the watcher's process identity after Escape and refuses an extra continuation or a resurrected watcher.
+Portable ownership and cancellation coverage lives in `tests/fm-codex-stop.test.sh`; generated instruction and dispatch contracts are exercised by `tests/fm-supervision-instructions.test.sh` and `tests/fm-turnend-guard.test.sh`.
+`tests/fm-watch-checkpoint.test.sh` retains the foreground helper controls and exercises two native actionable successors with ordinary drain/ack and duplicate-owner refusal.
+The current continuation procedure is owned by [`../supervision-protocols/codex.md`](../supervision-protocols/codex.md).
+
+### Paired Claude preservation
+
+On 2026-10-14, the unchanged `bash tests/fm-claude-stop-autoarm.test.sh` passed all 39 cases after the shared Bash 3.2 lock-identity correction.
+The Claude fixtures in `tests/fm-turnend-guard.test.sh` also refuse any Codex adapter invocation or Codex continuation state.
+The Claude hook registration, auto-arm implementation, session-lock library, Claude protocol document, and emitted Claude instructions were byte-identical to clean base `a2218be`.
+This byte comparison supplements behavioral controls; it does not prove native delivery.
+
+A fresh native check was attempted with Claude Code `2.1.296`:
+
+```sh
+FM_CLAUDE_STOP_PAIRED_LIVE=1 bash tests/fm-claude-stop-paired-live.test.sh
+```
+
+The CLI displayed `Login expired · Please run /login` before its first model turn, so this attempt supplies no new `asyncRewake` delivery evidence.
+Fresh native Claude proof remains externally blocked by authentication; no credential change was made.
+The earlier successful Claude native evidence above remains the latest measured delivery result.
+The current acceptance uses unchanged Claude bytes and the passing paired behavioral controls, without claiming a fresh native Claude pass.
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 
