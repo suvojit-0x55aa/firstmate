@@ -178,10 +178,11 @@ def owner(lock):
     def cancel_arm():
         nonlocal arm, arm_identity, output
         if arm is not None:
-            # An unreaped direct child cannot have a reused PID. It started its
-            # own process group; attached foreign watchers are never members.
+            # Let the arm's TERM trap retire its watcher and finish lock cleanup
+            # in order. If that bounded cleanup stalls, kill only its owned group;
+            # attached foreign watchers are never members of that group.
             if arm.poll() is None:
-                os.killpg(arm.pid, signal.SIGTERM)
+                arm.terminate()
                 try:
                     arm.wait(timeout=3)
                 except subprocess.TimeoutExpired:
