@@ -240,14 +240,53 @@ test_uncertain_session_inert() {
 
 
 test_identity_mismatch_fails_closed_and_reaps_owned_group() {
-  local dir original_root=$TEST_ROOT arm
+  local dir original_root=$TEST_ROOT arm watcher
   dir=$(fixture identity-change)
   cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/arm-pid"
 sleep 1
-exec /bin/sleep 30
+exec python3 - "$FM_HOME" <<'PY'
+import os
+import signal
+import sys
+import time
+
+home = sys.argv[1]
+watcher = os.fork()
+if watcher == 0:
+    def group_term(_signum, _frame):
+        with open(os.path.join(home, 'watcher-group-term'), 'w') as stream:
+            stream.write('term\n')
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, group_term)
+    signal.signal(signal.SIGHUP, lambda _signum, _frame: os._exit(0))
+    while True:
+        signal.pause()
+
+with open(os.path.join(home, 'watcher-pid'), 'w') as stream:
+    stream.write(str(watcher) + '\n')
+
+def cleanup(_signum, _frame):
+    with open(os.path.join(home, 'arm-direct-term'), 'w') as stream:
+        stream.write('term\n')
+    for _ in range(10):
+        if os.path.exists(os.path.join(home, 'watcher-group-term')):
+            break
+        time.sleep(0.05)
+    try:
+        os.kill(watcher, signal.SIGHUP)
+    except ProcessLookupError:
+        pass
+    os.waitpid(watcher, 0)
+    os._exit(0)
+
+signal.signal(signal.SIGTERM, cleanup)
+while True:
+    signal.pause()
+PY
 ARM
   chmod +x "$dir/bin/fm-watch-arm.sh"
   : > "$dir/state/task.meta"
@@ -257,9 +296,13 @@ ARM
   [ "$(cat "$dir/rc")" = 2 ] || fail 'identity mismatch did not return bounded failure'
   assert_contains "$(cat "$dir/out")" 'watcher failed' 'identity mismatch reported quiet success'
   arm=$(cat "$dir/arm-pid")
+  watcher=$(cat "$dir/watcher-pid")
+  [ -s "$dir/arm-direct-term" ] || fail 'adapter did not let its owned arm handle cancellation'
+  [ ! -e "$dir/watcher-group-term" ] || fail 'adapter broadcast its initial cancellation to the owned process group'
   if kill -0 "$arm" 2>/dev/null; then fail 'adapter abandoned its identity-mismatched child group'; fi
+  if kill -0 "$watcher" 2>/dev/null; then fail 'adapter abandoned the arm-owned watcher child'; fi
   finish "$dir"
-  pass 'identity mismatch fails closed and reaps the adapter-owned child group'
+  pass 'identity mismatch fails closed and lets the arm retire its owned watcher in order'
 }
 
 # The persisted record is an observation, never sufficient authority by itself.
