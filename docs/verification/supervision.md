@@ -418,7 +418,7 @@ No credential material was copied into a fixture.
 
 ```text
 Claude Code 2.1.219
-codex-cli 0.155.1
+codex-cli 0.162.1
 OpenCode 1.17.18
 Pi 0.80.10
 grok 0.2.103 (89c3d36fb6f1) [stable]
