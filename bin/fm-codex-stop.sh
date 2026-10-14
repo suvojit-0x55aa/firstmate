@@ -180,7 +180,7 @@ def owner(lock):
         if arm is not None:
             # An unreaped direct child cannot have a reused PID. It started its
             # own process group; attached foreign watchers are never members.
-            if arm.poll() is None and arm_identity and identity(arm.pid) == arm_identity:
+            if arm.poll() is None:
                 os.killpg(arm.pid, signal.SIGTERM)
                 try:
                     arm.wait(timeout=3)

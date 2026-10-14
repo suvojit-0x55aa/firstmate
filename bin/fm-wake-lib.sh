@@ -149,8 +149,10 @@ fm_watcher_healthy() {
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
-#   persistent  every other harness (codex foreground checkpoint, opencode/grok
-#               background arm, tmux, unknown): the watcher runs as a tracked live
+#   stop-managed Codex: the native Stop owner runs the watcher during its bounded
+#               request and certifies the handling interval through its live lease.
+#   persistent  every other harness (opencode/grok background arm, tmux, unknown):
+#               the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
 # the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
@@ -253,6 +255,8 @@ fm_codex_stop_handling_healthy() {
 # Without ownership proof an unheld lock is down exactly as before, so an unloaded,
 # version-drifted, or exited Pi session still alarms immediately, and a cycle the
 # extension never restores still alarms once the beacon passes grace.
+# stop-managed: a live native owner handling lease is healthy while the watcher lock
+# is unheld; otherwise the ordinary strict watcher check applies.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
@@ -799,7 +803,7 @@ _fm_recovery_marker_announced_to_current_session_locked() {
 # buried note can be presented once more. Handling successors must not call
 # this, because Option B re-arm is not a new down stretch. Neither is an
 # ordinary next-turn start by the same live session that already saw this
-# generation announced, such as the next Codex foreground checkpoint or the
+# generation announced, such as the next Codex native Stop watch or the
 # Claude Stop auto-arm, neither of which runs as a handling successor:
 # re-opening there re-announced on every turn while the queue stayed non-empty.
 # A crashed watcher still re-announces through the stale-lock recovery path in

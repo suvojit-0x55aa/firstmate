@@ -239,7 +239,7 @@ test_uncertain_session_inert() {
 }
 
 
-test_identity_mismatch_never_waits_on_live_process() {
+test_identity_mismatch_fails_closed_and_reaps_owned_group() {
   local dir original_root=$TEST_ROOT arm
   dir=$(fixture identity-change)
   cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
@@ -257,12 +257,9 @@ ARM
   [ "$(cat "$dir/rc")" = 2 ] || fail 'identity mismatch did not return bounded failure'
   assert_contains "$(cat "$dir/out")" 'watcher failed' 'identity mismatch reported quiet success'
   arm=$(cat "$dir/arm-pid")
-  kill -0 "$arm" 2>/dev/null || fail 'adapter signalled an identity-mismatched process'
-  # This fixture deliberately execs a different program; only the test that
-  # created it may clean it up after checking the mismatched identity stayed live.
-  if ps -p "$arm" -o args= | grep -Fx '/bin/sleep 30' >/dev/null; then kill -TERM "$arm"; fi
+  if kill -0 "$arm" 2>/dev/null; then fail 'adapter abandoned its identity-mismatched child group'; fi
   finish "$dir"
-  pass 'live identity mismatch returns without waiting or signalling uncertain process'
+  pass 'identity mismatch fails closed and reaps the adapter-owned child group'
 }
 
 # The persisted record is an observation, never sufficient authority by itself.
@@ -374,7 +371,7 @@ test_health_challenge_rejects_replaced_generation
 test_post_accept_interruption_revokes_owner
 test_uncertain_session_inert
 
-test_identity_mismatch_never_waits_on_live_process
+test_identity_mismatch_fails_closed_and_reaps_owned_group
 
 test_reused_or_uncertain_owner_is_reclaimed
 test_native_continuation_commit_is_serialized

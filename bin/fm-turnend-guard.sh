@@ -43,10 +43,8 @@
 #
 # Codex runs with --codex and deliberately does not use stop_hook_active as an
 # unconditional allow.
-# Codex can honor repeated Stop continuations in one turn, so an unhealthy retry
-# is blocked again until one live identity-matched successor checkpoint owns the
-# home.
-# The watcher singleton refuses duplicate ownership.
+# Every applicable Codex Stop delegates bounded watching, continuation, cancellation
+# and handling health to the native single owner.
 #
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
