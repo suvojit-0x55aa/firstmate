@@ -149,8 +149,10 @@ fm_watcher_healthy() {
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
-#   persistent  every other harness (codex foreground checkpoint, opencode/grok
-#               background arm, tmux, unknown): the watcher runs as a tracked live
+#   stop-managed Codex: the native Stop owner runs the watcher during its bounded
+#               request and certifies the handling interval through its live lease.
+#   persistent  every other harness (opencode/grok background arm, tmux, unknown):
+#               the watcher runs as a tracked live
 #               process, so a live identity-matched pid is the real liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
 # the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
@@ -158,11 +160,12 @@ fm_watcher_healthy() {
 fm_supervision_model() {
   local harness
   case "${FM_SUPERVISION_MODEL:-}" in
-    autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
+    autoarm|extension|persistent|stop-managed) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     claude|cursor) printf 'autoarm\n' ;;
+    codex) printf 'stop-managed\n' ;;
     pi|pi-signed) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac
@@ -226,6 +229,12 @@ fm_pi_extension_owns_supervision() {
   fm_pid_alive "$session_pid"
 }
 
+# Only the live Codex owner may certify its bounded handling interval.
+# The socket challenge fails closed on dead/reused/uncertain recorded identities.
+fm_codex_stop_handling_healthy() {
+  "$FM_WAKE_LIB_DIR/fm-codex-stop.sh" --healthy "$1" >/dev/null 2>&1
+}
+
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
@@ -246,6 +255,8 @@ fm_pi_extension_owns_supervision() {
 # Without ownership proof an unheld lock is down exactly as before, so an unloaded,
 # version-drifted, or exited Pi session still alarms immediately, and a cycle the
 # extension never restores still alarms once the beacon passes grace.
+# stop-managed: a live native owner handling lease is healthy while the watcher lock
+# is unheld; otherwise the ordinary strict watcher check applies.
 # persistent: require a live identity-matched watcher with a fresh beacon
 # (fm_watcher_healthy); a fresh leftover beacon with no live watcher is still down.
 # shellcheck disable=SC2034 # Read by callers after the function returns.
@@ -269,6 +280,11 @@ fm_watcher_supervision_verdict() {
     [ "$fresh" = true ] && FM_WATCHER_VERDICT_OK=true
     return 0
   fi
+  if [ "$model" = stop-managed ] && fm_watcher_lock_unheld "$state" \
+    && fm_codex_stop_handling_healthy "$state"; then
+    FM_WATCHER_VERDICT_OK=true
+    return 0
+  fi
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
@@ -283,6 +299,17 @@ fm_watcher_supervision_verdict() {
     fi
   fi
   return 0
+}
+
+# Resolve in the calling frame, never with $(...), which would identify that
+# command substitution instead. Bash 3.2 has no BASHPID and keeps $$ unchanged
+# in subshells; an execed process-substitution child reports our actual pid.
+fm_lock_current_pid() {
+  FM_LOCK_CURRENT_PID=${BASHPID:-}
+  if [ -z "$FM_LOCK_CURRENT_PID" ]; then
+    IFS= read -r FM_LOCK_CURRENT_PID < <(exec sh -c 'printf "%s\n" "$PPID"') || return 1
+  fi
+  case "$FM_LOCK_CURRENT_PID" in ''|*[!0-9]*) return 1 ;; esac
 }
 
 fm_lock_clean_known_files() {
@@ -302,7 +329,8 @@ fm_lock_set_role() {
     autoarm|terminal-check) : ;;
     *) return 1 ;;
   esac
-  current=${BASHPID:-$$}
+  fm_lock_current_pid || return 1
+  current=$FM_LOCK_CURRENT_PID
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 1
   printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
@@ -330,7 +358,8 @@ fm_lock_owner_dir() {
 
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
-  mypid=${BASHPID:-$$}
+  fm_lock_current_pid || return 1
+  mypid=$FM_LOCK_CURRENT_PID
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ]
@@ -379,7 +408,8 @@ fm_lock_claim_blocked_by_steal() {
 
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
-  mypid=${BASHPID:-$$}
+  fm_lock_current_pid || return 1
+  mypid=$FM_LOCK_CURRENT_PID
   if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -773,7 +803,7 @@ _fm_recovery_marker_announced_to_current_session_locked() {
 # buried note can be presented once more. Handling successors must not call
 # this, because Option B re-arm is not a new down stretch. Neither is an
 # ordinary next-turn start by the same live session that already saw this
-# generation announced, such as the next Codex foreground checkpoint or the
+# generation announced, such as the next Codex native Stop watch or the
 # Claude Stop auto-arm, neither of which runs as a handling successor:
 # re-opening there re-announced on every turn while the queue stayed non-empty.
 # A crashed watcher still re-announces through the stale-lock recovery path in
@@ -871,10 +901,9 @@ fm_lock_try_acquire() {
     return 0
   fi
 
-  # Compare against ${BASHPID:-$$} inline, never via a command substitution:
-  # $() forks a subshell whose BASHPID is not this frame's pid.
+  fm_lock_current_pid || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "${BASHPID:-$$}" ]; then
+  if [ -n "$pid" ] && [ "$pid" = "$FM_LOCK_CURRENT_PID" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
     # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
@@ -971,7 +1000,8 @@ fm_lock_acquire_wait() {
 
 fm_lock_release() {
   local lockdir=$1 pid current ownerdir
-  current=${BASHPID:-$$}
+  fm_lock_current_pid || return 1
+  current=$FM_LOCK_CURRENT_PID
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     [ -n "$ownerdir" ] || return 0

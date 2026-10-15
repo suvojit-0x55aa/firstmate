@@ -8,7 +8,8 @@ The tracked harness adapters forward command text without classifying it.
 
 ## Purpose and boundary
 
-A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
+A direct manual watcher arm or compatibility checkpoint must run through an observable harness call.
+Codex primary supervision itself uses the native Stop continuation owned by [`supervision-protocols/codex.md`](supervision-protocols/codex.md), not a model-issued checkpoint.
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 

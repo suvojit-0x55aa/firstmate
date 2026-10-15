@@ -2827,6 +2827,7 @@ if [ "$KIND" = secondmate ]; then
   # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
   case "$HARNESS" in
     claude|cursor) supervision_model=autoarm ;;
+    codex) supervision_model=stop-managed ;;
     *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off

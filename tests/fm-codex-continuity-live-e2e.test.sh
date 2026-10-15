@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Opt-in credentialed Codex regression proving the bounded foreground checkpoint
-# and repeated Stop-continuation behavior that strict successor continuity uses.
+# Opt-in credentialed legacy Codex experiment covering the bounded foreground
+# helper and repeated Stop continuation; this is not the current continuation owner.
 set -u
 
 if [ "${FM_CODEX_LIVE_E2E:-0}" != 1 ]; then

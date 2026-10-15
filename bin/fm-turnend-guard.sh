@@ -10,7 +10,8 @@
 # fleet-touching command itself, can sit blind for hours.
 # This script is push-based: verified harness turn-end hooks invoke it every time
 # the primary is about to end a turn.
-# Claude and codex can block directly by preserving exit status 2 and stderr.
+# Claude blocks directly by preserving exit status 2 and stderr.
+# Codex delegates every applicable Stop to its native single owner.
 # OpenCode and pi adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive. Grok delegates native
 # blocking when its running Stop payload advertises that capability, with one
@@ -42,10 +43,8 @@
 #
 # Codex runs with --codex and deliberately does not use stop_hook_active as an
 # unconditional allow.
-# Codex can honor repeated Stop continuations in one turn, so an unhealthy retry
-# is blocked again until one live identity-matched successor checkpoint owns the
-# home.
-# The watcher singleton refuses duplicate ownership.
+# Every applicable Codex Stop delegates bounded watching, continuation, cancellation
+# and handling health to the native single owner.
 #
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
@@ -150,6 +149,10 @@ fi
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+if [ "$CODEX_MODE" -eq 1 ]; then
+  exec "$SCRIPT_DIR/fm-codex-stop.sh" <<< "$PAYLOAD"
+fi
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh

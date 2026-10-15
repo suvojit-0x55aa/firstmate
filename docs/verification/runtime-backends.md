@@ -968,3 +968,9 @@ Evidence produced 2026-08-25 on macOS 26.5.2 arm64, Node v24.13.1:
 
 Scope of this evidence: the installed signed `pi` CLI (0.82.0 at verification time) is a compiled binary whose bundled SDK is not importable from Node, so the importable npm package is the only surface the guard and the typecheck can pin.
 The extension executes inside the signed CLI's own runtime, so a CLI upgrade can drift ahead of the pinned npm surface; refresh this record after every Pi upgrade by re-running the live guard, picker regression, and strict typecheck above (point `FM_PI_PACKAGE_DIR` at a matching npm install when one exists) and by watching the branch's own fallback line - every branch failure degrades to the pre-branch wake-to-main path by construction, which `tests/fm-pi-branch-extension.test.sh` holds with a broken generator and the live guard holds with the real SDK.
+
+## Codex native Stop transport
+
+On 2026-10-14, Codex CLI `0.162.1` passed the named-session Herdr continuation guard `FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh`.
+The exact command, output, quiet-checkpoint timing, interruption evidence, and paired Claude authentication limit are owned by [supervision verification](supervision.md#codex-native-stop-continuation).
+The adapter remains independent of the runtime backend; this native transport proof used only the guarded Herdr lab.

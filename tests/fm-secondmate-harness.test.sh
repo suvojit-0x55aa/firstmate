@@ -915,9 +915,10 @@ SH
     out=$(PATH="$fakebin:$BASE_PATH" CLAUDECODE=1 bash -c "$launch" 2>&1)
     case "$harness" in
       codex)
+        assert_contains "$launch" "FM_SUPERVISION_MODEL=stop-managed" "Codex launch lost native Stop supervision"
         expected='WATCHER DOWN - SUPERVISION IS OFF'
         assert_contains "$out" "$expected" \
-          "Codex secondmate inherited Claude auto-arm despite its persistent watcher model"
+          "Codex secondmate accepted a beacon without native continuation proof"
         ;;
       claude)
         [ -z "$out" ] \

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for bounded foreground watcher checkpoints used by Codex supervision.
+# Compatibility tests for the bounded foreground helper and native Codex succession.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -156,11 +156,13 @@ drain_and_ack() {
   [ ! -s "$home/state/.wake-queue" ] || fail "wake acknowledgement $round left a queued row"
 }
 
+# shellcheck disable=SC2016 # The fixture harness expands its own session environment.
 run_codex_guard() {
   local home=$1
-  printf '%s' '{"stop_hook_active":true,"turn_id":"turn-successor-test"}' \
-    | FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
-      bash "$home/bin/fm-turnend-guard.sh" --codex 2>&1
+  [ -e "$home/codex" ] || ln -s /bin/bash "$home/codex"
+  printf '%s' '{"session_id":"successor","stop_hook_active":true,"turn_id":"turn-successor-test"}' \
+    | FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT=2 \
+      "$home/codex" -c 'printf "%s\n" "$$" > "$FM_HOME/state/.lock"; "$FM_HOME/bin/fm-turnend-guard.sh" --codex' 2>&1
 }
 
 assert_duplicate_refused() {
@@ -175,36 +177,37 @@ assert_duplicate_refused() {
     || fail "duplicate checkpoint $round replaced the live successor owner"
 }
 
+# shellcheck disable=SC2016 # The fixture harness owns expansion of its environment.
 test_codex_turn_end_requires_a_successor_after_each_acknowledged_wake() {
-  local home round out status
+  local home round harness out
   home=$(make_primary_home codex-successor)
   : > "$home/state/task1.meta"
-
-  start_successor_checkpoint "$home" 0
-  wait_for_successor_lock "$home"
+  ln -s /bin/bash "$home/codex"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT=30 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 "$home/codex" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      for round in 1 2; do
+        printf "{\"session_id\":\"successor\",\"stop_hook_active\":true}" | "$FM_HOME/bin/fm-turnend-guard.sh" --codex > "$FM_HOME/native-$round.out" 2>&1
+        printf "%s\n" "$?" > "$FM_HOME/native-$round.rc"
+        while [ ! -f "$FM_HOME/resume-$round" ]; do sleep 0.1; done
+      done
+    ' &
+  harness=$!
   for round in 1 2; do
-    printf 'done: synthetic consecutive wake %s\n' "$round" >> "$home/state/demo.status"
-    wait_for_actionable_exit "$home" $((round - 1))
-    drain_and_ack "$home" "$round"
-
-    status=0
-    out=$(run_codex_guard "$home") || status=$?
-    expect_code 2 "$status" "Codex turn-end guard $round without successor"
-    assert_contains "$out" "TURN WOULD END BLIND" \
-      "Codex turn-end guard $round did not refuse the blind retry"
-
-    start_successor_checkpoint "$home" "$round"
     wait_for_successor_lock "$home"
-    out=$(run_codex_guard "$home"); status=$?
-    expect_code 0 "$status" "Codex turn-end guard $round with successor"
-    [ -z "$out" ] || fail "healthy Codex turn-end guard $round produced output: $out"
     assert_duplicate_refused "$home" "$round"
+    printf 'done: synthetic consecutive wake %s\n' "$round" >> "$home/state/demo.status"
+    for _ in $(seq 1 200); do [ -s "$home/native-$round.rc" ] && break; sleep 0.05; done
+    [ -s "$home/native-$round.rc" ] || fail "native Stop $round did not return"
+    expect_code 2 "$(cat "$home/native-$round.rc")" "native actionable continuation $round"
+    out=$(cat "$home/native-$round.out")
+    assert_contains "$out" 'Firstmate Codex supervision:' 'native wake feedback missing'
+    [ -s "$home/state/.wake-queue" ] || fail "native Stop $round acknowledged the event"
+    drain_and_ack "$home" "$round"
+    touch "$home/resume-$round"
   done
-
-  printf 'done: cleanup wake\n' >> "$home/state/demo.status"
-  wait_for_actionable_exit "$home" 2
-  drain_and_ack "$home" cleanup
-  pass "Codex continuity: two acknowledged actionable exits each require one live successor and reject a duplicate owner"
+  wait "$harness" || fail 'native successor fixture failed'
+  pass "Codex continuity: two native actionable exits each preserve acknowledgement and reject a duplicate owner"
 }
 
 test_quiet_checkpoint_exits_124_cleanly

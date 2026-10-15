@@ -93,6 +93,9 @@ state/               runtime records and signals; gitignored
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
+  .codex-stop.owner-lock  stable kernel-flock inode for the sole Codex Stop continuation owner; never remove or replace
+  .codex-stop.json .codex-stop.sock  transient live-owner lease record and private local transport socket; existence alone is not health evidence, and the owner normally removes both on stand-down; never touch
+  .codex-stop-error  latest recorded Codex Stop owner exception diagnostic; not health evidence, safe to delete
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete

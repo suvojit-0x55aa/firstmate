@@ -2303,7 +2303,9 @@ FMEOF
 
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
-  if ! fm_backend_source herdr; then
+  if [ ! -f "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ] \
+    || [ ! -r "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ] \
+    || ! fm_backend_source herdr; then
     echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
     return 1
   fi
