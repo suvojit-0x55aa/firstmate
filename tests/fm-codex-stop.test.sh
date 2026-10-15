@@ -39,7 +39,7 @@ fixture() {
 run_stop() { # <home> [checkpoint]
   local home=$1
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT="${2:-2}" \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL="${FM_POLL:-1}" \
     FM_GUARD_GRACE="${FM_GUARD_GRACE:-3}" FM_BACKEND=tmux \
     "$TEST_CODEX" -c '
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
@@ -331,7 +331,7 @@ test_stalled_watcher_cannot_complete_quiet_window() {
   FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 2
   TEST_ROOT=$original_root
   wait_file "$dir/controlled-watcher-ready"
-  wait_file "$dir/rc"
+  wait_file "$dir/rc" 250
   [ "$(cat "$dir/rc")" = 2 ] || fail 'stalled watcher allowed Stop to fail open'
   assert_contains "$(cat "$dir/out")" 'watcher failed' 'stalled watcher omitted failure reason'
   assert_not_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'stalled watcher reported quiet renewal'
@@ -349,7 +349,7 @@ test_late_stopped_watcher_cannot_complete_quiet_window() {
   FM_TEST_WATCH_MODE=late-stop FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 4
   TEST_ROOT=$original_root
   wait_file "$dir/controlled-watcher-stopped"
-  wait_file "$dir/rc"
+  wait_file "$dir/rc" 250
   [ "$(cat "$dir/rc")" = 2 ] || fail 'late stopped watcher allowed Stop to fail open'
   assert_contains "$(cat "$dir/out")" 'watcher failed' 'late stopped watcher omitted failure reason'
   assert_not_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'late stopped watcher reported quiet renewal'
@@ -363,6 +363,8 @@ test_complete_watcher_cycle_can_deliver_actionable_wake() {
   local dir
   dir=$(fixture complete-cycle)
   : > "$dir/state/task.meta"
+  printf '%s\n' 'working: initial signal state' > "$dir/state/complete.status"
+  prime_status_seen "$dir/state" "$dir/state/complete.status"
   FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 run_stop "$dir" 45
   wait_file "$dir/state/.watch.lock/pid"
   printf '%s\n' 'done: complete cycle' > "$dir/state/complete.status"
@@ -394,6 +396,47 @@ test_sequential_checks_fit_complete_cycle_bound() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'sequential checks fit the computed watcher cycle bound'
+}
+
+test_sequential_task_classification_fits_complete_cycle_bound() {
+  local dir id calls=0 i=0
+  dir=$(fixture sequential-task-classification)
+  cat > "$dir/slow-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_HOME/classification-calls"
+sleep 8
+printf '%s\n' 'state: working · source: run-step · running'
+SH
+  chmod +x "$dir/slow-crew-state.sh"
+  for id in first second third; do
+    printf '%s\n' 'kind=ship' > "$dir/state/$id.meta"
+    printf '%s\n' 'working: initial signal state' > "$dir/state/$id.status"
+    prime_status_seen "$dir/state" "$dir/state/$id.status"
+  done
+  : > "$dir/classification-calls"
+  FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 \
+    FM_CREW_STATE_NM_TIMEOUT=10 FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" \
+    run_stop "$dir" 120
+  wait_file "$dir/state/.watch.lock/pid"
+  for id in first second third; do
+    printf '%s\n' 'working: bounded classification changed' > "$dir/state/$id.status"
+  done
+  while [ "$i" -lt 750 ]; do
+    calls=$(wc -l < "$dir/classification-calls" 2>/dev/null || echo 0)
+    [ "$calls" -ge 3 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$calls" -ge 3 ] || fail 'watcher did not classify three changed working-task signals'
+  printf '%s\n' 'done: classification cycle complete' > "$dir/state/first.status"
+  wait_file "$dir/rc" 750
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'sequential task classification lost its actionable wake'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'sequential task classification did not deliver its queued wake'
+  assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'sequential task classification exceeded the computed cycle bound'
+  [ -s "$dir/state/.wake-queue" ] || fail 'sequential task classification did not retain its actionable wake'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'sequential task classification fits the computed watcher cycle bound'
 }
 
 test_dead_arm_launcher_retires_owned_watcher_group() {
@@ -818,6 +861,7 @@ test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
 test_sequential_checks_fit_complete_cycle_bound
+test_sequential_task_classification_fits_complete_cycle_bound
 test_dead_arm_launcher_retires_owned_watcher_group
 test_reaped_uncertain_group_is_not_signalled
 test_final_source_wake_retains_continuation

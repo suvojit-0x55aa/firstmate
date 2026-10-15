@@ -131,6 +131,24 @@ try:
         raise ValueError
 except ValueError:
     check_timeout = 30
+try:
+    crew_state_timeout = int(os.environ.get('FM_CREW_STATE_NM_TIMEOUT', '10'))
+    if crew_state_timeout <= 0:
+        raise ValueError
+except ValueError:
+    crew_state_timeout = 10
+try:
+    worktree_write_timeout = int(os.environ.get('FM_WORKTREE_WRITE_TIMEOUT', '10'))
+    if worktree_write_timeout <= 0:
+        raise ValueError
+except ValueError:
+    worktree_write_timeout = 10
+try:
+    inactive_reconcile_timeout = int(os.environ.get('FM_INACTIVE_RECONCILE_BUDGET_SECS', '10')) + 1
+    if inactive_reconcile_timeout <= 1 or inactive_reconcile_timeout > 31:
+        raise ValueError
+except ValueError:
+    inactive_reconcile_timeout = 11
 
 
 try:
@@ -141,7 +159,32 @@ except ValueError:
 
 def watcher_cycle_timeout():
     checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in os.listdir('.'))
-    components = math.ceil(watcher_cadence + signal_grace + check_timeout * checks + 5)
+    signal_tasks = set()
+    recorded_windows = set()
+    for name in os.listdir('.'):
+        if name.endswith('.status') and os.path.exists(name):
+            signal_tasks.add(name[:-len('.status')])
+        elif name.endswith('.turn-ended') and os.path.exists(name):
+            signal_tasks.add(name[:-len('.turn-ended')])
+        elif name.endswith('.meta') and os.path.isfile(name):
+            try:
+                values = {}
+                with open(name) as stream:
+                    for line in stream:
+                        key, separator, value = line.rstrip('\n').partition('=')
+                        if separator:
+                            values[key] = value
+                target = values.get('terminal', '') if values.get('backend', 'tmux') == 'orca' else ''
+                target = target or values.get('window', '')
+                if target:
+                    recorded_windows.add(target)
+            except OSError:
+                pass
+    window_count = len(recorded_windows)
+    components = math.ceil(watcher_cadence + inactive_reconcile_timeout + signal_grace +
+                           check_timeout * checks +
+                           crew_state_timeout * (len(signal_tasks) + window_count) +
+                           worktree_write_timeout * window_count + 5)
     return max(watcher_guard_grace, components)
 
 
