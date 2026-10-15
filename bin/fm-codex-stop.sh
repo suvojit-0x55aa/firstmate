@@ -374,7 +374,11 @@ if mode == 'healthy':
 
 # Every invocation may propose an owner, but only the kernel lock winner runs.
 # Losers never mutate shared state. No PID-based stale lock reclamation exists.
-child = os.fork()
+try:
+    child = os.fork()
+except OSError:
+    print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
+    sys.exit(2)
 if child == 0:
     try:
         os.setsid()

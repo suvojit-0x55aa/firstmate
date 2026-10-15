@@ -78,6 +78,37 @@ assert_no_watcher() {
   if kill -0 "$pid" 2>/dev/null; then fail "owned watcher $pid survived Stop cleanup: $(cat "$1/watcher-after-cleanup")"; fi
 }
 
+test_initial_fork_failure_blocks_stop() {
+  local dir
+  dir=$(fixture fork-failure)
+  mkdir "$dir/fault"
+  cat > "$dir/fault/sitecustomize.py" <<'PY'
+import errno
+import os
+
+
+def fail_fork():
+    with open(os.path.join(os.environ['FM_HOME'], 'fork-attempted'), 'w') as stream:
+        stream.write('EAGAIN\n')
+    raise OSError(errno.EAGAIN, 'injected fork failure')
+
+
+os.fork = fail_fork
+PY
+  append_wake "$dir/state" check fork 'check: retained event'
+  cp "$dir/state/.wake-queue" "$dir/queue-before"
+  PYTHONPATH="$dir/fault" run_stop "$dir"
+  wait_file "$dir/rc"
+  finish "$dir"
+  [ -s "$dir/fork-attempted" ] || fail 'fork failure was not injected'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'initial fork failure allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.' 'fork failure omitted owner-unavailable diagnostic'
+  cmp "$dir/queue-before" "$dir/state/.wake-queue" || fail 'fork failure acknowledged queued work'
+  [ ! -e "$dir/state/.codex-stop.json" ] || fail 'fork failure published ownership'
+  assert_no_watcher "$dir"
+  pass 'initial owner fork failure blocks Stop with a diagnostic and retains queued work'
+}
+
 test_public_stop_dispatches_pending_queue() {
   local dir need
   for need in yes no; do
@@ -403,6 +434,7 @@ test_record_mutation_interruption_clears_ownership() {
   pass 'owner death revokes health without an orphan record writer; kernel releases successor exclusion'
 }
 
+test_initial_fork_failure_blocks_stop
 test_public_stop_dispatches_pending_queue
 test_quiet_renewal
 test_final_source_wake_retains_continuation
