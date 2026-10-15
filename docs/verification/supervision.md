@@ -466,9 +466,37 @@ Portable ownership and cancellation coverage lives in `tests/fm-codex-stop.test.
 `tests/fm-watch-checkpoint.test.sh` retains the foreground helper controls and exercises two native actionable successors with ordinary drain/ack and duplicate-owner refusal.
 The current continuation procedure is owned by [`../supervision-protocols/codex.md`](../supervision-protocols/codex.md).
 
+On 2026-10-16, macOS Bash `3.2.57(1)-release` and Python `3.14.7` passed the portable admission regression against the shared backend agent-state dispatcher.
+The motivating primary-home inventory was measured read-only: 92 distinct recorded targets classified as 3 budgeted workers, 79 existing endpoints with no agent, and 10 absent endpoints; the combined existence and agent-state scan completed in 2.529 seconds.
+The full 40-case Codex Stop suite covered 100 historical endpoints, including both absent targets and existing agent-free panes, beside three live endpoints; it also covered a deliberately oversized two-endpoint live inventory, due authenticated custom and PR checks, unseen signals, due remote reply recovery, watcher ownership and cancellation.
+The unchanged Claude boundary and generated harness instructions also passed their focused suites.
+
+```sh
+bash tests/fm-codex-stop.test.sh
+bash tests/fm-claude-stop-autoarm.test.sh
+bash tests/fm-turnend-guard.test.sh
+bash tests/fm-supervision-instructions.test.sh
+bin/fm-lint.sh
+```
+
+Exact relevant output:
+
+```text
+ok - large stale endpoint history does not consume the live cycle budget
+ok - small live endpoint inventories remain conservatively bounded
+ok - due custom and PR checks complete across bounded watcher cycles
+ok - large registered-check inventories are admitted in bounded batches
+ok - due remote recovery fits the computed watcher cycle budget
+ok - Codex defers remote observation while Claude default remains unchanged
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+```
+
 ### Paired Claude preservation
 
-On 2026-10-14, the unchanged `bash tests/fm-claude-stop-autoarm.test.sh` passed all 39 cases after the shared Bash 3.2 lock-identity correction.
+On 2026-10-16, the unchanged `bash tests/fm-claude-stop-autoarm.test.sh` passed all 39 cases after the Codex-only bounded check sweep was added to the shared watcher.
 The Claude fixtures in `tests/fm-turnend-guard.test.sh` also refuse any Codex adapter invocation or Codex continuation state.
 The Claude hook registration, auto-arm implementation, session-lock library, Claude protocol document, and emitted Claude instructions were byte-identical to clean base `a2218be`.
 This byte comparison supplements behavioral controls; it does not prove native delivery.

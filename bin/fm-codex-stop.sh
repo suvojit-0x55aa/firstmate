@@ -4,6 +4,11 @@
 # and successor handoff under one kernel flock. The hook is only a transport.
 # It connects over a private Unix socket; no network/debugging API is involved.
 # The owner watches only during a Stop request, using the unchanged watch-arm.
+# Cycle admission charges bounded downstream endpoint work only to recorded
+# workers that are not authoritatively dead; retained dead endpoints still
+# receive their cheap watcher probe but do not multiply worst-case reads.
+# Due checks are split into a durable per-cycle batch sized to the remaining
+# deadline, without reducing any individual check's timeout.
 # Between Stops it holds an identity-checked handling lease for at most 300s.
 # Closing an unanswered hook connection cancels its owned watcher process group;
 # an independently attached watcher is outside that group and is never killed.
@@ -222,49 +227,92 @@ done
     return signal_tasks, len(remote_recoveries)
 
 
-def watcher_cycle_timeout():
+budget_window_cache = None
+budget_window_cache_until = 0
+
+
+def invalidate_budget_windows():
+    global budget_window_cache_until
+    budget_window_cache_until = 0
+
+
+def budget_window_count():
+    global budget_window_cache, budget_window_cache_until
+    now = time.monotonic()
+    if budget_window_cache is not None and now < budget_window_cache_until:
+        return budget_window_cache
+    result = shell(r'''
+. "$1/fm-backend.sh" || exit 1
+seen='|'
+for meta in "$FM_STATE_OVERRIDE"/*.meta; do
+  [ -f "$meta" ] || continue
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || continue
+  case "$seen" in
+    *"|$target|"*) continue ;;
+  esac
+  seen="$seen$target|"
+  backend=$(fm_backend_of_meta "$meta")
+  task=${meta##*/}
+  task=${task%.meta}
+  fm_backend_target_exists "$backend" "$target" "fm-$task" 2>/dev/null || continue
+  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
+  case "$agent_state" in
+    dead|missing) ;;
+    *) printf 'budget-window\t%s\n' "$target" ;;
+  esac
+done
+''', timeout=8)
+    if result is None or result.returncode != 0:
+        return None
+    windows = set()
+    for line in result.stdout.splitlines():
+        kind, separator, value = line.partition('\t')
+        if kind == 'budget-window' and separator and value:
+            windows.add(value)
+    budget_window_cache = len(windows)
+    budget_window_cache_until = now + max(5, watcher_cadence)
+    return budget_window_cache
+
+
+def watcher_cycle_timeout(check_limit=None):
     names = os.listdir('.')
     try:
         check_age = int(time.time()) - int(os.path.getmtime('.last-check'))
     except OSError:
         check_age = 999999
-    checks = 0
+    due_checks = 0
     if check_age >= check_interval:
-        checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
+        due_checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
     work = cycle_work()
     if work is None:
-        return cycle_limit + 1
+        return cycle_limit + 1, check_limit or 1
+    budget_windows = budget_window_count()
+    if budget_windows is None:
+        return cycle_limit + 1, check_limit or 1
     signal_tasks, remote_recoveries = work
-    recorded_windows = set()
-    for name in names:
-        if name.endswith('.meta') and os.path.isfile(name):
-            try:
-                values = {}
-                with open(name) as stream:
-                    for line in stream:
-                        key, separator, value = line.rstrip('\n').partition('=')
-                        if separator:
-                            values[key] = value
-                target = values.get('terminal', '') if values.get('backend', 'tmux') == 'orca' else ''
-                target = target or values.get('window', '')
-                if target:
-                    recorded_windows.add(target)
-            except OSError:
-                pass
-    window_count = len(recorded_windows)
-    components = math.ceil(watcher_cadence + inactive_reconcile_timeout + signal_grace +
-                           check_timeout * checks +
-                           2 * crew_state_timeout * (len(signal_tasks) + window_count) +
-                           worktree_write_timeout * window_count +
-                           2 * remote_send_timeout * remote_recoveries + 5)
-    return max(watcher_guard_grace, components)
+    # The watcher attempts a cheap capture for every recorded target, but only
+    # a worker not authoritatively dead can repeatedly reach the bounded
+    # crew-state and worktree-write paths charged here. Backends without a
+    # verified agent-state classifier remain included. If the aggregate agent
+    # scan itself exceeds the bounded helper call, admission fails closed.
+    non_check_components = math.ceil(
+        watcher_cadence + inactive_reconcile_timeout + signal_grace +
+        2 * crew_state_timeout * (len(signal_tasks) + budget_windows) +
+        worktree_write_timeout * budget_windows +
+        2 * remote_send_timeout * remote_recoveries + 5)
+    if check_limit is None:
+        check_limit = max(1, math.floor((cycle_limit - non_check_components) / check_timeout))
+    checks_this_cycle = min(due_checks, check_limit)
+    components = non_check_components + check_timeout * checks_this_cycle
+    return max(watcher_guard_grace, components), check_limit
 
 
-def shell(body, *args):
+def shell(body, *args, timeout=3):
     try:
         return subprocess.run(['bash', '-c', '. "$1/fm-wake-lib.sh"; ' + body,
                                'codex-stop-probe', scripts, *args],
-                              capture_output=True, text=True, timeout=3)
+                              capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -401,6 +449,7 @@ def owner(lock):
     next_watcher_probe = 0
     confirmation_beat = 0
     cycle_timeout = watcher_guard_grace
+    check_batch_limit = 1
 
     def publish(next_phase, seconds):
         nonlocal phase, deadline, published
@@ -566,13 +615,15 @@ def owner(lock):
                             send(conn, dict(rc=0, reason='', token=token))
                             return
                         else:
-                            cycle_timeout = watcher_cycle_timeout()
+                            invalidate_budget_windows()
+                            cycle_timeout, check_batch_limit = watcher_cycle_timeout()
                             if cycle_timeout > cycle_limit:
-                                if not finish('watcher cycle exceeds Codex Stop deadline; reduce registered checks or complete outstanding supervision work'):
+                                if not finish('watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'):
                                     return
                             else:
                                 arm_environment = os.environ.copy()
                                 arm_environment['FM_GUARD_GRACE'] = str(cycle_limit)
+                                arm_environment['FM_CHECKS_PER_CYCLE'] = str(check_batch_limit)
                                 arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
                                 output = tempfile.TemporaryFile()
                                 arm = subprocess.Popen(['bash', scripts + '/fm-watch-arm.sh'], stdin=subprocess.DEVNULL,
@@ -593,9 +644,9 @@ def owner(lock):
             if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
                 if not reason and probe_due:
-                    next_cycle_timeout = watcher_cycle_timeout()
+                    next_cycle_timeout, _next_check_limit = watcher_cycle_timeout(check_batch_limit)
                     if next_cycle_timeout > cycle_limit:
-                        reason = 'watcher cycle exceeds Codex Stop deadline; reduce registered checks or complete outstanding supervision work'
+                        reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'
                     elif next_cycle_timeout > cycle_timeout:
                         cycle_timeout = next_cycle_timeout
                 if output is not None:

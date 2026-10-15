@@ -85,7 +85,7 @@ assert_no_watcher() {
 
 install_controlled_watcher() {
   local dir=$1
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cp -R "$ROOT/bin/." "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -157,9 +157,63 @@ WATCH
   chmod +x "$dir/bin/fm-watch-arm.sh" "$dir/bin/fm-watch.sh"
 }
 
+install_endpoint_inventory_tmux() {
+  local dir=$1
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = list-windows ]; then
+  session=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then
+      session=${2:-}
+      break
+    fi
+    shift
+  done
+  for target in ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}}; do
+    [ "${target%%:*}" = "$session" ] && printf '%s\n' "${target#*:}"
+  done
+  exit 0
+fi
+if [ "${1:-}" = display-message ]; then
+  target=
+  format=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then
+      target=${2:-}
+    fi
+    case "$1" in *pane_current_command*) format=current-command ;; esac
+    shift
+  done
+  case " ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}} " in
+    *" $target "*)
+      if [ "$format" = current-command ]; then
+        case " ${FM_TEST_LIVE_TARGETS:-} " in
+          *" $target "*) printf 'codex\n' ;;
+          *)
+            case " ${FM_TEST_AMBIGUOUS_TARGETS:-} " in
+              *" $target "*) printf 'python\n' ;;
+              *) printf 'zsh\n' ;;
+            esac
+            ;;
+        esac
+      else
+        printf '999999\n'
+      fi
+      exit 0
+      ;;
+  esac
+fi
+exit 1
+SH
+  chmod +x "$dir/fakebin/tmux"
+}
+
 install_attached_watcher() {
   local dir=$1
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh,fm-backend.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch.sh" <<'WATCH'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -326,7 +380,7 @@ test_quiet_renewal() {
 test_wedged_arm_cannot_report_quiet_renewal() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture wedged-arm)
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-backend.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/wedged-arm"
@@ -555,6 +609,112 @@ test_fresh_checks_do_not_consume_cycle_budget() {
   pass 'only due checks consume the active cycle budget'
 }
 
+test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
+  local dir original_root=$TEST_ROOT id existing
+  dir=$(fixture stale-endpoint-inventory)
+  install_controlled_watcher "$dir"
+  install_endpoint_inventory_tmux "$dir"
+  for id in $(seq 1 100); do
+    printf 'window=fleet:dead-%s\n' "$id" > "$dir/state/dead-$id.meta"
+  done
+  printf '%s\n' 'window=fleet:live-a' > "$dir/state/live-a.meta"
+  printf '%s\n' 'window=fleet:live-b' > "$dir/state/live-b.meta"
+  printf '%s\n' 'window=fleet:live-c' > "$dir/state/live-c.meta"
+  existing='fleet:live-a fleet:live-b fleet:live-c'
+  for id in $(seq 1 10); do
+    existing="$existing fleet:dead-$id"
+  done
+  for id in $(seq 1 12); do
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/check-$id.check.sh"
+    chmod 0700 "$dir/state/check-$id.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "check-$id" >/dev/null \
+      || fail "could not register stale-inventory check $id"
+  done
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
+    FM_TEST_LIVE_TARGETS='fleet:live-a fleet:live-b fleet:live-c' \
+    FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 TEST_ROOT="$dir" run_stop "$dir" 180
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  append_wake "$dir/state" check release 'check: release stale-endpoint inventory fixture'
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'stale endpoint history blocked the Codex Stop watcher'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'stale endpoint history prevented watcher startup'
+  assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'absent historical endpoints consumed the live cycle budget'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'large stale endpoint history does not consume the live cycle budget'
+}
+
+test_small_live_endpoint_inventory_remains_bounded() {
+  local dir id
+  dir=$(fixture live-endpoint-inventory)
+  install_endpoint_inventory_tmux "$dir"
+  for id in first second; do
+    printf 'window=fleet:%s\n' "$id" > "$dir/state/$id.meta"
+  done
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:first fleet:second' \
+    FM_TEST_LIVE_TARGETS='fleet:first' FM_TEST_AMBIGUOUS_TARGETS='fleet:second' \
+    FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=10 FM_CREW_STATE_NM_TIMEOUT=100 \
+    FM_WORKTREE_WRITE_TIMEOUT=100 run_stop "$dir" 180
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'live endpoint work escaped the fixed Stop deadline'
+  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'live endpoints were omitted from the cycle budget'
+  [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'oversized live endpoint cycle started a watcher'
+  finish "$dir"
+  pass 'small live endpoint inventories remain conservatively bounded'
+}
+
+test_due_custom_and_pr_checks_remain_bounded() {
+  local dir id custom_runs pr_runs
+  dir=$(fixture due-custom-and-pr-checks)
+  mkdir "$dir/fakebin"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/pr-check-runs"
+printf '%s\n' OPEN
+SH
+  chmod +x "$dir/fakebin/gh"
+  for id in $(seq 1 6); do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "printf '%s\\n' 'custom-$id' >> \"\$FM_HOME/custom-check-runs\"" \
+      > "$dir/state/a-custom-$id.check.sh"
+    chmod 0700 "$dir/state/a-custom-$id.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "a-custom-$id" >/dev/null \
+      || fail "could not register due custom check fixture $id"
+  done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    for number in $(seq 1 6); do
+      id="m-pr-$number"
+      url="https://github.com/example/project/pull/$number"
+      printf "pr=%s\n" "$url" > "$2/$id.meta" || exit 1
+      fm_pr_poll_prepare "$2" "$id" github "$url" github.com example/project \
+        "$number" "$1/fm-pr-poll.sh" || exit 1
+      fm_pr_poll_publish_prepared || exit 1
+    done
+  ' _ "$ROOT/bin" "$dir/state" || fail 'could not register due PR check fixture'
+  printf '%s\n' '#!/usr/bin/env bash' \
+    "printf '%s\\n' control >> \"\$FM_HOME/custom-check-runs\"" \
+    "printf '%s\\n' ready" > "$dir/state/z-ready.check.sh"
+  chmod 0700 "$dir/state/z-ready.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" z-ready >/dev/null \
+    || fail 'could not register final due custom check fixture'
+  PATH="$dir/fakebin:$PATH" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=10 \
+    FM_CHECK_TIMEOUT=30 run_stop "$dir" 180
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'bounded due custom and PR checks lost their actionable wake'
+  assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'due registered checks were still charged as one unbounded sweep'
+  [ -s "$dir/state/.wake-queue" ] || fail 'bounded registered-check sweep lost its actionable result'
+  custom_runs=$(wc -l < "$dir/custom-check-runs")
+  pr_runs=$(wc -l < "$dir/pr-check-runs")
+  [ "$custom_runs" -eq 7 ] || fail "bounded sweep ran $custom_runs of 7 custom checks"
+  [ "$pr_runs" -eq 6 ] || fail "bounded sweep ran $pr_runs of 6 PR checks"
+  [ ! -e "$dir/state/.check-sweep-cursor" ] || fail 'completed bounded check sweep retained its cursor'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'due custom and PR checks complete across bounded watcher cycles'
+}
+
 test_due_remote_recovery_fits_cycle_budget() {
   local dir original_root=$TEST_ROOT corr
   dir=$(fixture due-remote-recovery)
@@ -663,9 +823,10 @@ PY
   pass 'cycle budget scans stay on the throttled probe boundary'
 }
 
-test_oversized_cycle_fails_before_transport_deadline() {
-  local dir id
+test_large_check_inventory_is_batched_before_transport_deadline() {
+  local dir original_root=$TEST_ROOT id
   dir=$(fixture oversized-cycle)
+  install_controlled_watcher "$dir"
   : > "$dir/state/task.meta"
   for id in $(seq 1 21); do
     printf '%s\n' '#!/usr/bin/env bash' 'sleep 30' > "$dir/state/check-$id.check.sh"
@@ -673,13 +834,18 @@ test_oversized_cycle_fails_before_transport_deadline() {
     FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "check-$id" >/dev/null \
       || fail "could not register oversized-cycle check $id"
   done
-  FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 FM_CHECK_TIMEOUT=30 run_stop "$dir" 180
+  FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 FM_CHECK_TIMEOUT=30 TEST_ROOT="$dir" \
+    run_stop "$dir" 180
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  append_wake "$dir/state" check release 'check: release large-check inventory fixture'
   wait_file "$dir/rc"
-  [ "$(cat "$dir/rc")" = 2 ] || fail 'oversized cycle escaped the fixed Stop deadline'
-  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'oversized cycle omitted its bounded refusal reason'
-  [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'oversized cycle started a watcher it could not observe within the hook deadline'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'large registered-check inventory lost Codex Stop supervision'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'large registered-check inventory prevented watcher startup'
+  assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'large registered-check inventory was charged as one unbounded sweep'
+  assert_no_watcher "$dir"
   finish "$dir"
-  pass 'oversized watcher cycles fail closed before the transport deadline'
+  pass 'large registered-check inventories are admitted in bounded batches'
 }
 
 test_dead_arm_launcher_retires_owned_watcher_group() {
@@ -704,7 +870,7 @@ test_dead_arm_launcher_retires_owned_watcher_group() {
 test_reaped_uncertain_group_is_not_signalled() {
   local dir original_root=$TEST_ROOT sentinel
   dir=$(fixture uncertain-arm-group)
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-backend.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/uncertain-arm-pid"
@@ -1009,7 +1175,7 @@ test_uncertain_session_inert() {
 test_identity_mismatch_fails_closed_and_reaps_owned_group() {
   local dir original_root=$TEST_ROOT arm watcher
   dir=$(fixture identity-change)
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-backend.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/arm-pid"
@@ -1185,10 +1351,13 @@ test_sequential_checks_fit_complete_cycle_bound
 test_sequential_task_classification_fits_complete_cycle_bound
 test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
+test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
+test_small_live_endpoint_inventory_remains_bounded
+test_due_custom_and_pr_checks_remain_bounded
 test_due_remote_recovery_fits_cycle_budget
 test_codex_defers_remote_pending_reply_observation
 test_cycle_budget_scans_are_throttled
-test_oversized_cycle_fails_before_transport_deadline
+test_large_check_inventory_is_batched_before_transport_deadline
 test_dead_arm_launcher_retires_owned_watcher_group
 test_reaped_uncertain_group_is_not_signalled
 test_final_source_wake_retains_continuation

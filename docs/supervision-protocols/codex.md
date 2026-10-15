@@ -14,6 +14,9 @@ When this session owns supervision and away mode is not active:
 
 `bin/fm-codex-stop.sh` owns the bounded continuation, cancellation and successor contract.
 Its local owner answers live health challenges; stale records alone cannot certify supervision.
+Its cycle admission charges bounded crew-state and worktree reads only for recorded workers that are not authoritatively dead, while still charging unseen signals, due remote reply recovery and the fixed safety reserves.
+Retained metadata for a worker whose verified backend reports `dead` or `missing` therefore cannot consume the deadline as if that worker could repeatedly reach the watcher's expensive downstream classification paths; an ambiguous result or a backend without a verified agent-state classifier remains fully charged.
+Due checks retain their individual timeout and run through a durable batch sized to the remaining cycle budget, so a large registered set completes over multiple watcher cycles instead of being admitted as one unbounded sweep.
 The Stop-owned watcher defers remote pending-reply endpoint observation so that observation's network latency cannot consume the fixed Stop deadline; durable local reply evidence and the ordinary non-Codex observation path remain unchanged.
 The adapter never acknowledges queued work and stands down on interruption, away mode, session replacement or no remaining need.
 Claude retains its separate `asyncRewake` path.

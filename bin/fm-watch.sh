@@ -165,6 +165,12 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+# Codex Stop sets this internal cap so one watcher cycle cannot inherit every
+# registered check's sequential worst-case latency. Zero keeps the established
+# unbounded sweep for Claude and every other watcher owner.
+CHECKS_PER_CYCLE=${FM_CHECKS_PER_CYCLE:-0}
+case "$CHECKS_PER_CYCLE" in ''|*[!0-9]*) CHECKS_PER_CYCLE=0 ;; esac
+CHECK_SWEEP_CURSOR="$STATE/.check-sweep-cursor"
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -1240,10 +1246,34 @@ while :; do
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
+    check_cursor=
+    checks_run=0
+    checks_remaining=0
+    last_check_name=
+    if [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
+      check_cursor=$(cat "$CHECK_SWEEP_CURSOR" 2>/dev/null || true)
+      case "$check_cursor" in
+        ''|.*|*[!A-Za-z0-9._-]*|*/*) check_cursor= ;;
+      esac
+      [ -z "$check_cursor" ] || [ -f "$STATE/$check_cursor" ] || check_cursor=
+    fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      check_name=$(basename "$c")
+      if [ -n "$check_cursor" ]; then
+        if [ "$check_name" = "$check_cursor" ]; then
+          check_cursor=
+        fi
+        continue
+      fi
+      if [ "$CHECKS_PER_CYCLE" -gt 0 ] && [ "$checks_run" -ge "$CHECKS_PER_CYCLE" ]; then
+        checks_remaining=1
+        break
+      fi
+      checks_run=$((checks_run + 1))
+      last_check_name=$check_name
       is_pr_poll=0
-      if [ "$(basename "$c")" = x-watch.check.sh ]; then
+      if [ "$check_name" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
@@ -1291,10 +1321,12 @@ while :; do
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
+          rm -f "$CHECK_SWEEP_CURSOR"
           wake "$reason"
         fi
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
+        rm -f "$CHECK_SWEEP_CURSOR"
         wake "$reason"
       fi
     done
@@ -1302,9 +1334,17 @@ while :; do
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
+      rm -f "$CHECK_SWEEP_CURSOR"
       wake "$reason"
     fi
-    touch "$STATE/.last-check"
+    if [ "$CHECKS_PER_CYCLE" -gt 0 ] && [ "$checks_remaining" -eq 1 ]; then
+      [ -n "$last_check_name" ] || exit 1
+      ( umask 077; printf '%s\n' "$last_check_name" > "$CHECK_SWEEP_CURSOR" ) || exit 1
+      rm -f "$STATE/.last-check"
+    else
+      rm -f "$CHECK_SWEEP_CURSOR"
+      touch "$STATE/.last-check"
+    fi
   fi
 
   # On the first changed signal, linger one grace period and re-scan before
