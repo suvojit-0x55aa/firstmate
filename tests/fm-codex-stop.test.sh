@@ -109,6 +109,46 @@ PY
   pass 'initial owner fork failure blocks Stop with a diagnostic and retains queued work'
 }
 
+test_python_bootstrap_failure_fails_closed() {
+  local dir healthy_rc
+  dir=$(fixture bootstrap-failure)
+  mkdir "$dir/fault"
+  cat > "$dir/fault/sitecustomize.py" <<'PY'
+import builtins
+import os
+
+
+original_import = builtins.__import__
+
+
+def fail_fcntl(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == 'fcntl':
+        with open(os.path.join(os.environ['FM_HOME'], 'bootstrap-attempted'), 'w') as stream:
+            stream.write('ImportError\n')
+        raise ImportError('injected fcntl import failure')
+    return original_import(name, globals, locals, fromlist, level)
+
+
+builtins.__import__ = fail_fcntl
+PY
+  append_wake "$dir/state" check bootstrap 'check: retained event'
+  cp "$dir/state/.wake-queue" "$dir/queue-before"
+  PYTHONPATH="$dir/fault" run_stop "$dir"
+  wait_file "$dir/rc"
+  finish "$dir"
+  [ -s "$dir/bootstrap-attempted" ] || fail 'Python bootstrap failure was not injected'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'Python bootstrap failure allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.' 'Python bootstrap failure omitted owner-unavailable diagnostic'
+  cmp "$dir/queue-before" "$dir/state/.wake-queue" || fail 'Python bootstrap failure acknowledged queued work'
+  [ ! -e "$dir/state/.codex-stop.json" ] || fail 'Python bootstrap failure published ownership'
+  assert_no_watcher "$dir"
+  PYTHONPATH="$dir/fault" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    "$ROOT/bin/fm-codex-stop.sh" --healthy "$dir/state" > "$dir/healthy-out" 2>&1
+  healthy_rc=$?
+  [ "$healthy_rc" = 1 ] || fail 'Python bootstrap failure changed the health-probe contract'
+  pass 'Python bootstrap failure blocks Stop and leaves health unavailable'
+}
+
 test_public_stop_dispatches_pending_queue() {
   local dir need
   for need in yes no; do
@@ -435,6 +475,7 @@ test_record_mutation_interruption_clears_ownership() {
 }
 
 test_initial_fork_failure_blocks_stop
+test_python_bootstrap_failure_fails_closed
 test_public_stop_dispatches_pending_queue
 test_quiet_renewal
 test_final_source_wake_retains_continuation

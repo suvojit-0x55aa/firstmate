@@ -48,20 +48,27 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 export FM_HOME FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE"
 exec python3 - "$MODE" "$STATE" "$SCRIPT_DIR" "$SESSION_PID" "$SESSION_IDENTITY" "$SESSION_ID" <<'PY'
-import fcntl
-import json
-import os
-import selectors
-import signal
-import socket
-import subprocess
 import sys
-import tempfile
-import time
-import uuid
 
-mode, state, scripts, session_pid, session_identity, session_id = sys.argv[1:]
-os.chdir(state)  # Relative socket pathname also works in deep worktree paths.
+try:
+    import fcntl
+    import json
+    import os
+    import selectors
+    import signal
+    import socket
+    import subprocess
+    import tempfile
+    import time
+    import uuid
+
+    mode, state, scripts, session_pid, session_identity, session_id = sys.argv[1:]
+    os.chdir(state)  # Relative socket pathname also works in deep worktree paths.
+except Exception:
+    if len(sys.argv) > 1 and sys.argv[1] == 'healthy':
+        sys.exit(1)
+    print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
+    sys.exit(2)
 RECORD = '.codex-stop.json'
 SOCKET = '.codex-stop.sock'
 LOCK = '.codex-stop.owner-lock'  # Stable inode: never unlink or replace.
