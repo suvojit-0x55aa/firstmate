@@ -1,0 +1,49 @@
+FM_TEST_BEGIN 2026-10-15T14:07:32Z tests/fm-codex-stop.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - initial owner fork failure blocks Stop with a diagnostic and retains queued work
+ok - Python bootstrap failure blocks Stop and leaves health unavailable
+ok - Python launch failure blocks Stop and leaves health unavailable
+ok - Codex Stop delivers queued work with or without remaining tasks, without acknowledgement
+ok - quiet checkpoint requests native renewal and leaves bounded handling proof
+ok - wedged watcher launcher fails closed instead of reporting quiet renewal
+ok - quiet checkpoint starts after verified watcher readiness
+ok - quiet checkpoint requires watcher beacon progress
+ok - post-deadline progress rejects a late stopped watcher
+ok - complete watcher cycle remains live through signal coalescing
+ok - attached arm shares the complete-cycle liveness grace
+ok - sequential checks fit the computed watcher cycle bound
+ok - sequential task classification fits the computed watcher cycle bound
+ok - retired status history does not consume active cycle budget
+ok - only due checks consume the active cycle budget
+ok - due remote recovery fits the computed watcher cycle budget
+ok - Codex defers remote observation while Claude default remains unchanged
+ok - cycle budget scans stay on the throttled probe boundary
+ok - oversized watcher cycles fail closed before the transport deadline
+ok - dead arm launcher retains cancellation of its owned watcher group
+ok - reaped uncertain process groups remain untouched
+ok - post-turn final wake survives loss of supervision need
+case - cancellation TERM
+case - cancellation KILL
+/var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-codex-stop.vbWOx8/codex: line 12: 56153 Killed: 9               "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload" > "$FM_HOME/out" 2>&1
+case - cancellation afk
+case - cancellation replacement
+case - cancellation no-need
+ok - cancellation, forced death, away mode, generation replacement and no need stand down
+ok - competing session cannot displace the singleton Stop owner
+ok - expired handling proof fails closed; successor binds its own generation
+ok - health challenge fails closed immediately after generation replacement
+ok - post-accept interruption revokes the owner before continuation commit
+ok - generation replacement rejects the continuation commit before exit 2
+ok - outer interruption preserves an owner-confirmed continuation commit
+ok - same-process session replacement revokes and reacquires ownership
+ok - dead, malformed and uncertain session owners remain inert
+ok - identity mismatch fails closed and lets the arm retire its owned watcher in order
+ok - stale, reused and uncertain record identities cannot confer ownership or block successor
+ok - one live owner serializes native response and successor handoff without acknowledging work
+ok - record refusal fails closed and releases exclusion for a later successor
+ok - a replacement generation cannot inherit an old frozen owner
+ok - owner death revokes health without an orphan record writer; kernel releases successor exclusion
+FM_TEST_END 2026-10-15T14:14:56Z tests/fm-codex-stop.test.sh exit=0 duration_ms=443873 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=443991
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=443873 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-codex-stop.test.sh duration_ms=443873
+fm-test-run: wrote timing artifact: /Users/shin/.no-mistakes/evidence/01M4Z5MRRW99F14SVCEW478MMV/fm-codex-stop-targeted.json

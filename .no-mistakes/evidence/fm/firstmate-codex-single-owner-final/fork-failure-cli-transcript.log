@@ -1,0 +1,9 @@
+command: fm-turnend-guard.sh --codex (Codex-shaped parent; os.fork injected with EAGAIN)
+exit_code: 2
+stderr: Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.
+fault_injection: EAGAIN
+wake_queue_sha256_before: f91fc52a4d7737b15de4fc9e811ff113f91eef3d63cae17b757d93f59168e900
+wake_queue_sha256_after:  f91fc52a4d7737b15de4fc9e811ff113f91eef3d63cae17b757d93f59168e900
+wake_queue_retained: yes
+owner_record_created: no
+watcher_created: no
