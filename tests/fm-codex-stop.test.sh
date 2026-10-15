@@ -142,6 +142,36 @@ WATCH
   chmod +x "$dir/bin/fm-watch-arm.sh" "$dir/bin/fm-watch.sh"
 }
 
+install_attached_watcher() {
+  local dir=$1
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh} "$dir/bin/"
+  cat > "$dir/bin/fm-watch.sh" <<'WATCH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+lock="$FM_HOME/state/.watch.lock"
+mkdir "$lock" || exit 1
+identity=$(fm_pid_identity "$$") || exit 1
+printf '%s\n' "$$" > "$lock/pid"
+printf '%s\n' "$FM_HOME" > "$lock/fm-home"
+printf '%s\n' "$SCRIPT_DIR/fm-watch.sh" > "$lock/watcher-path"
+printf '%s\n' "$identity" > "$lock/pid-identity"
+clean_watcher() {
+  rm -rf "$lock"
+}
+trap clean_watcher EXIT
+trap 'exit 0' HUP INT TERM
+touch "$FM_HOME/state/.last-watcher-beat"
+printf '%s\n' "$$" > "$FM_HOME/attached-watcher-ready"
+sleep "${FM_SIGNAL_GRACE:-30}"
+while :; do
+  touch "$FM_HOME/state/.last-watcher-beat"
+  sleep 1
+done
+WATCH
+  chmod +x "$dir/bin/fm-watch.sh"
+}
+
 test_initial_fork_failure_blocks_stop() {
   local dir
   dir=$(fixture fork-failure)
@@ -378,6 +408,29 @@ test_complete_watcher_cycle_can_deliver_actionable_wake() {
   pass 'complete watcher cycle remains live through signal coalescing'
 }
 
+test_attached_arm_uses_complete_cycle_grace() {
+  local dir original_root=$TEST_ROOT watcher
+  dir=$(fixture attached-complete-cycle)
+  install_attached_watcher "$dir"
+  : > "$dir/state/task.meta"
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_SIGNAL_GRACE=30 "$dir/bin/fm-watch.sh" &
+  watcher=$!
+  printf '%s\n' "$watcher" > "$dir/sentinel-pid"
+  wait_file "$dir/attached-watcher-ready"
+  sleep 2
+  FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 TEST_ROOT="$dir" run_stop "$dir" 4
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc" 500
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'attached watcher did not request quiet renewal'
+  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'attached arm rejected a healthy coalescing watcher'
+  assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'attached arm used the raw short guard grace'
+  kill -0 "$watcher" 2>/dev/null || fail 'adapter cancelled an independently attached watcher'
+  finish "$dir"
+  kill -TERM "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  pass 'attached arm shares the complete-cycle liveness grace'
+}
+
 test_sequential_checks_fit_complete_cycle_bound() {
   local dir id
   dir=$(fixture sequential-checks)
@@ -403,8 +456,10 @@ test_sequential_task_classification_fits_complete_cycle_bound() {
   dir=$(fixture sequential-task-classification)
   cat > "$dir/slow-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$1" >> "$FM_HOME/classification-calls"
-sleep 8
+printf '%s status\n' "$1" >> "$FM_HOME/classification-calls"
+sleep 9
+printf '%s runs\n' "$1" >> "$FM_HOME/classification-calls"
+sleep 9
 printf '%s\n' 'state: working · source: run-step · running'
 SH
   chmod +x "$dir/slow-crew-state.sh"
@@ -421,13 +476,13 @@ SH
   for id in first second third; do
     printf '%s\n' 'working: bounded classification changed' > "$dir/state/$id.status"
   done
-  while [ "$i" -lt 750 ]; do
+  while [ "$i" -lt 1200 ]; do
     calls=$(wc -l < "$dir/classification-calls" 2>/dev/null || echo 0)
-    [ "$calls" -ge 3 ] && break
+    [ "$calls" -ge 6 ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$calls" -ge 3 ] || fail 'watcher did not classify three changed working-task signals'
+  [ "$calls" -ge 6 ] || fail 'watcher did not run both bounded classification paths for three changed tasks'
   printf '%s\n' 'done: classification cycle complete' > "$dir/state/first.status"
   wait_file "$dir/rc" 750
   [ "$(cat "$dir/rc")" = 2 ] || fail 'sequential task classification lost its actionable wake'
@@ -437,6 +492,25 @@ SH
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'sequential task classification fits the computed watcher cycle bound'
+}
+
+test_oversized_cycle_fails_before_transport_deadline() {
+  local dir id
+  dir=$(fixture oversized-cycle)
+  : > "$dir/state/task.meta"
+  for id in $(seq 1 21); do
+    printf '%s\n' '#!/usr/bin/env bash' 'sleep 30' > "$dir/state/check-$id.check.sh"
+    chmod 0700 "$dir/state/check-$id.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "check-$id" >/dev/null \
+      || fail "could not register oversized-cycle check $id"
+  done
+  FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 FM_CHECK_TIMEOUT=30 run_stop "$dir" 180
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'oversized cycle escaped the fixed Stop deadline'
+  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'oversized cycle omitted its bounded refusal reason'
+  [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'oversized cycle started a watcher it could not observe within the hook deadline'
+  finish "$dir"
+  pass 'oversized watcher cycles fail closed before the transport deadline'
 }
 
 test_dead_arm_launcher_retires_owned_watcher_group() {
@@ -860,8 +934,10 @@ test_late_watcher_gets_full_quiet_window
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
+test_attached_arm_uses_complete_cycle_grace
 test_sequential_checks_fit_complete_cycle_bound
 test_sequential_task_classification_fits_complete_cycle_bound
+test_oversized_cycle_fails_before_transport_deadline
 test_dead_arm_launcher_retires_owned_watcher_group
 test_reaped_uncertain_group_is_not_signalled
 test_final_source_wake_retains_continuation

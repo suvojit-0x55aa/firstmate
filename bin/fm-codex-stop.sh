@@ -156,6 +156,10 @@ try:
 except ValueError:
     startup_timeout = 11
 
+transport_timeout = 590
+protocol_reserve = 10
+cycle_limit = transport_timeout - startup_timeout - checkpoint - protocol_reserve
+
 
 def watcher_cycle_timeout():
     checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in os.listdir('.'))
@@ -183,7 +187,7 @@ def watcher_cycle_timeout():
     window_count = len(recorded_windows)
     components = math.ceil(watcher_cadence + inactive_reconcile_timeout + signal_grace +
                            check_timeout * checks +
-                           crew_state_timeout * (len(signal_tasks) + window_count) +
+                           2 * crew_state_timeout * (len(signal_tasks) + window_count) +
                            worktree_write_timeout * window_count + 5)
     return max(watcher_guard_grace, components)
 
@@ -247,10 +251,10 @@ def watcher_beat():
         return 0
 
 
-def watcher_snapshot():
+def watcher_snapshot(grace):
     result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" "$2" "$FM_HOME" '
                    '&& printf "%s\\t%s\\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"',
-                   str(watcher_cycle_timeout()))
+                   str(grace))
     if result is None or result.returncode != 0:
         return None
     fields = result.stdout.rstrip('\n').split('\t')
@@ -328,6 +332,7 @@ def owner(lock):
     watcher_last_progress = 0
     next_watcher_probe = 0
     confirmation_beat = 0
+    cycle_timeout = watcher_guard_grace
 
     def publish(next_phase, seconds):
         nonlocal phase, deadline, published
@@ -360,7 +365,7 @@ def owner(lock):
                     os.killpg(arm.pid, signal.SIGKILL)
                     arm.wait(timeout=1)
             else:
-                proof = watcher_proof or watcher_snapshot()
+                proof = watcher_proof or watcher_snapshot(cycle_timeout)
                 owned_member = False
                 if proof is not None:
                     try:
@@ -491,10 +496,18 @@ def owner(lock):
                             send(conn, dict(rc=0, reason='', token=token))
                             return
                         else:
-                            output = tempfile.TemporaryFile()
-                            arm = subprocess.Popen(['bash', scripts + '/fm-watch-arm.sh'], stdin=subprocess.DEVNULL,
-                                                   stdout=output, stderr=output, start_new_session=True)
-                            arm_identity = identity(arm.pid)
+                            cycle_timeout = watcher_cycle_timeout()
+                            if cycle_timeout > cycle_limit:
+                                if not finish('watcher cycle exceeds Codex Stop deadline; reduce registered checks or complete outstanding supervision work'):
+                                    return
+                            else:
+                                arm_environment = os.environ.copy()
+                                arm_environment['FM_GUARD_GRACE'] = str(cycle_limit)
+                                output = tempfile.TemporaryFile()
+                                arm = subprocess.Popen(['bash', scripts + '/fm-watch-arm.sh'], stdin=subprocess.DEVNULL,
+                                                       stdout=output, stderr=output, start_new_session=True,
+                                                       env=arm_environment)
+                                arm_identity = identity(arm.pid)
             for conn, (_buf, expires) in list(pending.items()):
                 if conn is not active and time.monotonic() >= expires:
                     close(conn)
@@ -508,6 +521,11 @@ def owner(lock):
                 next_probe = now + 1
             if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
+                next_cycle_timeout = watcher_cycle_timeout()
+                if not reason and next_cycle_timeout > cycle_limit:
+                    reason = 'watcher cycle exceeds Codex Stop deadline; reduce registered checks or complete outstanding supervision work'
+                elif next_cycle_timeout > cycle_timeout:
+                    cycle_timeout = next_cycle_timeout
                 if output is not None:
                     text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
                     if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat')) for line in text.splitlines()):
@@ -518,7 +536,7 @@ def owner(lock):
                 if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'starting' and probe_due:
-                    proof = watcher_snapshot()
+                    proof = watcher_snapshot(cycle_timeout)
                     if proof is not None:
                         watcher_proof = proof
                         watcher_last_beat = proof[2]
@@ -533,28 +551,28 @@ def owner(lock):
                         watcher_last_beat = beat
                         watcher_last_progress = now
                     if now >= next_watcher_probe:
-                        proof = watcher_snapshot()
+                        proof = watcher_snapshot(cycle_timeout)
                         if (proof is None or watcher_proof is None or
                                 proof[:2] != watcher_proof[:2] or proof[2] < watcher_last_beat):
                             reason = 'watcher failed; inspect its startup and ownership before continuing'
                         else:
                             watcher_last_beat = proof[2]
                             next_watcher_probe = now + watcher_cadence
-                    if not reason and now - watcher_last_progress >= watcher_cycle_timeout():
+                    if not reason and now - watcher_last_progress >= cycle_timeout:
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'watching' and now >= deadline:
-                    proof = watcher_snapshot()
+                    proof = watcher_snapshot(cycle_timeout)
                     if ((arm is not None and identity(arm.pid) != arm_identity) or
                             proof is None or watcher_proof is None or
                             proof[:2] != watcher_proof[:2]):
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                     else:
                         confirmation_beat = proof[2]
-                        publish('confirming', watcher_cycle_timeout())
+                        publish('confirming', cycle_timeout)
                 if not reason and phase == 'confirming' and probe_due:
                     beat = watcher_beat()
                     if beat > confirmation_beat:
-                        proof = watcher_snapshot()
+                        proof = watcher_snapshot(cycle_timeout)
                         if (proof is not None and watcher_proof is not None and
                                 proof[:2] == watcher_proof[:2] and proof[2] > confirmation_beat and
                                 (arm is None or identity(arm.pid) == arm_identity)):
@@ -668,7 +686,7 @@ try:
             raise OSError('prior session owner still active')
         send(conn, dict(op='stop', token=record['token'], session_pid=session_pid,
                         session_identity=session_identity, session_id=session_id))
-        response = receive(conn, 590)
+        response = receive(conn, transport_timeout)
         if response.get('token') != record['token']:
             raise OSError('owner identity changed')
         rc = response['rc']
