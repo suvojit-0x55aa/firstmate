@@ -57,8 +57,10 @@ fi
 export FM_HOME FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE"
 PYTHON_PID=
 stop_python() {
+  local python_rc=0
   [ -z "$PYTHON_PID" ] || kill -TERM "$PYTHON_PID" 2>/dev/null || true
-  [ -z "$PYTHON_PID" ] || wait "$PYTHON_PID" 2>/dev/null || true
+  [ -z "$PYTHON_PID" ] || wait "$PYTHON_PID" 2>/dev/null || python_rc=$?
+  [ "$python_rc" -ne 2 ] || exit 2
   exit 0
 }
 trap stop_python HUP INT TERM
@@ -131,6 +133,10 @@ try:
         raise ValueError
 except ValueError:
     check_timeout = 30
+try:
+    check_interval = int(os.environ.get('FM_CHECK_INTERVAL', '300'))
+except ValueError:
+    check_interval = 300
 try:
     crew_state_timeout = int(os.environ.get('FM_CREW_STATE_NM_TIMEOUT', '10'))
     if crew_state_timeout <= 0:
@@ -216,7 +222,13 @@ done
 
 def watcher_cycle_timeout():
     names = os.listdir('.')
-    checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
+    try:
+        check_age = int(time.time()) - int(os.path.getmtime('.last-check'))
+    except OSError:
+        check_age = 999999
+    checks = 0
+    if check_age >= check_interval:
+        checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
     work = cycle_work()
     if work is None:
         return cycle_limit + 1
@@ -523,8 +535,10 @@ def owner(lock):
                     send(conn, dict(accepted=True, token=token))
                 elif conn is active and request.get('op') == 'commit' and phase == 'delivering':
                     if not generation_current():
+                        send(conn, dict(committed=False, token=token))
                         return
                     publish('handling', handling_grace)
+                    send(conn, dict(committed=True, token=token))
                     acknowledged = True
                 elif request.get('op') == 'stop':
                     if (request.get('session_pid'), request.get('session_identity')) != (
@@ -557,6 +571,7 @@ def owner(lock):
                             else:
                                 arm_environment = os.environ.copy()
                                 arm_environment['FM_GUARD_GRACE'] = str(cycle_limit)
+                                arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
                                 output = tempfile.TemporaryFile()
                                 arm = subprocess.Popen(['bash', scripts + '/fm-watch-arm.sh'], stdin=subprocess.DEVNULL,
                                                        stdout=output, stderr=output, start_new_session=True,
@@ -717,6 +732,7 @@ if child == 0:
     os._exit(0)
 
 conn = None
+commit_pending = False
 
 def interrupted(_signum, _frame):
     if conn is not None:
@@ -765,9 +781,18 @@ try:
                 conn.close()
                 os._exit(0)
             send(conn, dict(op='commit', token=record['token']))
+            commit_pending = True
+            committed = receive(conn)
+            if committed == dict(committed=False, token=record['token']):
+                os._exit(0)
+            if committed != dict(committed=True, token=record['token']):
+                raise OSError('continuation commit was not confirmed')
             os._exit(2)
     sys.exit(rc)
 except TransportEnded:
+    if commit_pending:
+        print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
+        sys.exit(2)
     sys.exit(0)
 except (OSError, ValueError, KeyError):
     print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)

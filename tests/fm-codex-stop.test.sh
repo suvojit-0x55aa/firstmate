@@ -142,6 +142,14 @@ while :; do
       fi
       touch "$FM_HOME/state/.last-watcher-beat"
       ;;
+    pending-tick)
+      if [ "$cycles" -eq 1 ]; then
+        . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+        fm_pending_reply_tick "$FM_HOME/state" || true
+        fm_wake_append check pending-tick 'check: pending reply tick completed'
+      fi
+      touch "$FM_HOME/state/.last-watcher-beat"
+      ;;
     *) touch "$FM_HOME/state/.last-watcher-beat" ;;
   esac
 done
@@ -523,6 +531,30 @@ test_retired_status_history_does_not_consume_cycle_budget() {
   pass 'retired status history does not consume active cycle budget'
 }
 
+test_fresh_checks_do_not_consume_cycle_budget() {
+  local dir original_root=$TEST_ROOT id
+  dir=$(fixture fresh-check-history)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  for id in $(seq 1 12); do
+    printf '%s\n' '#!/usr/bin/env bash' 'sleep 30' > "$dir/state/check-$id.check.sh"
+    chmod 0700 "$dir/state/check-$id.check.sh"
+  done
+  touch "$dir/state/.last-check"
+  FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 FM_CHECK_TIMEOUT=30 \
+    TEST_ROOT="$dir" run_stop "$dir" 180
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  append_wake "$dir/state" check release 'check: release fresh-check fixture'
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'fresh checks blocked the Codex Stop watcher'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'fresh checks prevented watcher startup'
+  assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'not-due checks consumed the active cycle budget'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'only due checks consume the active cycle budget'
+}
+
 test_due_remote_recovery_fits_cycle_budget() {
   local dir original_root=$TEST_ROOT corr
   dir=$(fixture due-remote-recovery)
@@ -560,6 +592,40 @@ SH
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'due remote recovery fits the computed watcher cycle budget'
+}
+
+test_codex_defers_remote_pending_reply_observation() {
+  local dir original_root=$TEST_ROOT corr
+  dir=$(fixture deferred-remote-observation)
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  install_controlled_watcher "$dir"
+  cat > "$dir/bin/fm-on.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_HOME/remote-observe-calls"
+printf '%s\n' idle
+SH
+  chmod +x "$dir/bin/fm-on.sh"
+  printf '%s\n' 'remote_host=fixture.invalid' 'harness=claude' 'window=fm-remote:1.1' \
+    > "$dir/state/remote-task.meta"
+  corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 \
+    bash -c '
+      . "$1/fm-pending-reply-lib.sh"
+      corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" remote-task "report status") || exit 1
+      fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 1000 || exit 1
+      printf "%s" "$corr"
+    ' _ "$dir/bin") || fail 'could not create remote observation fixture'
+  [ -n "$corr" ] || fail 'remote observation fixture omitted its correlation'
+  FM_PENDING_REPLY_NOW=1000 FM_TEST_WATCH_MODE=pending-tick TEST_ROOT="$dir" run_stop "$dir" 30
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc"
+  [ ! -e "$dir/remote-observe-calls" ] || fail 'Codex Stop synchronously observed a remote pending reply'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'deferred remote observation lost the local watcher wake'
+  finish "$dir"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 \
+    bash -c '. "$1/fm-pending-reply-lib.sh"; fm_pending_reply_tick "$2"' \
+    _ "$dir/bin" "$dir/state"
+  [ -s "$dir/remote-observe-calls" ] || fail 'default Claude pending-reply behavior stopped observing remote records'
+  pass 'Codex defers remote observation while Claude default remains unchanged'
 }
 
 test_cycle_budget_scans_are_throttled() {
@@ -797,6 +863,83 @@ test_post_accept_interruption_revokes_owner() {
   [ -s "$dir/state/.wake-queue" ] || fail 'post-accept interruption acknowledged queued work'
   finish "$dir"
   pass 'post-accept interruption revokes the owner before continuation commit'
+}
+
+test_generation_change_rejects_continuation_commit() {
+  local dir
+  dir=$(fixture rejected-commit)
+  append_wake "$dir/state" check rejected-commit 'check: retained event'
+  mkdir "$dir/fault"
+  cat > "$dir/fault/sitecustomize.py" <<'PY'
+import os
+import socket
+
+
+original_socket = socket.socket
+
+
+class TrackingSocket(original_socket):
+    def sendall(self, data, *args, **kwargs):
+        result = super().sendall(data, *args, **kwargs)
+        if b'"accepted": true' in data:
+            with open(os.path.join(os.environ['FM_HOME'], 'state', '.lock'), 'w') as stream:
+                stream.write('99999999\n')
+            with open(os.path.join(os.environ['FM_HOME'], 'generation-replaced'), 'w') as stream:
+                stream.write('yes\n')
+        return result
+
+
+socket.socket = TrackingSocket
+PY
+  PYTHONPATH="$dir/fault" run_stop "$dir"
+  wait_file "$dir/generation-replaced"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 0 ] || fail 'rejected continuation commit still requested a Codex turn'
+  for _ in $(seq 1 60); do [ ! -e "$dir/state/.codex-stop.json" ] && break; sleep 0.1; done
+  [ ! -e "$dir/state/.codex-stop.json" ] || fail 'rejected continuation commit retained handling ownership'
+  [ -s "$dir/state/.wake-queue" ] || fail 'rejected continuation commit acknowledged queued work'
+  finish "$dir"
+  pass 'generation replacement rejects the continuation commit before exit 2'
+}
+
+test_outer_interruption_preserves_confirmed_commit() {
+  local dir hook
+  dir=$(fixture confirmed-commit-interruption)
+  append_wake "$dir/state" check confirmed-commit 'check: retained event'
+  mkdir "$dir/fault"
+  cat > "$dir/fault/sitecustomize.py" <<'PY'
+import os
+import socket
+import time
+
+
+original_socket = socket.socket
+
+
+class TrackingSocket(original_socket):
+    def sendall(self, data, *args, **kwargs):
+        result = super().sendall(data, *args, **kwargs)
+        if b'"op": "commit"' in data:
+            with open(os.path.join(os.environ['FM_HOME'], 'commit-sent'), 'w') as stream:
+                stream.write('yes\n')
+            time.sleep(5)
+        return result
+
+
+socket.socket = TrackingSocket
+PY
+  PYTHONPATH="$dir/fault" run_stop "$dir"
+  wait_file "$dir/commit-sent"
+  hook=$(cat "$dir/hook")
+  kill -TERM "$hook"
+  wait_file "$dir/rc" 100
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'outer interruption discarded a confirmed continuation commit'
+  [ "$(jq -r .phase "$dir/state/.codex-stop.json")" = handling ] || fail 'confirmed continuation commit did not retain handling ownership'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_codex_stop_handling_healthy "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" || fail 'confirmed interrupted commit did not remain healthy'
+  [ -s "$dir/state/.wake-queue" ] || fail 'confirmed interrupted commit acknowledged queued work'
+  finish "$dir"
+  pass 'outer interruption preserves an owner-confirmed continuation commit'
 }
 
 test_same_process_session_replacement_hands_off() {
@@ -1041,7 +1184,9 @@ test_attached_arm_uses_complete_cycle_grace
 test_sequential_checks_fit_complete_cycle_bound
 test_sequential_task_classification_fits_complete_cycle_bound
 test_retired_status_history_does_not_consume_cycle_budget
+test_fresh_checks_do_not_consume_cycle_budget
 test_due_remote_recovery_fits_cycle_budget
+test_codex_defers_remote_pending_reply_observation
 test_cycle_budget_scans_are_throttled
 test_oversized_cycle_fails_before_transport_deadline
 test_dead_arm_launcher_retires_owned_watcher_group
@@ -1053,6 +1198,8 @@ test_singleton
 test_expired_successor_requires_replacement_generation
 test_health_challenge_rejects_replaced_generation
 test_post_accept_interruption_revokes_owner
+test_generation_change_rejects_continuation_commit
+test_outer_interruption_preserves_confirmed_commit
 test_same_process_session_replacement_hands_off
 test_uncertain_session_inert
 
