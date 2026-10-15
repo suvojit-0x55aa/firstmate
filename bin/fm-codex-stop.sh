@@ -55,7 +55,14 @@ then
   exit 2
 fi
 export FM_HOME FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE"
-exec python3 - "$MODE" "$STATE" "$SCRIPT_DIR" "$SESSION_PID" "$SESSION_IDENTITY" "$SESSION_ID" <<'PY'
+PYTHON_PID=
+stop_python() {
+  [ -z "$PYTHON_PID" ] || kill -TERM "$PYTHON_PID" 2>/dev/null || true
+  [ -z "$PYTHON_PID" ] || wait "$PYTHON_PID" 2>/dev/null || true
+  exit 0
+}
+trap stop_python HUP INT TERM
+python3 - "$MODE" "$STATE" "$SCRIPT_DIR" "$SESSION_PID" "$SESSION_IDENTITY" "$SESSION_ID" "$$" <<'PY' &
 import sys
 
 try:
@@ -71,7 +78,8 @@ try:
     import time
     import uuid
 
-    mode, state, scripts, session_pid, session_identity, session_id = sys.argv[1:]
+    mode, state, scripts, session_pid, session_identity, session_id, launcher_pid = sys.argv[1:]
+    launcher_pid = int(launcher_pid)
     os.chdir(state)  # Relative socket pathname also works in deep worktree paths.
 except Exception:
     if len(sys.argv) > 1 and sys.argv[1] == 'healthy':
@@ -81,6 +89,12 @@ except Exception:
 RECORD = '.codex-stop.json'
 SOCKET = '.codex-stop.sock'
 LOCK = '.codex-stop.owner-lock'  # Stable inode: never unlink or replace.
+
+
+class TransportEnded(Exception):
+    pass
+
+
 try:
     checkpoint = min(180, max(1, int(os.environ.get('FM_CODEX_WATCH_CHECKPOINT', '180'))))
 except ValueError:
@@ -99,7 +113,8 @@ try:
         raise ValueError
 except ValueError:
     watcher_cadence = 15
-watcher_grace = max(2, math.ceil(watcher_cadence * 2 + 1))
+watcher_progress_timeout = max(2, math.ceil(watcher_cadence * 1.5 + 1))
+watcher_grace = watcher_progress_timeout + 1
 
 
 try:
@@ -145,6 +160,17 @@ def queued():
         return False
 
 
+def launcher_current():
+    return os.getppid() == launcher_pid
+
+
+def watcher_beat():
+    try:
+        return os.stat('.last-watcher-beat').st_mtime_ns
+    except OSError:
+        return 0
+
+
 def watcher_snapshot():
     result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" "$2" "$FM_HOME" '
                    '&& printf "%s\\t%s\\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"',
@@ -173,14 +199,31 @@ def send(conn, value):
     conn.sendall((json.dumps(value) + '\n').encode())
 
 
-def receive(conn):
+def receive(conn, timeout=3):
     data = b''
-    while b'\n' not in data:
-        block = conn.recv(8192)
-        if not block or len(data) > 16384:
-            raise OSError('closed or invalid owner response')
-        data += block
-    return json.loads(data.split(b'\n', 1)[0])
+    expires = time.monotonic() + timeout
+    previous_timeout = conn.gettimeout()
+    try:
+        while b'\n' not in data:
+            if not launcher_current():
+                raise TransportEnded('hook transport ended')
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('owner response timed out')
+            conn.settimeout(min(0.2, remaining))
+            try:
+                block = conn.recv(8192)
+            except socket.timeout:
+                continue
+            if not block or len(data) > 16384:
+                raise OSError('closed or invalid owner response')
+            data += block
+        return json.loads(data.split(b'\n', 1)[0])
+    finally:
+        try:
+            conn.settimeout(previous_timeout)
+        except OSError:
+            pass
 
 
 def owner(lock):
@@ -205,6 +248,10 @@ def owner(lock):
     acknowledged = False
     published = {}
     watcher_proof = None
+    watcher_last_beat = 0
+    watcher_last_progress = 0
+    next_watcher_probe = 0
+    confirmation_beat = 0
 
     def publish(next_phase, seconds):
         nonlocal phase, deadline, published
@@ -308,7 +355,8 @@ def owner(lock):
                     continue
                 if request.get('op') == 'healthy':
                     send(conn, dict(token=token, healthy=request.get('record') == published and
-                                    phase in ('watching', 'handling') and time.monotonic() < deadline and
+                                    phase in ('watching', 'confirming', 'handling') and
+                                    time.monotonic() < deadline and
                                     generation_current()))
                     close(conn)
                 elif conn is active and request.get('op') == 'accepted' and phase == 'delivering':
@@ -319,10 +367,15 @@ def owner(lock):
                     publish('handling', handling_grace)
                     acknowledged = True
                 elif request.get('op') == 'stop':
-                    if (request.get('session_pid'), request.get('session_identity'), request.get('session_id')) != (
-                            session_pid, session_identity, session_id):
+                    if (request.get('session_pid'), request.get('session_identity')) != (
+                            session_pid, session_identity):
                         send(conn, dict(rc=2, reason='session generation changed; retry Stop', token=token))
                         close(conn)
+                    elif request.get('session_id') != session_id:
+                        send(conn, dict(rc=2, reason='session generation changed; retry Stop',
+                                        retry=True, token=token))
+                        close(conn)
+                        return
                     elif active is not None or phase == 'watching':
                         send(conn, dict(rc=0, reason='', token=token))
                         close(conn)
@@ -345,13 +398,14 @@ def owner(lock):
                 if conn is not active and time.monotonic() >= expires:
                     close(conn)
             now = time.monotonic()
-            probe_due = now >= next_probe or (phase in ('starting', 'watching') and now >= deadline)
+            probe_due = now >= next_probe or (
+                phase in ('starting', 'watching', 'confirming') and now >= deadline)
             if probe_due:
                 if not generation_current():
                     return
                 supervision_needed = needed()
                 next_probe = now + 1
-            if phase in ('starting', 'watching') and active is not None:
+            if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
                 if output is not None:
                     text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
@@ -366,17 +420,48 @@ def owner(lock):
                     proof = watcher_snapshot()
                     if proof is not None:
                         watcher_proof = proof
+                        watcher_last_beat = proof[2]
+                        watcher_last_progress = now
+                        next_watcher_probe = now + watcher_cadence
                         publish('watching', checkpoint)
                     elif now >= deadline:
+                        reason = 'watcher failed; inspect its startup and ownership before continuing'
+                if not reason and phase == 'watching' and probe_due:
+                    beat = watcher_beat()
+                    if beat > watcher_last_beat:
+                        watcher_last_beat = beat
+                        watcher_last_progress = now
+                    if now >= next_watcher_probe:
+                        proof = watcher_snapshot()
+                        if (proof is None or watcher_proof is None or
+                                proof[:2] != watcher_proof[:2] or proof[2] < watcher_last_beat):
+                            reason = 'watcher failed; inspect its startup and ownership before continuing'
+                        else:
+                            watcher_last_beat = proof[2]
+                            next_watcher_probe = now + watcher_cadence
+                    if not reason and now - watcher_last_progress >= watcher_progress_timeout:
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'watching' and now >= deadline:
                     proof = watcher_snapshot()
                     if ((arm is not None and identity(arm.pid) != arm_identity) or
                             proof is None or watcher_proof is None or
-                            proof[:2] != watcher_proof[:2] or proof[2] <= watcher_proof[2]):
+                            proof[:2] != watcher_proof[:2]):
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                     else:
-                        reason = 'quiet checkpoint elapsed; supervision is still needed'
+                        confirmation_beat = proof[2]
+                        publish('confirming', watcher_progress_timeout)
+                if not reason and phase == 'confirming' and probe_due:
+                    beat = watcher_beat()
+                    if beat > confirmation_beat:
+                        proof = watcher_snapshot()
+                        if (proof is not None and watcher_proof is not None and
+                                proof[:2] == watcher_proof[:2] and proof[2] > confirmation_beat and
+                                (arm is None or identity(arm.pid) == arm_identity)):
+                            reason = 'quiet checkpoint elapsed; supervision is still needed'
+                        else:
+                            reason = 'watcher failed; inspect its startup and ownership before continuing'
+                    elif now >= deadline:
+                        reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if reason and not finish(reason):
                     return
             elif now >= deadline:
@@ -433,6 +518,8 @@ if mode == 'healthy':
 # Every invocation may propose an owner, but only the kernel lock winner runs.
 # Losers never mutate shared state. No PID-based stale lock reclamation exists.
 try:
+    if not launcher_current():
+        sys.exit(0)
     child = os.fork()
 except OSError:
     print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
@@ -466,6 +553,8 @@ for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
     signal.signal(sig, interrupted)
 try:
     for attempt in range(30):
+        if not launcher_current():
+            sys.exit(0)
         try:
             conn, record = connect()
             break
@@ -474,15 +563,17 @@ try:
     if conn is None:
         raise OSError('owner unavailable')
     with conn:
-        if (record.get('session_pid'), record.get('session_identity'), record.get('session_id')) != (session_pid, session_identity, session_id):
+        if (record.get('session_pid'), record.get('session_identity')) != (session_pid, session_identity):
             raise OSError('prior session owner still active')
         send(conn, dict(op='stop', token=record['token'], session_pid=session_pid,
                         session_identity=session_identity, session_id=session_id))
-        conn.settimeout(checkpoint + startup_timeout + 5)
-        response = receive(conn)
+        response = receive(conn, checkpoint + startup_timeout + watcher_progress_timeout + 5)
         if response.get('token') != record['token']:
             raise OSError('owner identity changed')
         rc = response['rc']
+        if response.get('retry') is True:
+            print('Firstmate Codex supervision: ' + response['reason'] + '.', file=sys.stderr)
+            sys.exit(2)
         if rc == 2:
             print('Firstmate Codex supervision: ' + response['reason'] +
                   '. Run bin/fm-wake-drain.sh, handle all presented work, then run its exact '
@@ -502,7 +593,24 @@ try:
             send(conn, dict(op='commit', token=record['token']))
             os._exit(2)
     sys.exit(rc)
+except TransportEnded:
+    sys.exit(0)
 except (OSError, ValueError, KeyError):
     print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
     sys.exit(2)
 PY
+PYTHON_PID=$!
+wait "$PYTHON_PID"
+PYTHON_RC=$?
+trap - HUP INT TERM
+if [ "$MODE" = healthy ]; then
+  [ "$PYTHON_RC" -eq 0 ] && exit 0
+  exit 1
+fi
+case "$PYTHON_RC" in
+  0|2) exit "$PYTHON_RC" ;;
+  *)
+    echo 'Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.' >&2
+    exit 2
+    ;;
+esac

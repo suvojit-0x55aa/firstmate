@@ -116,9 +116,21 @@ trap clean_watcher EXIT
 trap 'exit 0' HUP INT TERM
 touch "$FM_HOME/state/.last-watcher-beat"
 date +%s > "$FM_HOME/controlled-watcher-ready"
+cycles=0
 while :; do
   sleep "${FM_POLL:-1}"
-  [ "${FM_TEST_WATCH_MODE:-progress}" = stall ] || touch "$FM_HOME/state/.last-watcher-beat"
+  case "${FM_TEST_WATCH_MODE:-progress}" in
+    stall) ;;
+    late-stop)
+      cycles=$((cycles + 1))
+      touch "$FM_HOME/state/.last-watcher-beat"
+      if [ "$cycles" -ge 3 ]; then
+        printf '%s\n' "$$" > "$FM_HOME/controlled-watcher-stopped"
+        kill -STOP "$$"
+      fi
+      ;;
+    *) touch "$FM_HOME/state/.last-watcher-beat" ;;
+  esac
 done
 WATCH
   chmod +x "$dir/bin/fm-watch-arm.sh" "$dir/bin/fm-watch.sh"
@@ -201,7 +213,8 @@ test_python_launch_failure_fails_closed() {
   mkdir "$dir/fault-bin"
   cat > "$dir/fault-bin/python3" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = -c ]; then
+if [ "$#" -eq 1 ] && [ "${1:-}" = - ]; then
+  cat >/dev/null
   exit 0
 fi
 printf '%s\n' 'failed' > "$FM_HOME/python-launch-attempted"
@@ -322,6 +335,24 @@ test_stalled_watcher_cannot_complete_quiet_window() {
   pass 'quiet checkpoint requires watcher beacon progress'
 }
 
+test_late_stopped_watcher_cannot_complete_quiet_window() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture late-stopped-watcher)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  FM_TEST_WATCH_MODE=late-stop TEST_ROOT="$dir" run_stop "$dir" 4
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-stopped"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'late stopped watcher allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'watcher failed' 'late stopped watcher omitted failure reason'
+  assert_not_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'late stopped watcher reported quiet renewal'
+  [ -s "$dir/controlled-arm-term" ] || fail 'late stopped watcher arm was not cancelled'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'post-deadline progress rejects a late stopped watcher'
+}
+
 test_final_source_wake_retains_continuation() {
   local dir
   dir=$(fixture final)
@@ -433,6 +464,55 @@ test_post_accept_interruption_revokes_owner() {
   [ -s "$dir/state/.wake-queue" ] || fail 'post-accept interruption acknowledged queued work'
   finish "$dir"
   pass 'post-accept interruption revokes the owner before continuation commit'
+}
+
+test_same_process_session_replacement_hands_off() {
+  local dir
+  dir=$(fixture same-process-handoff)
+  append_wake "$dir/state" check handoff 'check: retained event'
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_CODEX_WATCH_CHECKPOINT=2 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL=1 FM_BACKEND=tmux \
+    "$TEST_CODEX" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "$$" > "$FM_HOME/harness"
+      printf "%s\n" "{\"session_id\":\"session-a\",\"stop_hook_active\":true}" > "$FM_HOME/payload-a"
+      "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload-a" > "$FM_HOME/a-out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/a-rc"
+      for _ in $(seq 1 50); do
+        [ "$(jq -r .phase "$FM_HOME/state/.codex-stop.json" 2>/dev/null)" = handling ] && break
+        sleep 0.1
+      done
+      jq -r .owner "$FM_HOME/state/.codex-stop.json" > "$FM_HOME/owner-a"
+      printf "%s\n" "{\"session_id\":\"session-b\",\"stop_hook_active\":true}" > "$FM_HOME/payload-b"
+      "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload-b" > "$FM_HOME/b1-out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/b1-rc"
+      for _ in $(seq 1 50); do [ ! -e "$FM_HOME/state/.codex-stop.json" ] && break; sleep 0.1; done
+      [ ! -e "$FM_HOME/state/.codex-stop.json" ] && printf "%s\n" yes > "$FM_HOME/a-revoked"
+      sleep 0.1
+      "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload-b" > "$FM_HOME/b2-out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/b2-rc"
+      for _ in $(seq 1 50); do
+        [ "$(jq -r .phase "$FM_HOME/state/.codex-stop.json" 2>/dev/null)" = handling ] && break
+        sleep 0.1
+      done
+      jq -r .owner "$FM_HOME/state/.codex-stop.json" > "$FM_HOME/owner-b"
+      jq -r .session_id "$FM_HOME/state/.codex-stop.json" > "$FM_HOME/session-b"
+      "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload-b" > "$FM_HOME/b3-out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/b3-rc"
+      while [ ! -f "$FM_HOME/release" ]; do sleep 0.1; done
+    ' &
+  HARNESS=$!
+  wait_file "$dir/b3-rc"
+  [ "$(cat "$dir/a-rc")" = 2 ] || fail 'original session did not establish handling ownership'
+  [ "$(cat "$dir/b1-rc")" = 2 ] || fail 'replacement session did not receive bounded retry'
+  assert_contains "$(cat "$dir/b1-out")" 'session generation changed; retry Stop' 'replacement session omitted retry reason'
+  [ -s "$dir/a-revoked" ] || fail 'replacement session did not revoke the prior owner'
+  [ "$(cat "$dir/b2-rc")" = 2 ] && [ "$(cat "$dir/b3-rc")" = 2 ] || fail 'replacement session could not repeat Stop after handoff'
+  [ "$(cat "$dir/owner-a")" != "$(cat "$dir/owner-b")" ] || fail 'replacement session reused the prior owner'
+  [ "$(cat "$dir/session-b")" = session-b ] || fail 'replacement owner retained the old session id'
+  [ -s "$dir/state/.wake-queue" ] || fail 'session handoff acknowledged queued work'
+  finish "$dir"
+  pass 'same-process session replacement revokes and reacquires ownership'
 }
 
 test_uncertain_session_inert() {
@@ -622,6 +702,7 @@ test_quiet_renewal
 test_wedged_arm_cannot_report_quiet_renewal
 test_late_watcher_gets_full_quiet_window
 test_stalled_watcher_cannot_complete_quiet_window
+test_late_stopped_watcher_cannot_complete_quiet_window
 test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling
 test_singleton
@@ -629,6 +710,7 @@ test_singleton
 test_expired_successor_requires_replacement_generation
 test_health_challenge_rejects_replaced_generation
 test_post_accept_interruption_revokes_owner
+test_same_process_session_replacement_hands_off
 test_uncertain_session_inert
 
 test_identity_mismatch_fails_closed_and_reaps_owned_group
