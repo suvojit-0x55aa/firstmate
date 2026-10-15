@@ -171,6 +171,35 @@ CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 CHECKS_PER_CYCLE=${FM_CHECKS_PER_CYCLE:-0}
 case "$CHECKS_PER_CYCLE" in ''|*[!0-9]*) CHECKS_PER_CYCLE=0 ;; esac
 CHECK_SWEEP_CURSOR="$STATE/.check-sweep-cursor"
+
+check_sweep_has_remaining() {
+  local pending_check pending_name
+  for pending_check in "$STATE"/*.check.sh; do
+    [ -e "$pending_check" ] || continue
+    pending_name=$(basename "$pending_check")
+    [[ "$pending_name" > "$last_check_name" ]] && return 0
+  done
+  return 1
+}
+
+checkpoint_check_sweep() {
+  if [ "$CHECKS_PER_CYCLE" -gt 0 ] && check_sweep_has_remaining; then
+    [ -n "$last_check_name" ] || return 1
+    ( umask 077; printf '%s\n' "$last_check_name" > "$CHECK_SWEEP_CURSOR" ) || return 1
+    rm -f "$STATE/.last-check"
+  else
+    rm -f "$CHECK_SWEEP_CURSOR"
+    touch "$STATE/.last-check"
+  fi
+}
+
+append_rejected_checks() {
+  local rejected_reason
+  [ -n "${rejected_checks:-}" ] || return 0
+  rejected_reason="check: rejected unauthenticated state checks:$rejected_checks"
+  fm_wake_append check unauthenticated-state-checks "$rejected_reason"
+}
+
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -1255,16 +1284,16 @@ while :; do
       case "$check_cursor" in
         ''|.*|*[!A-Za-z0-9._-]*|*/*) check_cursor= ;;
       esac
-      [ -z "$check_cursor" ] || [ -f "$STATE/$check_cursor" ] || check_cursor=
     fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       check_name=$(basename "$c")
       if [ -n "$check_cursor" ]; then
-        if [ "$check_name" = "$check_cursor" ]; then
+        if [[ "$check_name" > "$check_cursor" ]]; then
           check_cursor=
+        else
+          continue
         fi
-        continue
       fi
       if [ "$CHECKS_PER_CYCLE" -gt 0 ] && [ "$checks_run" -ge "$CHECKS_PER_CYCLE" ]; then
         checks_remaining=1
@@ -1321,20 +1350,20 @@ while :; do
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          rm -f "$CHECK_SWEEP_CURSOR"
+          append_rejected_checks || exit 1
+          checkpoint_check_sweep || exit 1
           wake "$reason"
         fi
         fm_wake_append check "$c" "$reason" || exit 1
-        touch "$STATE/.last-check"
-        rm -f "$CHECK_SWEEP_CURSOR"
+        append_rejected_checks || exit 1
+        checkpoint_check_sweep || exit 1
         wake "$reason"
       fi
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
-      fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
-      rm -f "$CHECK_SWEEP_CURSOR"
+      append_rejected_checks || exit 1
+      checkpoint_check_sweep || exit 1
       wake "$reason"
     fi
     if [ "$CHECKS_PER_CYCLE" -gt 0 ] && [ "$checks_remaining" -eq 1 ]; then

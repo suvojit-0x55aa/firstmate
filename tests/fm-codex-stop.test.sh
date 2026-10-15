@@ -71,6 +71,27 @@ wait_file() {
   [ -s "$1" ] || fail "timeout waiting for $1"
 }
 finish() { touch "$1/release"; wait "$HARNESS"; }
+
+ack_watcher_cycle() {
+  local state=$1 err sequence generation
+  err="$state/.test-wake-drain.err"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+  rm -f "$err"
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
+    --recovery-generation "$generation"
+}
+
+run_bounded_watcher_cycle() {
+  local home=$1 fakebin=$2
+  perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 3; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
+      FM_CHECKS_PER_CYCLE=1 FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+      PATH="$fakebin:$PATH" "$ROOT/bin/fm-watch.sh"
+}
+
 assert_no_watcher() {
   local pid
   pid=$(cat "$1/state/.watch.lock/pid" 2>/dev/null || true)
@@ -184,11 +205,17 @@ if [ "${1:-}" = display-message ]; then
     if [ "$1" = -t ]; then
       target=${2:-}
     fi
-    case "$1" in *pane_current_command*) format=current-command ;; esac
+    case "$1" in
+      *pane_current_command*) format=current-command ;;
+      *pane_id*) format=existence ;;
+    esac
     shift
   done
   case " ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}} " in
     *" $target "*)
+      case " ${FM_TEST_EXISTENCE_PROBE_FAILURES:-} " in
+        *" $target "*) [ "$format" != existence ] || exit 1 ;;
+      esac
       if [ "$format" = current-command ]; then
         case " ${FM_TEST_LIVE_TARGETS:-} " in
           *" $target "*) printf 'codex\n' ;;
@@ -664,6 +691,23 @@ test_small_live_endpoint_inventory_remains_bounded() {
   pass 'small live endpoint inventories remain conservatively bounded'
 }
 
+test_failed_existence_probe_is_conservatively_budgeted() {
+  local dir
+  dir=$(fixture uncertain-endpoint-inventory)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:uncertain' > "$dir/state/uncertain.meta"
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:uncertain' \
+    FM_TEST_LIVE_TARGETS='fleet:uncertain' FM_TEST_EXISTENCE_PROBE_FAILURES='fleet:uncertain' \
+    FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=10 FM_CREW_STATE_NM_TIMEOUT=200 \
+    FM_WORKTREE_WRITE_TIMEOUT=200 run_stop "$dir" 4
+  wait_file "$dir/rc" 200
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'uncertain endpoint escaped the fixed Stop deadline'
+  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'failed existence probe was treated as authoritative death'
+  [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'uncertain endpoint inventory started an under-budgeted watcher'
+  finish "$dir"
+  pass 'failed existence probes remain conservatively budgeted'
+}
+
 test_due_custom_and_pr_checks_remain_bounded() {
   local dir id custom_runs pr_runs
   dir=$(fixture due-custom-and-pr-checks)
@@ -713,6 +757,70 @@ SH
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'due custom and PR checks complete across bounded watcher cycles'
+}
+
+test_actionable_checks_resume_bounded_sweep() {
+  local dir state rc
+  dir=$(fixture actionable-check-resume)
+  state="$dir/state"
+  mkdir "$dir/fakebin"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' pr >> "$FM_HOME/check-runs"
+printf '%s\n' MERGED
+SH
+  chmod +x "$dir/fakebin/gh"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    "printf '%s\\n' recurring >> \"\$FM_HOME/check-runs\"" \
+    "printf '%s\\n' ready" > "$state/a-recurring.check.sh"
+  chmod 0700 "$state/a-recurring.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" a-recurring >/dev/null \
+    || fail 'could not register recurring actionable check'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    url=https://github.com/example/project/pull/1
+    printf "pr=%s\n" "$url" > "$2/b-pr.meta" || exit 1
+    fm_pr_poll_prepare "$2" b-pr github "$url" github.com example/project 1 \
+      "$1/fm-pr-poll.sh" || exit 1
+    fm_pr_poll_publish_prepared
+  ' _ "$ROOT/bin" "$state" || fail 'could not register merged PR poll'
+  printf '%s\n' '#!/usr/bin/env bash' \
+    "printf '%s\\n' tail >> \"\$FM_HOME/check-runs\"" > "$state/z-tail.check.sh"
+  chmod 0700 "$state/z-tail.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" z-tail >/dev/null \
+    || fail 'could not register trailing silent check'
+
+  set +e
+  run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "recurring actionable cycle failed: $(cat "$dir/watch-1.err")"
+  [ "$(cat "$state/.check-sweep-cursor")" = a-recurring.check.sh ] \
+    || fail 'recurring actionable check did not persist sweep progress'
+  [ ! -e "$state/.last-check" ] || fail 'recurring actionable check delayed its incomplete sweep'
+  ack_watcher_cycle "$state" >/dev/null || fail 'could not acknowledge recurring actionable wake'
+
+  set +e
+  run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged PR cycle failed: $(cat "$dir/watch-2.err")"
+  [ ! -e "$state/b-pr.check.sh" ] || fail 'merged PR poll was not retired'
+  [ "$(cat "$state/.check-sweep-cursor")" = b-pr.check.sh ] \
+    || fail 'retired merged PR poll did not persist sweep progress'
+  [ ! -e "$state/.last-check" ] || fail 'merged PR result delayed its incomplete sweep'
+  ack_watcher_cycle "$state" >/dev/null || fail 'could not acknowledge merged PR wake'
+
+  set +e
+  run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch-3.out" 2> "$dir/watch-3.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "trailing silent cycle ended unexpectedly: rc=$rc $(cat "$dir/watch-3.err")"
+  [ "$(cat "$dir/check-runs")" = $'recurring\npr\ntail' ] \
+    || fail "bounded sweep did not advance fairly: $(cat "$dir/check-runs")"
+  [ ! -e "$state/.check-sweep-cursor" ] || fail 'completed resumed sweep retained its cursor'
+  [ -e "$state/.last-check" ] || fail 'completed resumed sweep did not restore its cadence'
+  pass 'actionable custom and merged checks resume bounded sweeps fairly'
 }
 
 test_due_remote_recovery_fits_cycle_budget() {
@@ -1353,7 +1461,9 @@ test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_small_live_endpoint_inventory_remains_bounded
+test_failed_existence_probe_is_conservatively_budgeted
 test_due_custom_and_pr_checks_remain_bounded
+test_actionable_checks_resume_bounded_sweep
 test_due_remote_recovery_fits_cycle_budget
 test_codex_defers_remote_pending_reply_observation
 test_cycle_budget_scans_are_throttled

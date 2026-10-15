@@ -253,9 +253,6 @@ for meta in "$FM_STATE_OVERRIDE"/*.meta; do
   esac
   seen="$seen$target|"
   backend=$(fm_backend_of_meta "$meta")
-  task=${meta##*/}
-  task=${task%.meta}
-  fm_backend_target_exists "$backend" "$target" "fm-$task" 2>/dev/null || continue
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
   case "$agent_state" in
     dead|missing) ;;
