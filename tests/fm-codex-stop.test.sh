@@ -20,6 +20,10 @@ cleanup_tests() {
       kill -TERM "$pid" 2>/dev/null || true
     fi
   done
+  for file in "$TMP_ROOT"/*/sentinel-pid; do
+    [ -f "$file" ] || continue
+    kill -TERM "$(cat "$file")" 2>/dev/null || true
+  done
   fm_test_cleanup
 }
 trap cleanup_tests EXIT
@@ -62,8 +66,8 @@ run_stop() { # <home> [checkpoint]
   HARNESS=$!
 }
 wait_file() {
-  local i=0
-  while [ ! -s "$1" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
+  local i=0 limit=${2:-150}
+  while [ ! -s "$1" ] && [ "$i" -lt "$limit" ]; do sleep 0.1; i=$((i + 1)); done
   [ -s "$1" ] || fail "timeout waiting for $1"
 }
 finish() { touch "$1/release"; wait "$HARNESS"; }
@@ -324,7 +328,7 @@ test_stalled_watcher_cannot_complete_quiet_window() {
   dir=$(fixture stalled-watcher)
   install_controlled_watcher "$dir"
   : > "$dir/state/task.meta"
-  FM_TEST_WATCH_MODE=stall TEST_ROOT="$dir" run_stop "$dir" 2
+  FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 2
   TEST_ROOT=$original_root
   wait_file "$dir/controlled-watcher-ready"
   wait_file "$dir/rc"
@@ -342,7 +346,7 @@ test_late_stopped_watcher_cannot_complete_quiet_window() {
   dir=$(fixture late-stopped-watcher)
   install_controlled_watcher "$dir"
   : > "$dir/state/task.meta"
-  FM_TEST_WATCH_MODE=late-stop TEST_ROOT="$dir" run_stop "$dir" 4
+  FM_TEST_WATCH_MODE=late-stop FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 4
   TEST_ROOT=$original_root
   wait_file "$dir/controlled-watcher-stopped"
   wait_file "$dir/rc"
@@ -359,10 +363,10 @@ test_complete_watcher_cycle_can_deliver_actionable_wake() {
   local dir
   dir=$(fixture complete-cycle)
   : > "$dir/state/task.meta"
-  FM_SIGNAL_GRACE=4 FM_GUARD_GRACE=8 run_stop "$dir" 15
+  FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 run_stop "$dir" 45
   wait_file "$dir/state/.watch.lock/pid"
   printf '%s\n' 'done: complete cycle' > "$dir/state/complete.status"
-  wait_file "$dir/rc"
+  wait_file "$dir/rc" 450
   [ "$(cat "$dir/rc")" = 2 ] || fail 'complete watcher cycle lost its actionable wake'
   assert_contains "$(cat "$dir/out")" 'durable wake pending' 'complete watcher cycle did not deliver its queued wake'
   assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'complete watcher cycle was reported as stalled'
@@ -370,6 +374,26 @@ test_complete_watcher_cycle_can_deliver_actionable_wake() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'complete watcher cycle remains live through signal coalescing'
+}
+
+test_sequential_checks_fit_complete_cycle_bound() {
+  local dir id
+  dir=$(fixture sequential-checks)
+  : > "$dir/state/task.meta"
+  for id in first second; do
+    printf '%s\n' '#!/usr/bin/env bash' 'sleep 3' > "$dir/state/$id.check.sh"
+    chmod 0700 "$dir/state/$id.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+      || fail "could not register $id sequential check"
+  done
+  FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=2 FM_CHECK_TIMEOUT=4 run_stop "$dir" 4
+  wait_file "$dir/rc" 250
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'sequential checks prevented quiet renewal'
+  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'sequential checks were misclassified as a stalled watcher'
+  assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'sequential checks exceeded the computed cycle bound'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'sequential checks fit the computed watcher cycle bound'
 }
 
 test_dead_arm_launcher_retires_owned_watcher_group() {
@@ -389,6 +413,57 @@ test_dead_arm_launcher_retires_owned_watcher_group() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'dead arm launcher retains cancellation of its owned watcher group'
+}
+
+test_reaped_uncertain_group_is_not_signalled() {
+  local dir original_root=$TEST_ROOT sentinel
+  dir=$(fixture uncertain-arm-group)
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/uncertain-arm-pid"
+exit 1
+ARM
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  mkdir "$dir/fault"
+  cat > "$dir/fault/sitecustomize.py" <<'PY'
+import os
+import signal
+
+
+original_killpg = os.killpg
+
+
+def reused_group(group, signum):
+    home = os.environ.get('FM_HOME', '')
+    try:
+        with open(os.path.join(home, 'uncertain-arm-pid')) as stream:
+            arm = int(stream.read().strip())
+    except (OSError, ValueError):
+        return original_killpg(group, signum)
+    if group != arm:
+        return original_killpg(group, signum)
+    with open(os.path.join(home, 'uncertain-group-signalled'), 'a') as stream:
+        stream.write(str(signum) + '\n')
+    if signum:
+        with open(os.path.join(home, 'sentinel-pid')) as stream:
+            os.kill(int(stream.read().strip()), signal.SIGTERM)
+
+
+os.killpg = reused_group
+PY
+  sleep 60 & sentinel=$!
+  printf '%s\n' "$sentinel" > "$dir/sentinel-pid"
+  : > "$dir/state/task.meta"
+  PYTHONPATH="$dir/fault" TEST_ROOT="$dir" run_stop "$dir" 15
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'uncertain arm group allowed Stop to fail open'
+  [ ! -e "$dir/uncertain-group-signalled" ] || fail 'adapter signalled a reaped group without identity-bound ownership'
+  kill -0 "$sentinel" 2>/dev/null || fail 'adapter signalled the unrelated reused-group sentinel'
+  kill -TERM "$sentinel"; wait "$sentinel" 2>/dev/null || true
+  finish "$dir"
+  pass 'reaped uncertain process groups remain untouched'
 }
 
 test_final_source_wake_retains_continuation() {
@@ -742,7 +817,9 @@ test_late_watcher_gets_full_quiet_window
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
+test_sequential_checks_fit_complete_cycle_bound
 test_dead_arm_launcher_retires_owned_watcher_group
+test_reaped_uncertain_group_is_not_signalled
 test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling
 test_singleton

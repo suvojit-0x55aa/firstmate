@@ -114,18 +114,35 @@ try:
 except ValueError:
     watcher_cadence = 15
 try:
-    watcher_progress_timeout = int(os.environ.get('FM_GUARD_GRACE', '300'))
-    if watcher_progress_timeout <= 0:
+    watcher_guard_grace = int(os.environ.get('FM_GUARD_GRACE', '300'))
+    if watcher_guard_grace <= 0:
         raise ValueError
 except ValueError:
-    watcher_progress_timeout = 300
-watcher_grace = watcher_progress_timeout
+    watcher_guard_grace = 300
+try:
+    signal_grace = float(os.environ.get('FM_SIGNAL_GRACE', '30'))
+    if not math.isfinite(signal_grace) or signal_grace < 0:
+        raise ValueError
+except ValueError:
+    signal_grace = 30
+try:
+    check_timeout = int(os.environ.get('FM_CHECK_TIMEOUT', '30'))
+    if check_timeout <= 0:
+        raise ValueError
+except ValueError:
+    check_timeout = 30
 
 
 try:
     startup_timeout = min(12, max(1, int(os.environ.get('FM_ARM_CONFIRM_TIMEOUT', '10')))) + 1
 except ValueError:
     startup_timeout = 11
+
+
+def watcher_cycle_timeout():
+    checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in os.listdir('.'))
+    components = math.ceil(watcher_cadence + signal_grace + check_timeout * checks + 5)
+    return max(watcher_guard_grace, components)
 
 
 def shell(body, *args):
@@ -140,6 +157,17 @@ def shell(body, *args):
 def identity(pid):
     result = shell('fm_pid_identity "$2"', str(pid))
     return result.stdout.rstrip('\n') if result and result.returncode == 0 else ''
+
+
+def identity_in_group(pid, recorded, group):
+    if identity(pid) != recorded:
+        return False
+    try:
+        if os.getpgid(pid) != group:
+            return False
+    except OSError:
+        return False
+    return identity(pid) == recorded
 
 
 def generation_current():
@@ -179,7 +207,7 @@ def watcher_beat():
 def watcher_snapshot():
     result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" "$2" "$FM_HOME" '
                    '&& printf "%s\\t%s\\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"',
-                   str(watcher_grace))
+                   str(watcher_cycle_timeout()))
     if result is None or result.returncode != 0:
         return None
     fields = result.stdout.rstrip('\n').split('\t')
@@ -288,27 +316,31 @@ def owner(lock):
                 except subprocess.TimeoutExpired:
                     os.killpg(arm.pid, signal.SIGKILL)
                     arm.wait(timeout=1)
-            try:
-                os.killpg(arm.pid, 0)
-            except ProcessLookupError:
-                pass
             else:
-                try:
-                    os.killpg(arm.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                expires = time.monotonic() + 3
-                while time.monotonic() < expires:
+                proof = watcher_proof or watcher_snapshot()
+                owned_member = False
+                if proof is not None:
                     try:
-                        os.killpg(arm.pid, 0)
-                    except ProcessLookupError:
-                        break
-                    time.sleep(0.05)
-                else:
+                        member_pid = int(proof[0])
+                        owned_member = identity_in_group(member_pid, proof[1], arm.pid)
+                    except ValueError:
+                        owned_member = False
+                if owned_member:
                     try:
-                        os.killpg(arm.pid, signal.SIGKILL)
+                        os.killpg(arm.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
+                    expires = time.monotonic() + 3
+                    while time.monotonic() < expires:
+                        if not identity_in_group(member_pid, proof[1], arm.pid):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        if identity_in_group(member_pid, proof[1], arm.pid):
+                            try:
+                                os.killpg(arm.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
             arm = None
             arm_identity = ''
         if output is not None:
@@ -465,7 +497,7 @@ def owner(lock):
                         else:
                             watcher_last_beat = proof[2]
                             next_watcher_probe = now + watcher_cadence
-                    if not reason and now - watcher_last_progress >= watcher_progress_timeout:
+                    if not reason and now - watcher_last_progress >= watcher_cycle_timeout():
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'watching' and now >= deadline:
                     proof = watcher_snapshot()
@@ -475,7 +507,7 @@ def owner(lock):
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                     else:
                         confirmation_beat = proof[2]
-                        publish('confirming', watcher_progress_timeout)
+                        publish('confirming', watcher_cycle_timeout())
                 if not reason and phase == 'confirming' and probe_due:
                     beat = watcher_beat()
                     if beat > confirmation_beat:
@@ -593,7 +625,7 @@ try:
             raise OSError('prior session owner still active')
         send(conn, dict(op='stop', token=record['token'], session_pid=session_pid,
                         session_identity=session_identity, session_id=session_id))
-        response = receive(conn, checkpoint + startup_timeout + watcher_progress_timeout + 5)
+        response = receive(conn, 590)
         if response.get('token') != record['token']:
             raise OSError('owner identity changed')
         rc = response['rc']
