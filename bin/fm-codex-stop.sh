@@ -56,6 +56,8 @@ then
 fi
 export FM_HOME FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE"
 PYTHON_PID=
+# Invoked indirectly by the HUP/INT/TERM trap below.
+# shellcheck disable=SC2329
 stop_python() {
   local python_rc=0
   [ -z "$PYTHON_PID" ] || kill -TERM "$PYTHON_PID" 2>/dev/null || true
