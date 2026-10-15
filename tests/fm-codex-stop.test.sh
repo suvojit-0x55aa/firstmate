@@ -125,15 +125,22 @@ date +%s > "$FM_HOME/controlled-watcher-ready"
 cycles=0
 while :; do
   sleep "${FM_POLL:-1}"
+  cycles=$((cycles + 1))
   case "${FM_TEST_WATCH_MODE:-progress}" in
     stall) ;;
     late-stop)
-      cycles=$((cycles + 1))
       touch "$FM_HOME/state/.last-watcher-beat"
       if [ "$cycles" -ge 3 ]; then
         printf '%s\n' "$$" > "$FM_HOME/controlled-watcher-stopped"
         kill -STOP "$$"
       fi
+      ;;
+    pending-recovery)
+      if [ "$cycles" -eq 1 ]; then
+        . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+        fm_pending_reply_send_recovery "$FM_HOME/state" "$(cat "$FM_HOME/pending-corr")" || true
+      fi
+      touch "$FM_HOME/state/.last-watcher-beat"
       ;;
     *) touch "$FM_HOME/state/.last-watcher-beat" ;;
   esac
@@ -492,6 +499,102 @@ SH
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'sequential task classification fits the computed watcher cycle bound'
+}
+
+test_retired_status_history_does_not_consume_cycle_budget() {
+  local dir original_root=$TEST_ROOT id
+  dir=$(fixture retired-status-history)
+  install_controlled_watcher "$dir"
+  printf '%s\n' 'window=fm-active:1.1' > "$dir/state/task.meta"
+  for id in $(seq 1 15); do
+    printf '%s\n' 'done: retained history' > "$dir/state/retired-$id.status"
+    prime_status_seen "$dir/state" "$dir/state/retired-$id.status"
+  done
+  FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=300 TEST_ROOT="$dir" run_stop "$dir" 180
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  append_wake "$dir/state" check release 'check: release retained-history fixture'
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'retained status history blocked the Codex Stop watcher'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'retained status history prevented watcher startup'
+  assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'retired status history consumed the active cycle budget'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'retired status history does not consume active cycle budget'
+}
+
+test_due_remote_recovery_fits_cycle_budget() {
+  local dir original_root=$TEST_ROOT corr
+  dir=$(fixture due-remote-recovery)
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  install_controlled_watcher "$dir"
+  printf '%s\n' 'remote_host=fixture.invalid' > "$dir/state/remote-task.meta"
+  corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 \
+    FM_PENDING_REPLY_GRACE_SECS=0 bash -c '
+      . "$1/fm-pending-reply-lib.sh"
+      corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" remote-task "report status") || exit 1
+      fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 900 || exit 1
+      rec=$(fm_pending_reply_path "$FM_STATE_OVERRIDE" "$corr")
+      fm_pending_reply_set "$rec" request_turn_completed_epoch 950 || exit 1
+      fm_pending_reply_note_remote_channel_caught_up "$FM_STATE_OVERRIDE" remote-task 1000 || exit 1
+      printf "%s" "$corr"
+    ' _ "$dir/bin") || fail 'could not create due remote recovery fixture'
+  printf '%s\n' "$corr" > "$dir/pending-corr"
+  cat > "$dir/recovery-hook.sh" <<'SH'
+#!/usr/bin/env bash
+sleep 20
+. "$TEST_ROOT/bin/fm-wake-lib.sh"
+fm_wake_append check remote-recovery 'check: bounded remote recovery completed'
+SH
+  chmod +x "$dir/recovery-hook.sh"
+  FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 FM_SEND_REMOTE_BUDGET=20 \
+    FM_PENDING_REPLY_NOW=1000 FM_TEST_WATCH_MODE=pending-recovery \
+    FM_PENDING_REPLY_SEND_HOOK='"$FM_HOME/recovery-hook.sh"' \
+    TEST_ROOT="$dir" run_stop "$dir" 45
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc" 350
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'due remote recovery escaped Codex Stop supervision'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'due remote recovery did not deliver its wake'
+  assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'due remote recovery exceeded the computed cycle budget'
+  [ -s "$dir/state/.wake-queue" ] || fail 'due remote recovery wake was not retained'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'due remote recovery fits the computed watcher cycle budget'
+}
+
+test_cycle_budget_scans_are_throttled() {
+  local dir original_root=$TEST_ROOT scans
+  dir=$(fixture throttled-cycle-scans)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  mkdir "$dir/fault"
+  cat > "$dir/fault/sitecustomize.py" <<'PY'
+import os
+
+
+original_listdir = os.listdir
+
+
+def tracked_listdir(path='.'):
+    result = original_listdir(path)
+    if path == '.' and os.path.samefile(os.getcwd(), os.path.join(os.environ['FM_HOME'], 'state')):
+        with open(os.path.join(os.environ['FM_HOME'], 'cycle-budget-scans'), 'a') as stream:
+            stream.write('scan\n')
+    return result
+
+
+os.listdir = tracked_listdir
+PY
+  PYTHONPATH="$dir/fault" FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 4
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc" 200
+  scans=$(wc -l < "$dir/cycle-budget-scans")
+  [ "$scans" -le 12 ] || fail "cycle budget was rescanned $scans times during a four-second checkpoint"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'throttled cycle scans prevented quiet renewal'
+  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'throttled cycle scans lost quiet renewal'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'cycle budget scans stay on the throttled probe boundary'
 }
 
 test_oversized_cycle_fails_before_transport_deadline() {
@@ -937,6 +1040,9 @@ test_complete_watcher_cycle_can_deliver_actionable_wake
 test_attached_arm_uses_complete_cycle_grace
 test_sequential_checks_fit_complete_cycle_bound
 test_sequential_task_classification_fits_complete_cycle_bound
+test_retired_status_history_does_not_consume_cycle_budget
+test_due_remote_recovery_fits_cycle_budget
+test_cycle_budget_scans_are_throttled
 test_oversized_cycle_fails_before_transport_deadline
 test_dead_arm_launcher_retires_owned_watcher_group
 test_reaped_uncertain_group_is_not_signalled

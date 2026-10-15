@@ -144,6 +144,12 @@ try:
 except ValueError:
     worktree_write_timeout = 10
 try:
+    remote_send_timeout = int(os.environ.get('FM_SEND_REMOTE_BUDGET', '30'))
+    if remote_send_timeout <= 0:
+        raise ValueError
+except ValueError:
+    remote_send_timeout = 30
+try:
     inactive_reconcile_timeout = int(os.environ.get('FM_INACTIVE_RECONCILE_BUDGET_SECS', '10')) + 1
     if inactive_reconcile_timeout <= 1 or inactive_reconcile_timeout > 31:
         raise ValueError
@@ -161,16 +167,63 @@ protocol_reserve = 10
 cycle_limit = transport_timeout - startup_timeout - checkpoint - protocol_reserve
 
 
-def watcher_cycle_timeout():
-    checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in os.listdir('.'))
+def cycle_work():
+    result = shell(r'''
+for file in "$FM_STATE_OVERRIDE"/*.status "$FM_STATE_OVERRIDE"/*.turn-ended; do
+  [ -f "$file" ] || continue
+  if ! fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file"; then
+    printf 'signal\t%s\n' "$(basename "$file")"
+  fi
+done
+dir=${FM_PENDING_REPLY_DIR_OVERRIDE:-$FM_STATE_OVERRIDE/pending-replies}
+[ -d "$dir" ] || exit 0
+. "$1/fm-pending-reply-lib.sh" || exit 1
+now=$(fm_pending_reply_now)
+for rec in "$dir"/*; do
+  [ -f "$rec" ] || continue
+  case "$(basename "$rec")" in .*) continue ;; esac
+  [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || continue
+  [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
+  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+  grace=$(fm_pending_reply_get "$rec" grace_secs)
+  case "$delivered:$grace:$now" in
+    *[!0-9:]*|:*|*::*|*:) continue ;;
+  esac
+  [ "$((now - delivered))" -ge "$grace" ] || continue
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id" || continue
+  printf 'remote-recovery\t%s\n' "$(basename "$rec")"
+done
+''')
+    if result is None or result.returncode != 0:
+        return None
     signal_tasks = set()
+    remote_recoveries = set()
+    for line in result.stdout.splitlines():
+        kind, separator, value = line.partition('\t')
+        if not separator or not value:
+            continue
+        if kind == 'signal':
+            if value.endswith('.status'):
+                value = value[:-len('.status')]
+            elif value.endswith('.turn-ended'):
+                value = value[:-len('.turn-ended')]
+            signal_tasks.add(value)
+        elif kind == 'remote-recovery':
+            remote_recoveries.add(value)
+    return signal_tasks, len(remote_recoveries)
+
+
+def watcher_cycle_timeout():
+    names = os.listdir('.')
+    checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
+    work = cycle_work()
+    if work is None:
+        return cycle_limit + 1
+    signal_tasks, remote_recoveries = work
     recorded_windows = set()
-    for name in os.listdir('.'):
-        if name.endswith('.status') and os.path.exists(name):
-            signal_tasks.add(name[:-len('.status')])
-        elif name.endswith('.turn-ended') and os.path.exists(name):
-            signal_tasks.add(name[:-len('.turn-ended')])
-        elif name.endswith('.meta') and os.path.isfile(name):
+    for name in names:
+        if name.endswith('.meta') and os.path.isfile(name):
             try:
                 values = {}
                 with open(name) as stream:
@@ -188,7 +241,8 @@ def watcher_cycle_timeout():
     components = math.ceil(watcher_cadence + inactive_reconcile_timeout + signal_grace +
                            check_timeout * checks +
                            2 * crew_state_timeout * (len(signal_tasks) + window_count) +
-                           worktree_write_timeout * window_count + 5)
+                           worktree_write_timeout * window_count +
+                           2 * remote_send_timeout * remote_recoveries + 5)
     return max(watcher_guard_grace, components)
 
 
@@ -521,11 +575,12 @@ def owner(lock):
                 next_probe = now + 1
             if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
-                next_cycle_timeout = watcher_cycle_timeout()
-                if not reason and next_cycle_timeout > cycle_limit:
-                    reason = 'watcher cycle exceeds Codex Stop deadline; reduce registered checks or complete outstanding supervision work'
-                elif next_cycle_timeout > cycle_timeout:
-                    cycle_timeout = next_cycle_timeout
+                if not reason and probe_due:
+                    next_cycle_timeout = watcher_cycle_timeout()
+                    if next_cycle_timeout > cycle_limit:
+                        reason = 'watcher cycle exceeds Codex Stop deadline; reduce registered checks or complete outstanding supervision work'
+                    elif next_cycle_timeout > cycle_timeout:
+                        cycle_timeout = next_cycle_timeout
                 if output is not None:
                     text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
                     if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat')) for line in text.splitlines()):
