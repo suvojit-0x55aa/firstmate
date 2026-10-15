@@ -149,6 +149,34 @@ PY
   pass 'Python bootstrap failure blocks Stop and leaves health unavailable'
 }
 
+test_python_launch_failure_fails_closed() {
+  local dir healthy_rc
+  dir=$(fixture python-launch-failure)
+  mkdir "$dir/fault-bin"
+  cat > "$dir/fault-bin/python3" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'failed' > "$FM_HOME/python-launch-attempted"
+exit 1
+SH
+  chmod +x "$dir/fault-bin/python3"
+  append_wake "$dir/state" check python-launch 'check: retained event'
+  cp "$dir/state/.wake-queue" "$dir/queue-before"
+  PATH="$dir/fault-bin:$PATH" run_stop "$dir"
+  wait_file "$dir/rc"
+  finish "$dir"
+  [ -s "$dir/python-launch-attempted" ] || fail 'broken Python interpreter was not invoked'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'broken Python interpreter allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.' 'broken Python interpreter omitted owner-unavailable diagnostic'
+  cmp "$dir/queue-before" "$dir/state/.wake-queue" || fail 'broken Python interpreter acknowledged queued work'
+  [ ! -e "$dir/state/.codex-stop.json" ] || fail 'broken Python interpreter published ownership'
+  assert_no_watcher "$dir"
+  PATH="$dir/fault-bin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" \
+    "$ROOT/bin/fm-codex-stop.sh" --healthy "$dir/state" > "$dir/healthy-out" 2>&1
+  healthy_rc=$?
+  [ "$healthy_rc" = 1 ] || fail 'broken Python interpreter changed the health-probe contract'
+  pass 'Python launch failure blocks Stop and leaves health unavailable'
+}
+
 test_public_stop_dispatches_pending_queue() {
   local dir need
   for need in yes no; do
@@ -180,6 +208,31 @@ test_quiet_renewal() {
   FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" bash -c '. "$1"; fm_codex_stop_handling_healthy "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" || fail 'delivered handling interval is not healthy'
   finish "$dir"
   pass 'quiet checkpoint requests native renewal and leaves bounded handling proof'
+}
+
+test_wedged_arm_cannot_report_quiet_renewal() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture wedged-arm)
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_HOME/wedged-arm"
+trap 'printf "%s\n" term > "$FM_HOME/wedged-arm-term"; exit 0' TERM
+while :; do sleep 1; done
+ARM
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  : > "$dir/state/task.meta"
+  TEST_ROOT="$dir" run_stop "$dir" 2
+  TEST_ROOT=$original_root
+  wait_file "$dir/wedged-arm"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'wedged watcher launcher allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'watcher failed' 'wedged watcher launcher omitted failure reason'
+  assert_not_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'wedged watcher launcher reported quiet renewal'
+  [ -s "$dir/wedged-arm-term" ] || fail 'wedged watcher launcher was not cancelled'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'wedged watcher launcher fails closed instead of reporting quiet renewal'
 }
 
 test_final_source_wake_retains_continuation() {
@@ -476,8 +529,10 @@ test_record_mutation_interruption_clears_ownership() {
 
 test_initial_fork_failure_blocks_stop
 test_python_bootstrap_failure_fails_closed
+test_python_launch_failure_fails_closed
 test_public_stop_dispatches_pending_queue
 test_quiet_renewal
+test_wedged_arm_cannot_report_quiet_renewal
 test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling
 test_singleton

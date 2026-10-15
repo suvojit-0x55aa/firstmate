@@ -46,6 +46,11 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo 'Firstmate Codex supervision requires Python 3 Unix socket/flock support.' >&2
   exit 2
 fi
+if ! python3 -c 'import sys' >/dev/null 2>&1; then
+  [ "$MODE" != healthy ] || exit 1
+  echo 'Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.' >&2
+  exit 2
+fi
 export FM_HOME FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE"
 exec python3 - "$MODE" "$STATE" "$SCRIPT_DIR" "$SESSION_PID" "$SESSION_IDENTITY" "$SESSION_ID" <<'PY'
 import sys
@@ -119,6 +124,12 @@ def queued():
         return os.path.getsize('.wake-queue') > 0
     except FileNotFoundError:
         return False
+
+
+def watcher_healthy():
+    result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" '
+                   '"${FM_GUARD_GRACE:-300}" "$FM_HOME"')
+    return result is not None and result.returncode == 0
 
 
 def read_record():
@@ -322,7 +333,7 @@ def owner(lock):
                 if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and now >= deadline:
-                    if arm is not None and identity(arm.pid) != arm_identity:
+                    if (arm is not None and identity(arm.pid) != arm_identity) or not watcher_healthy():
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                     else:
                         reason = 'quiet checkpoint elapsed; supervision is still needed'
