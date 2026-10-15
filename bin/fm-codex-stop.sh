@@ -12,7 +12,7 @@
 # --healthy STATE is a read-only challenge to the live owner, not a stale PID test.
 # Requires Python 3's standard-library Unix socket/flock support; unavailable
 # support blocks Stop with an explicit diagnostic rather than claiming coverage.
-# FM_CODEX_WATCH_CHECKPOINT defaults to 180s, capped at 180s. Hook timeout: 240s.
+# FM_CODEX_WATCH_CHECKPOINT defaults to 180s, capped at 180s. Hook timeout: 600s.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -113,8 +113,13 @@ try:
         raise ValueError
 except ValueError:
     watcher_cadence = 15
-watcher_progress_timeout = max(2, math.ceil(watcher_cadence * 1.5 + 1))
-watcher_grace = watcher_progress_timeout + 1
+try:
+    watcher_progress_timeout = int(os.environ.get('FM_GUARD_GRACE', '300'))
+    if watcher_progress_timeout <= 0:
+        raise ValueError
+except ValueError:
+    watcher_progress_timeout = 300
+watcher_grace = watcher_progress_timeout
 
 
 try:
@@ -283,6 +288,27 @@ def owner(lock):
                 except subprocess.TimeoutExpired:
                     os.killpg(arm.pid, signal.SIGKILL)
                     arm.wait(timeout=1)
+            try:
+                os.killpg(arm.pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                try:
+                    os.killpg(arm.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                expires = time.monotonic() + 3
+                while time.monotonic() < expires:
+                    try:
+                        os.killpg(arm.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    try:
+                        os.killpg(arm.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             arm = None
             arm_identity = ''
         if output is not None:

@@ -35,7 +35,8 @@ fixture() {
 run_stop() { # <home> [checkpoint]
   local home=$1
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT="${2:-2}" \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL=1 FM_BACKEND=tmux \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL=1 \
+    FM_GUARD_GRACE="${FM_GUARD_GRACE:-3}" FM_BACKEND=tmux \
     "$TEST_CODEX" -c '
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
       printf "%s\n" "$$" > "$FM_HOME/harness"
@@ -85,6 +86,7 @@ install_controlled_watcher() {
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 child=
+printf '%s\n' "$$" > "$FM_HOME/controlled-arm-pid"
 stop_arm() {
   printf '%s\n' term > "$FM_HOME/controlled-arm-term"
   [ -z "$child" ] || kill -TERM "$child" 2>/dev/null || true
@@ -351,6 +353,42 @@ test_late_stopped_watcher_cannot_complete_quiet_window() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'post-deadline progress rejects a late stopped watcher'
+}
+
+test_complete_watcher_cycle_can_deliver_actionable_wake() {
+  local dir
+  dir=$(fixture complete-cycle)
+  : > "$dir/state/task.meta"
+  FM_SIGNAL_GRACE=4 FM_GUARD_GRACE=8 run_stop "$dir" 15
+  wait_file "$dir/state/.watch.lock/pid"
+  printf '%s\n' 'done: complete cycle' > "$dir/state/complete.status"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'complete watcher cycle lost its actionable wake'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'complete watcher cycle did not deliver its queued wake'
+  assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'complete watcher cycle was reported as stalled'
+  [ -s "$dir/state/.wake-queue" ] || fail 'complete watcher cycle did not retain its actionable wake'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'complete watcher cycle remains live through signal coalescing'
+}
+
+test_dead_arm_launcher_retires_owned_watcher_group() {
+  local dir original_root=$TEST_ROOT arm
+  dir=$(fixture dead-arm-launcher)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  TEST_ROOT="$dir" run_stop "$dir" 15
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  wait_file "$dir/controlled-arm-pid"
+  arm=$(cat "$dir/controlled-arm-pid")
+  kill -KILL "$arm"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'dead arm launcher allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'watcher failed' 'dead arm launcher omitted failure reason'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'dead arm launcher retains cancellation of its owned watcher group'
 }
 
 test_final_source_wake_retains_continuation() {
@@ -703,6 +741,8 @@ test_wedged_arm_cannot_report_quiet_renewal
 test_late_watcher_gets_full_quiet_window
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
+test_complete_watcher_cycle_can_deliver_actionable_wake
+test_dead_arm_launcher_retires_owned_watcher_group
 test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling
 test_singleton
