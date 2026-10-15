@@ -78,6 +78,52 @@ assert_no_watcher() {
   if kill -0 "$pid" 2>/dev/null; then fail "owned watcher $pid survived Stop cleanup: $(cat "$1/watcher-after-cleanup")"; fi
 }
 
+install_controlled_watcher() {
+  local dir=$1
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh} "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+child=
+stop_arm() {
+  printf '%s\n' term > "$FM_HOME/controlled-arm-term"
+  [ -z "$child" ] || kill -TERM "$child" 2>/dev/null || true
+  [ -z "$child" ] || wait "$child" 2>/dev/null || true
+  exit 0
+}
+trap stop_arm HUP INT TERM
+sleep "${FM_TEST_ARM_DELAY:-0}"
+bash "$SCRIPT_DIR/fm-watch.sh" &
+child=$!
+wait "$child"
+exit $?
+ARM
+  cat > "$dir/bin/fm-watch.sh" <<'WATCH'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+lock="$FM_HOME/state/.watch.lock"
+mkdir "$lock" || exit 1
+identity=$(fm_pid_identity "$$") || exit 1
+printf '%s\n' "$$" > "$lock/pid"
+printf '%s\n' "$FM_HOME" > "$lock/fm-home"
+printf '%s\n' "$SCRIPT_DIR/fm-watch.sh" > "$lock/watcher-path"
+printf '%s\n' "$identity" > "$lock/pid-identity"
+clean_watcher() {
+  rm -rf "$lock"
+}
+trap clean_watcher EXIT
+trap 'exit 0' HUP INT TERM
+touch "$FM_HOME/state/.last-watcher-beat"
+date +%s > "$FM_HOME/controlled-watcher-ready"
+while :; do
+  sleep "${FM_POLL:-1}"
+  [ "${FM_TEST_WATCH_MODE:-progress}" = stall ] || touch "$FM_HOME/state/.last-watcher-beat"
+done
+WATCH
+  chmod +x "$dir/bin/fm-watch-arm.sh" "$dir/bin/fm-watch.sh"
+}
+
 test_initial_fork_failure_blocks_stop() {
   local dir
   dir=$(fixture fork-failure)
@@ -155,6 +201,9 @@ test_python_launch_failure_fails_closed() {
   mkdir "$dir/fault-bin"
   cat > "$dir/fault-bin/python3" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = -c ]; then
+  exit 0
+fi
 printf '%s\n' 'failed' > "$FM_HOME/python-launch-attempted"
 exit 1
 SH
@@ -233,6 +282,44 @@ ARM
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'wedged watcher launcher fails closed instead of reporting quiet renewal'
+}
+
+test_late_watcher_gets_full_quiet_window() {
+  local dir original_root=$TEST_ROOT ready finished
+  dir=$(fixture late-watcher)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  FM_TEST_ARM_DELAY=2 TEST_ROOT="$dir" run_stop "$dir" 2
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  ready=$(cat "$dir/controlled-watcher-ready")
+  wait_file "$dir/rc"
+  finished=$(date +%s)
+  [ "$((finished - ready))" -ge 2 ] || fail 'late watcher startup consumed the quiet checkpoint'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'late healthy watcher did not request quiet renewal'
+  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'late healthy watcher omitted quiet renewal reason'
+  [ -s "$dir/controlled-arm-term" ] || fail 'late watcher arm was not cancelled'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'quiet checkpoint starts after verified watcher readiness'
+}
+
+test_stalled_watcher_cannot_complete_quiet_window() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture stalled-watcher)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  FM_TEST_WATCH_MODE=stall TEST_ROOT="$dir" run_stop "$dir" 2
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'stalled watcher allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'watcher failed' 'stalled watcher omitted failure reason'
+  assert_not_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'stalled watcher reported quiet renewal'
+  [ -s "$dir/controlled-arm-term" ] || fail 'stalled watcher arm was not cancelled'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'quiet checkpoint requires watcher beacon progress'
 }
 
 test_final_source_wake_retains_continuation() {
@@ -533,6 +620,8 @@ test_python_launch_failure_fails_closed
 test_public_stop_dispatches_pending_queue
 test_quiet_renewal
 test_wedged_arm_cannot_report_quiet_renewal
+test_late_watcher_gets_full_quiet_window
+test_stalled_watcher_cannot_complete_quiet_window
 test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling
 test_singleton

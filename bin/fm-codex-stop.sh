@@ -46,7 +46,10 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo 'Firstmate Codex supervision requires Python 3 Unix socket/flock support.' >&2
   exit 2
 fi
-if ! python3 -c 'import sys' >/dev/null 2>&1; then
+if ! python3 - >/dev/null 2>&1 <<'PY'
+import sys
+PY
+then
   [ "$MODE" != healthy ] || exit 1
   echo 'Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.' >&2
   exit 2
@@ -58,6 +61,7 @@ import sys
 try:
     import fcntl
     import json
+    import math
     import os
     import selectors
     import signal
@@ -87,6 +91,21 @@ try:
     handling_grace = min(300, max(1, int(os.environ.get('FM_CODEX_HANDLING_GRACE', '300'))))
 except ValueError:
     handling_grace = 300
+
+
+try:
+    watcher_cadence = float(os.environ.get('FM_POLL', '15'))
+    if not math.isfinite(watcher_cadence) or watcher_cadence <= 0:
+        raise ValueError
+except ValueError:
+    watcher_cadence = 15
+watcher_grace = max(2, math.ceil(watcher_cadence * 2 + 1))
+
+
+try:
+    startup_timeout = min(12, max(1, int(os.environ.get('FM_ARM_CONFIRM_TIMEOUT', '10')))) + 1
+except ValueError:
+    startup_timeout = 11
 
 
 def shell(body, *args):
@@ -126,10 +145,20 @@ def queued():
         return False
 
 
-def watcher_healthy():
-    result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" '
-                   '"${FM_GUARD_GRACE:-300}" "$FM_HOME"')
-    return result is not None and result.returncode == 0
+def watcher_snapshot():
+    result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" "$2" "$FM_HOME" '
+                   '&& printf "%s\\t%s\\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"',
+                   str(watcher_grace))
+    if result is None or result.returncode != 0:
+        return None
+    fields = result.stdout.rstrip('\n').split('\t')
+    if len(fields) != 2 or not all(fields):
+        return None
+    try:
+        beat = os.stat('.last-watcher-beat').st_mtime_ns
+    except OSError:
+        return None
+    return fields[0], fields[1], beat
 
 
 def read_record():
@@ -175,6 +204,7 @@ def owner(lock):
     pending = {}
     acknowledged = False
     published = {}
+    watcher_proof = None
 
     def publish(next_phase, seconds):
         nonlocal phase, deadline, published
@@ -299,7 +329,7 @@ def owner(lock):
                     else:
                         active = conn
                         acknowledged = False
-                        publish('watching', checkpoint)
+                        publish('starting', startup_timeout)
                         if queued():
                             if not finish('durable wake pending'):
                                 return
@@ -315,13 +345,13 @@ def owner(lock):
                 if conn is not active and time.monotonic() >= expires:
                     close(conn)
             now = time.monotonic()
-            probe_due = now >= next_probe or (phase == 'watching' and now >= deadline)
+            probe_due = now >= next_probe or (phase in ('starting', 'watching') and now >= deadline)
             if probe_due:
                 if not generation_current():
                     return
                 supervision_needed = needed()
                 next_probe = now + 1
-            if phase == 'watching' and active is not None:
+            if phase in ('starting', 'watching') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
                 if output is not None:
                     text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
@@ -332,8 +362,18 @@ def owner(lock):
                     return
                 if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
-                if not reason and now >= deadline:
-                    if (arm is not None and identity(arm.pid) != arm_identity) or not watcher_healthy():
+                if not reason and phase == 'starting' and probe_due:
+                    proof = watcher_snapshot()
+                    if proof is not None:
+                        watcher_proof = proof
+                        publish('watching', checkpoint)
+                    elif now >= deadline:
+                        reason = 'watcher failed; inspect its startup and ownership before continuing'
+                if not reason and phase == 'watching' and now >= deadline:
+                    proof = watcher_snapshot()
+                    if ((arm is not None and identity(arm.pid) != arm_identity) or
+                            proof is None or watcher_proof is None or
+                            proof[:2] != watcher_proof[:2] or proof[2] <= watcher_proof[2]):
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                     else:
                         reason = 'quiet checkpoint elapsed; supervision is still needed'
@@ -438,7 +478,7 @@ try:
             raise OSError('prior session owner still active')
         send(conn, dict(op='stop', token=record['token'], session_pid=session_pid,
                         session_identity=session_identity, session_id=session_id))
-        conn.settimeout(checkpoint + 15)
+        conn.settimeout(checkpoint + startup_timeout + 5)
         response = receive(conn)
         if response.get('token') != record['token']:
             raise OSError('owner identity changed')
