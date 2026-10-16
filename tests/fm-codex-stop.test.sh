@@ -95,6 +95,18 @@ run_bounded_watcher_cycle() {
       PATH="$fakebin:$PATH" "$ROOT/bin/fm-watch.sh"
 }
 
+death_receipt_count() {
+  local root="$1/state/.death-notified-v3"
+  [ -d "$root" ] || { printf '0\n'; return; }
+  find "$root" -type f | wc -l | tr -d ' '
+}
+
+death_receipt_contents() {
+  local root="$1/state/.death-notified-v3"
+  [ -d "$root" ] || return 0
+  find "$root" -type f -exec cat {} \;
+}
+
 assert_no_watcher() {
   local pid
   pid=$(cat "$1/state/.watch.lock/pid" 2>/dev/null || true)
@@ -1029,7 +1041,11 @@ SH
   for id in $(seq 1 25); do
     [ "$(cat "$dir/state/.stale-fleet_dead-history-$id")" = authoritatively-dead ] \
       || fail "explicit death marker $id changed unexpectedly"
+    [ ! -e "$dir/state/.death-notified-fleet_dead-history-$id" ] \
+      || fail "legacy death receipt $id was not migrated"
   done
+  [ "$(death_receipt_count "$dir")" -eq 25 ] \
+    || fail 'explicit death receipts did not migrate to exact owner identities'
   [ ! -e "$dir/capture-calls" ] || fail 'explicit death receipts captured an exact-dead endpoint'
   meta_reads=$(wc -l < "$dir/meta-read-log")
   [ "$meta_reads" -le 2500 ] \
@@ -1096,7 +1112,7 @@ test_resumed_worker_retires_death_generation() {
   rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "resumed worker cycle ended unexpectedly: rc=$rc $(cat "$dir/live-watch.err")"
-  [ ! -e "$dir/state/.death-notified-fleet_resumed-worker" ] \
+  [ "$(death_receipt_count "$dir")" -eq 0 ] \
     || fail 'resumed worker retained the previous death receipt'
   [ ! -e "$dir/state/.stale-fleet_resumed-worker" ] \
     || fail 'resumed worker retained ambiguous stale state'
@@ -1111,8 +1127,8 @@ test_resumed_worker_retires_death_generation() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "new worker death did not surface: rc=$rc $(cat "$dir/dead-watch.err")"
-  receipt=$(cat "$dir/state/.death-notified-fleet_resumed-worker")
-  [ "$receipt" = "$(printf 'fm-death-notified.v2\tspawn:spawn-a\tresumed-worker\ttmux\tfleet:resumed-worker')" ] \
+  receipt=$(death_receipt_contents "$dir")
+  [ "$receipt" = "$(printf 'fm-death-notified.v3\tspawn:spawn-a\tresumed-worker\ttmux\tfleet:resumed-worker')" ] \
     || fail 'new worker death receipt was not bound to the resumed generation'
   stale_rows=$(grep -c "$(printf '\tstale\tfleet:resumed-worker\tstale: fleet:resumed-worker')" \
     "$dir/state/.wake-queue")
@@ -1154,8 +1170,8 @@ test_relaunch_generation_surfaces_death_before_alive_observation() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "relaunched worker death did not surface: rc=$rc $(cat "$dir/dead-watch.err")"
-  receipt=$(cat "$dir/state/.death-notified-fleet_relaunched-worker")
-  [ "$receipt" = "$(printf 'fm-death-notified.v2\tspawn:spawn-b\trelaunched-worker\ttmux\tfleet:relaunched-worker')" ] \
+  receipt=$(death_receipt_contents "$dir")
+  [ "$receipt" = "$(printf 'fm-death-notified.v3\tspawn:spawn-b\trelaunched-worker\ttmux\tfleet:relaunched-worker')" ] \
     || fail 'relaunched worker death receipt retained the previous spawn generation'
   stale_rows=$(grep -c "$(printf '\tstale\tfleet:relaunched-worker\tstale: fleet:relaunched-worker')" \
     "$dir/state/.wake-queue")
@@ -1172,6 +1188,113 @@ test_relaunch_generation_surfaces_death_before_alive_observation() {
     "$dir/state/.wake-queue")
   [ "$stale_rows" -eq 1 ] || fail "same relaunched death queued $stale_rows notifications"
   pass 'relaunch generation death surfaces before alive observation'
+}
+
+test_colliding_endpoint_keys_keep_independent_death_receipts() {
+  local dir rc dot_rows underscore_rows receipts
+  dir=$(fixture colliding-death-receipts)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:fm-a.b' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    'spawn_gen=spawn-dot' > "$dir/state/collision-dot.meta"
+  printf '%s\n' 'window=fleet:fm-a_b' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    'spawn_gen=spawn-underscore' > "$dir/state/collision-underscore.meta"
+  printf '%s\n' 'working: previously surfaced dotted endpoint' > "$dir/state/collision-dot.status"
+  printf '%s\n' 'working: new underscored endpoint death' > "$dir/state/collision-underscore.status"
+  prime_status_seen "$dir/state" "$dir/state/collision-dot.status"
+  prime_status_seen "$dir/state" "$dir/state/collision-underscore.status"
+  printf '%s' authoritatively-dead > "$dir/state/.stale-fleet_fm-a_b"
+  printf 'fm-death-notified.v2\tspawn:spawn-dot\tcollision-dot\ttmux\tfleet:fm-a.b\n' \
+    > "$dir/state/.death-notified-fleet_fm-a_b"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_TEST_EXISTING_TARGETS='fleet:fm-a.b fleet:fm-a_b' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/new-death.out" 2> "$dir/new-death.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "colliding new death did not surface: rc=$rc $(cat "$dir/new-death.err")"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_TEST_EXISTING_TARGETS='fleet:fm-a.b fleet:fm-a_b' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/quiet-one.out" 2> "$dir/quiet-one.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "colliding receipts did not stabilize: rc=$rc"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_TEST_EXISTING_TARGETS='fleet:fm-a.b fleet:fm-a_b' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/quiet-two.out" 2> "$dir/quiet-two.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "colliding receipts alternated on a later cycle: rc=$rc"
+
+  dot_rows=$(grep -Fc "$(printf '\tstale\tfleet:fm-a.b\tstale: fleet:fm-a.b')" \
+    "$dir/state/.wake-queue" || true)
+  underscore_rows=$(grep -Fc "$(printf '\tstale\tfleet:fm-a_b\tstale: fleet:fm-a_b')" \
+    "$dir/state/.wake-queue" || true)
+  [ "$dot_rows" -eq 0 ] || fail "migrated dotted death queued $dot_rows duplicate notifications"
+  [ "$underscore_rows" -eq 1 ] || fail "underscored death queued $underscore_rows notifications"
+  [ "$(death_receipt_count "$dir")" -eq 2 ] \
+    || fail 'colliding endpoint identities did not retain independent receipts'
+  receipts=$(death_receipt_contents "$dir")
+  printf '%s\n' "$receipts" | grep -Fqx \
+    "$(printf 'fm-death-notified.v3\tspawn:spawn-dot\tcollision-dot\ttmux\tfleet:fm-a.b')" \
+    || fail 'dotted endpoint receipt did not migrate to its exact identity'
+  printf '%s\n' "$receipts" | grep -Fqx \
+    "$(printf 'fm-death-notified.v3\tspawn:spawn-underscore\tcollision-underscore\ttmux\tfleet:fm-a_b')" \
+    || fail 'underscored endpoint receipt did not retain its exact identity'
+  [ ! -e "$dir/state/.death-notified-fleet_fm-a_b" ] \
+    || fail 'ambiguous legacy receipt remained after exact migration'
+  pass 'colliding endpoint keys retain independent stable death receipts'
+}
+
+test_ambiguous_busy_resume_retires_death_receipt() {
+  local dir rc stale_rows
+  dir=$(fixture ambiguous-busy-resume)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:ambiguous-busy' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    'spawn_gen=spawn-a' > "$dir/state/ambiguous-busy.meta"
+  printf '%s\n' 'working: worker resumes with ambiguous attribution' \
+    > "$dir/state/ambiguous-busy.status"
+  prime_status_seen "$dir/state" "$dir/state/ambiguous-busy.status"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:ambiguous-busy' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/first-death.out" 2> "$dir/first-death.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "first ambiguous-worker death did not surface: rc=$rc"
+  [ "$(death_receipt_count "$dir")" -eq 1 ] \
+    || fail 'first ambiguous-worker death did not persist its receipt'
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:ambiguous-busy' \
+    FM_TEST_AMBIGUOUS_TARGETS='fleet:ambiguous-busy' FM_TEST_CAPTURE='Ctrl+c:cancel' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/busy.out" 2> "$dir/busy.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "ambiguous busy resume ended unexpectedly: rc=$rc $(cat "$dir/busy.err")"
+  [ "$(death_receipt_count "$dir")" -eq 0 ] \
+    || fail 'ambiguous busy resume retained the previous death receipt'
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:ambiguous-busy' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/second-death.out" 2> "$dir/second-death.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "post-resume death did not surface: rc=$rc $(cat "$dir/second-death.err")"
+  stale_rows=$(grep -c "$(printf '\tstale\tfleet:ambiguous-busy\tstale: fleet:ambiguous-busy')" \
+    "$dir/state/.wake-queue")
+  [ "$stale_rows" -eq 2 ] || fail "busy-resumed worker deaths queued $stale_rows notifications"
+  pass 'ambiguous busy resume retires the previous death receipt'
 }
 
 test_due_custom_and_pr_checks_remain_bounded() {
@@ -1938,6 +2061,8 @@ test_dead_endpoint_honors_explicit_notification_receipt
 test_absorbed_dead_endpoint_emits_new_death_notification
 test_resumed_worker_retires_death_generation
 test_relaunch_generation_surfaces_death_before_alive_observation
+test_colliding_endpoint_keys_keep_independent_death_receipts
+test_ambiguous_busy_resume_retires_death_receipt
 test_due_custom_and_pr_checks_remain_bounded
 test_actionable_checks_resume_bounded_sweep
 test_due_remote_recovery_fits_cycle_budget

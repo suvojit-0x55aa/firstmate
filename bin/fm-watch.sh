@@ -825,14 +825,55 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
-death_generation() {  # <window-key>
-  local generation
-  generation=$(cat "$STATE/.death-generation-$1" 2>/dev/null || true)
+death_owner_id() {  # <window> <task> <backend>
+  printf '%s\0%s\0%s' "$2" "$3" "$1" | od -An -v -tx1 | tr -d ' \n'
+}
+
+death_state_path() {  # <record-family> <owner-id>
+  local root="$STATE/.$1-v3" encoded=$2 path chunk
+  path=$root
+  while [ "${#encoded}" -gt 120 ]; do
+    chunk=${encoded:0:120}
+    path="$path/$chunk"
+    encoded=${encoded:120}
+  done
+  printf '%s/%s' "$path" "${encoded:-00}"
+}
+
+death_state_remove() {  # <record-family> <owner-id>
+  local root="$STATE/.$1-v3" path parent
+  path=$(death_state_path "$1" "$2")
+  rm -f "$path" || return 1
+  parent=${path%/*}
+  while [ "$parent" != "$root" ]; do
+    rmdir "$parent" 2>/dev/null || return 0
+    parent=${parent%/*}
+  done
+  rmdir "$root" 2>/dev/null || true
+}
+
+death_generation() {  # <owner-id>
+  local generation path
+  path=$(death_state_path death-generation "$1")
+  generation=$(cat "$path" 2>/dev/null || true)
   case "$generation" in ''|*[!0-9]*) generation=0 ;; esac
   printf '%s' "$generation"
 }
 
-death_incarnation() {  # <spawn-generation> <window-key>
+advance_death_generation() {  # <owner-id>
+  local path parent tmp generation
+  path=$(death_state_path death-generation "$1")
+  parent=${path%/*}
+  tmp="$path.tmp.$$"
+  generation=$(death_generation "$1")
+  ( umask 077; mkdir -p "$parent" && printf '%s\n' "$((generation + 1))" > "$tmp" ) \
+    && mv -f "$tmp" "$path" || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+}
+
+death_incarnation() {  # <spawn-generation> <owner-id>
   if [ -n "$1" ]; then
     printf 'spawn:%s' "$1"
   else
@@ -841,47 +882,67 @@ death_incarnation() {  # <spawn-generation> <window-key>
 }
 
 death_receipt_value() {  # <window> <task> <backend> <incarnation>
+  printf 'fm-death-notified.v3\t%s\t%s\t%s\t%s\n' "$4" "$2" "$3" "$1"
+}
+
+legacy_death_receipt_value() {  # <window> <task> <backend> <incarnation>
   printf 'fm-death-notified.v2\t%s\t%s\t%s\t%s\n' "$4" "$2" "$3" "$1"
 }
 
-death_receipt_matches() {  # <window> <task> <backend> <incarnation> <window-key>
-  local expected actual
+death_receipt_matches() {  # <window> <task> <backend> <incarnation> <owner-id>
+  local expected actual receipt
   expected=$(death_receipt_value "$1" "$2" "$3" "$4")
-  actual=$(cat "$STATE/.death-notified-$5" 2>/dev/null || true)
+  receipt=$(death_state_path death-notified "$5")
+  actual=$(cat "$receipt" 2>/dev/null || true)
   [ "$actual" = "$expected" ]
 }
 
-record_death_notification() {  # <window> <task> <backend> <incarnation> <window-key>
-  local receipt="$STATE/.death-notified-$5" tmp="$STATE/.death-notified-$5.tmp.$$"
-  ( umask 077; death_receipt_value "$1" "$2" "$3" "$4" > "$tmp" ) \
+record_death_notification() {  # <window> <task> <backend> <incarnation> <owner-id>
+  local receipt parent tmp
+  receipt=$(death_state_path death-notified "$5")
+  parent=${receipt%/*}
+  tmp="$receipt.tmp.$$"
+  ( umask 077; mkdir -p "$parent" && death_receipt_value "$1" "$2" "$3" "$4" > "$tmp" ) \
     && mv -f "$tmp" "$receipt" || {
       rm -f "$tmp" 2>/dev/null || true
       return 1
     }
 }
 
-reconcile_death_notification() {  # <window> <task> <backend> <incarnation> <window-key>
-  local key=$5
-  [ -e "$STATE/.death-notified-$key" ] || return 0
-  if ! death_receipt_matches "$1" "$2" "$3" "$4" "$key"; then
-    rm -f "$STATE/.death-notified-$key" "$STATE/.stale-$key"
+reconcile_death_notification() {  # <window> <task> <backend> <incarnation> <owner-id> <window-key>
+  local owner_id=$5 key=$6 receipt legacy expected actual
+  receipt=$(death_state_path death-notified "$owner_id")
+  legacy="$STATE/.death-notified-$key"
+  if [ ! -e "$receipt" ] && [ -e "$legacy" ]; then
+    expected=$(legacy_death_receipt_value "$1" "$2" "$3" "$4")
+    actual=$(cat "$legacy" 2>/dev/null || true)
+    if [ "$actual" = "$expected" ]; then
+      record_death_notification "$1" "$2" "$3" "$4" "$owner_id" || return 1
+      rm -f "$legacy" || return 1
+    fi
+  fi
+  [ -e "$receipt" ] || return 0
+  if ! death_receipt_matches "$1" "$2" "$3" "$4" "$owner_id"; then
+    death_state_remove death-notified "$owner_id" || return 1
+    rm -f "$STATE/.stale-$key"
   fi
 }
 
-retire_death_notification() {  # <window-key> <spawn-generation>
-  local key=$1 spawn_gen=$2 generation
-  if [ -e "$STATE/.death-notified-$key" ] \
+retire_death_notification() {  # <window-key> <spawn-generation> <owner-id>
+  local key=$1 spawn_gen=$2 owner_id=$3 receipt
+  receipt=$(death_state_path death-notified "$owner_id")
+  if [ -e "$receipt" ] \
     || [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" = authoritatively-dead ]; then
     if [ -z "$spawn_gen" ]; then
-      generation=$(death_generation "$key")
-      printf '%s\n' "$((generation + 1))" > "$STATE/.death-generation-$key" || return 1
+      advance_death_generation "$owner_id" || return 1
     fi
-    rm -f "$STATE/.death-notified-$key" "$STATE/.stale-$key"
+    death_state_remove death-notified "$owner_id" || return 1
+    rm -f "$STATE/.stale-$key"
   fi
 }
 
-handle_authoritatively_dead_target() {  # <window> <task> <backend> <incarnation> <kind> <last-status> <window-key>
-  local win=$1 task=$2 backend=$3 incarnation=$4 kind=$5 last=$6 key=$7 marker=authoritatively-dead sf
+handle_authoritatively_dead_target() {  # <window> <task> <backend> <incarnation> <owner-id> <kind> <last-status> <window-key>
+  local win=$1 task=$2 backend=$3 incarnation=$4 owner_id=$5 kind=$6 last=$7 key=$8 marker=authoritatively-dead sf
   if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
     return 0
   fi
@@ -890,9 +951,9 @@ handle_authoritatively_dead_target() {  # <window> <task> <backend> <incarnation
     return 0
   fi
   sf="$STATE/.stale-$key"
-  death_receipt_matches "$win" "$task" "$backend" "$incarnation" "$key" && return 0
+  death_receipt_matches "$win" "$task" "$backend" "$incarnation" "$owner_id" && return 0
   fm_wake_append stale "$win" "stale: $win" || exit 1
-  record_death_notification "$win" "$task" "$backend" "$incarnation" "$key" || exit 1
+  record_death_notification "$win" "$task" "$backend" "$incarnation" "$owner_id" || exit 1
   printf '%s' "$marker" > "$sf"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
@@ -1551,8 +1612,9 @@ EOF
   # crossed turn bound already handed to the away-mode daemon).
   while IFS=$(printf '\t') read -r w task backend kind spawn_gen; do
     key=$(window_key "$w")
-    incarnation=$(death_incarnation "$spawn_gen" "$key")
-    reconcile_death_notification "$w" "$task" "$backend" "$incarnation" "$key" || exit 1
+    death_owner=$(death_owner_id "$w" "$task" "$backend")
+    incarnation=$(death_incarnation "$spawn_gen" "$death_owner")
+    reconcile_death_notification "$w" "$task" "$backend" "$incarnation" "$death_owner" "$key" || exit 1
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
@@ -1563,11 +1625,11 @@ EOF
         dead|missing)
           [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable
           [ "$agent_state" != dead ] \
-            || handle_authoritatively_dead_target "$w" "$task" "$backend" "$incarnation" "$kind" "$last" "$key"
+            || handle_authoritatively_dead_target "$w" "$task" "$backend" "$incarnation" "$death_owner" "$kind" "$last" "$key"
           continue
           ;;
         alive)
-          retire_death_notification "$key" "$spawn_gen" || exit 1
+          retire_death_notification "$key" "$spawn_gen" "$death_owner" || exit 1
           ;;
       esac
     fi
@@ -1600,6 +1662,7 @@ EOF
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
     if [ "$busy_now" -eq 0 ]; then
+      retire_death_notification "$key" "$spawn_gen" "$death_owner" || exit 1
       rm -f "$sf"
     fi
     if [ "$h" = "$prev" ]; then

@@ -98,7 +98,7 @@ state/               runtime records and signals; gitignored
   .codex-stop.json .codex-stop.sock  transient live-owner lease record and private local transport socket; existence alone is not health evidence, and the owner normally removes both on stand-down; never touch
   .codex-stop-error  latest recorded Codex Stop owner exception diagnostic; not health evidence, safe to delete
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
-  .hash-* .count-* .stale-* .stale-since-* .death-notified-* .death-generation-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .death-notified-v3/ .death-generation-v3/ .death-notified-* .death-generation-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
