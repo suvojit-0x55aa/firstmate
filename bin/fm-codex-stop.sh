@@ -187,7 +187,9 @@ probe_timeout = 3
 probe_cleanup_allowance = 3
 identity_allowance = probe_timeout + probe_cleanup_allowance
 arm_cleanup_allowance = 2 * identity_allowance + 3
-terminal_reserve = protocol_reserve + arm_cleanup_allowance + identity_allowance
+terminal_orchestration_allowance = 1
+terminal_reserve = (protocol_reserve + arm_cleanup_allowance + identity_allowance +
+                    terminal_orchestration_allowance)
 startup_phase_allowance = max(startup_timeout, identity_allowance)
 cycle_limit = transport_timeout - startup_phase_allowance - checkpoint - terminal_reserve
 budget_reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'
@@ -551,6 +553,7 @@ def owner(lock):
     transport_deadline = None
     arm_budget_failure = False
     terminal_delivered = False
+    terminal_cleanup_complete = False
     generation_changed = False
 
     def remaining_cycle_limit(now):
@@ -660,13 +663,14 @@ def owner(lock):
         conn.close()
 
     def finish(reason):
-        nonlocal acknowledged, terminal_delivered, generation_changed
+        nonlocal acknowledged, terminal_delivered, terminal_cleanup_complete, generation_changed
         if (transport_deadline is not None and
                 time.monotonic() + terminal_reserve > transport_deadline):
             reason = budget_reason
         cleanup_deadline = (transport_deadline - identity_allowance - protocol_reserve
                             if transport_deadline is not None else None)
-        if not cancel_arm(cleanup_deadline):
+        terminal_cleanup_complete = cancel_arm(cleanup_deadline) and arm is None
+        if not terminal_cleanup_complete:
             reason = budget_reason
         generation_deadline = (transport_deadline - protocol_reserve
                                if transport_deadline is not None else None)
@@ -741,6 +745,8 @@ def owner(lock):
                 elif conn is active and request.get('op') == 'accepted' and phase == 'delivering':
                     send(conn, dict(accepted=True, token=token))
                 elif conn is active and request.get('op') == 'commit' and phase == 'delivering':
+                    if not terminal_cleanup_complete or arm is not None:
+                        return
                     commit_deadline = (transport_deadline
                                        if transport_deadline is not None else None)
                     commit_generation = generation_current(commit_deadline)
@@ -768,6 +774,7 @@ def owner(lock):
                     else:
                         active = conn
                         acknowledged = False
+                        terminal_cleanup_complete = False
                         transport_deadline = time.monotonic() + transport_timeout
                         publish('preflighting', max(0, transport_deadline - time.monotonic()))
                         arm_budget_failure = False
@@ -960,6 +967,7 @@ def owner(lock):
         if active is not None and transport_deadline is not None:
             cleanup_deadline = transport_deadline - identity_allowance - protocol_reserve
         cleanup_complete = cancel_arm(cleanup_deadline)
+        terminal_cleanup_complete = cleanup_complete and arm is None
         if active is not None and not terminal_delivered:
             final_generation = False if generation_changed else generation_current(
                 transport_deadline - protocol_reserve if transport_deadline is not None else None)
@@ -967,7 +975,7 @@ def owner(lock):
             try:
                 if final_generation is False:
                     send(active, dict(rc=0, reason='', token=token))
-                elif final_generation is None or not cleanup_complete:
+                else:
                     send(active, dict(rc=2, reason=budget_reason, token=token))
             except OSError:
                 pass

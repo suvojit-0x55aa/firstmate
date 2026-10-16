@@ -1424,7 +1424,11 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
-  fm_pending_reply_tick "$STATE" || true
+  agent_state_inventory=$(recorded_window_inventory_with_agent_state)
+  case "$agent_state_inventory" in
+    __FM_AGENT_STATE_ERROR__*) exit 1 ;;
+  esac
+  fm_pending_reply_tick "$STATE" "$agent_state_inventory" || true
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
@@ -1836,7 +1840,9 @@ EOF
         clear_pause_tracking "$key"
       fi
     fi
-  done < <(recorded_window_inventory_with_agent_state)
+  done <<EOF
+$agent_state_inventory
+EOF
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

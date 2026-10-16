@@ -644,7 +644,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
 }
 
 # Observe backend busy/idle evidence for the active turn without reading chat.
-# busy_state must be one of: busy | idle | unknown.
+# busy_state must be one of: busy | idle | unknown | unavailable.
 fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
   local state=$1 corr=$2 busy_state=$3
   local rec phase delivered now seen completed field_seen field_completed
@@ -682,7 +682,7 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
         fi
       fi
       ;;
-    unknown)
+    unknown|unavailable)
       # No independent proof; leave completion unset.
       ;;
     *)
@@ -750,7 +750,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
 fm_pending_reply_busy_state_from_observation() {  # <record-path> <observation>
   local rec=$1 observation=$2
   case "$observation" in
-    busy|idle|unknown) printf '%s' "$observation" ;;
+    busy|idle|unknown|unavailable) printf '%s' "$observation" ;;
     fallback-idle)
       if fm_pending_reply_fallback_idle_eligible "$rec"; then
         printf 'idle'
@@ -1219,7 +1219,7 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
-# busy_state is busy|idle|unknown for the secondmate endpoint.
+# busy_state is busy|idle|unknown|unavailable for the secondmate endpoint.
 # secondmate_home may be empty when unknown.
 fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-home]
   local state=$1 corr=$2 busy_state=$3 sm_home=${4-}
@@ -1288,8 +1288,10 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
-fm_pending_reply_tick() {  # <state-dir>
+fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory]
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
+  local batch_inventory=${2-} inventory_backend inventory_target inventory_state inventory_route
+  local inventory_home inventory_task inventory_kind inventory_spawn_gen
   local observation observation_task found i
   local -a observation_tasks=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
@@ -1370,7 +1372,24 @@ fm_pending_reply_tick() {  # <state-dir>
         label="fm-$task_id"
         observation=
         found=0
+        if [ -n "$batch_inventory" ]; then
+          while IFS="$(printf '\t')" read -r inventory_backend inventory_target inventory_state \
+            inventory_route inventory_home inventory_task inventory_kind inventory_spawn_gen; do
+            [ "$inventory_task" = "$task_id" ] || continue
+            [ "$inventory_route" = local ] || continue
+            case "$inventory_state" in
+              dead|missing)
+                observation=unavailable
+                found=1
+                ;;
+            esac
+            break
+          done <<EOF
+$batch_inventory
+EOF
+        fi
         for ((i = 0; i < ${#observation_tasks[@]}; i++)); do
+          [ "$found" = 0 ] || break
           observation_task=${observation_tasks[$i]}
           [ "$observation_task" = "$task_id" ] || continue
           observation=${observation_values[$i]}

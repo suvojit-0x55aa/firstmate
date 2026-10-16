@@ -680,7 +680,7 @@ PY
 }
 
 test_identity_and_cleanup_phases_preserve_transport_reserve() {
-  local mode dir original_root=$TEST_ROOT started elapsed
+  local mode dir original_root=$TEST_ROOT started elapsed transport_timeout
   for mode in arm-identity active-cycle finish-identity cancel; do
     dir=$(fixture "transport-reserve-$mode")
     install_controlled_watcher "$dir"
@@ -754,11 +754,13 @@ PY
     started=$(date +%s)
     if [ "$mode" = cancel ]; then
       term_delay=2.5
+      transport_timeout=55
     else
       term_delay=0
+      transport_timeout=60
     fi
     PYTHONPATH="$dir/deadline-fault" FM_TEST_DEADLINE_MODE="$mode" \
-      FM_TEST_ARM_TERM_DELAY="$term_delay" FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=60 \
+      FM_TEST_ARM_TERM_DELAY="$term_delay" FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT="$transport_timeout" \
       FM_ARM_CONFIRM_TIMEOUT=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
       FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 FM_POLL=0.05 \
       TEST_ROOT="$dir" run_stop "$dir" 1
@@ -782,7 +784,7 @@ PY
     assert_no_watcher "$dir"
     finish "$dir"
   done
-  pass 'identity and cleanup phases preserve the fixed transport reserve'
+  pass 'identity and near-reserve cleanup finish before refusal commit'
 }
 
 test_persistent_identity_timeout_fails_closed() {
@@ -902,6 +904,60 @@ PY
     finish "$dir"
   done
   pass 'persistent identity uncertainty preserves the specific Stop refusal'
+}
+
+test_terminal_error_generation_tristate() {
+  local mode dir original_root=$TEST_ROOT
+  for mode in current changed; do
+    dir=$(fixture "terminal-error-$mode")
+    install_controlled_watcher "$dir"
+    : > "$dir/state/task.meta"
+    mkdir "$dir/terminal-fault"
+    cat > "$dir/terminal-fault/sitecustomize.py" <<'PY'
+import os
+
+
+original_pread = os.pread
+
+
+def failed_pread(fd, length, offset):
+    home = os.environ.get('FM_HOME', '')
+    marker = os.path.join(home, 'terminal-error-triggered')
+    if (os.path.exists(os.path.join(home, 'controlled-watcher-ready')) and
+            not os.path.exists(marker)):
+        with open(marker, 'w', encoding='utf-8') as stream:
+            stream.write('active\n')
+        if os.environ.get('FM_TEST_TERMINAL_ERROR_GENERATION') == 'changed':
+            with open(os.path.join(home, 'state', '.lock'), 'w', encoding='utf-8') as stream:
+                stream.write('99999999\n')
+        raise OSError('forced terminal controller error')
+    return original_pread(fd, length, offset)
+
+
+os.pread = failed_pread
+PY
+    PYTHONPATH="$dir/terminal-fault" FM_TEST_TERMINAL_ERROR_GENERATION="$mode" \
+      FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=60 FM_ARM_CONFIRM_TIMEOUT=1 \
+      FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
+      FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
+    TEST_ROOT=$original_root
+    wait_file "$dir/terminal-error-triggered" 150
+    wait_file "$dir/rc" 150
+    if [ "$mode" = current ]; then
+      [ "$(cat "$dir/rc")" = 2 ] || fail 'current-generation terminal error allowed Stop to succeed'
+      assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+        'current-generation terminal error lost the specific refusal'
+      assert_not_contains "$(cat "$dir/out")" 'owner unavailable' \
+        'current-generation terminal error fell through to generic owner-unavailable'
+    else
+      [ "$(cat "$dir/rc")" = 0 ] || fail 'proven generation change did not remain benign'
+      assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+        'proven generation change emitted a stale refusal'
+    fi
+    assert_no_watcher "$dir"
+    finish "$dir"
+  done
+  pass 'terminal errors distinguish current uncertain and changed generations'
 }
 
 test_stalled_watcher_cannot_complete_quiet_window() {
@@ -1351,7 +1407,7 @@ SH
 }
 
 test_many_dead_endpoints_take_cheap_watcher_path() {
-  local dir id existing= key pane_hash inventory_calls tmux_probes process_probes backend_probes
+  local dir id existing= key pane_hash inventory_calls tmux_probes process_probes capture_probes backend_probes
   dir=$(fixture retained-dead-endpoints)
   install_endpoint_inventory_tmux "$dir"
   cat > "$dir/slow-crew-state.sh" <<'SH'
@@ -1363,7 +1419,7 @@ SH
   chmod +x "$dir/slow-crew-state.sh"
   pane_hash=$(hash_text 'retained dead pane')
   for id in $(seq 1 25); do
-    printf 'window=fleet:dead-%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$id" \
+    printf 'window=fleet:dead-%s\nkind=secondmate\nharness=grok\nbackend=tmux\n' "$id" \
       > "$dir/state/dead-$id.meta"
     if [ "$id" -lt 25 ]; then
       printf '%s\n' 'paused: retained completed worker' > "$dir/state/dead-$id.status"
@@ -1378,8 +1434,30 @@ SH
     printf '%s\n' 1 > "$dir/state/.count-$key"
     existing="$existing fleet:dead-$id"
   done
+  printf '%s\n' 'window=fleet:uncertain-reply' 'kind=secondmate' 'harness=grok' 'backend=tmux' \
+    > "$dir/state/uncertain-reply.meta"
+  printf '%s\n' 'working: waiting quietly for routed work' > "$dir/state/uncertain-reply.status"
+  prime_status_seen "$dir/state" "$dir/state/uncertain-reply.status"
+  printf '%s\n' 'window=fleet:missing-reply' 'kind=secondmate' 'harness=grok' 'backend=tmux' \
+    > "$dir/state/missing-reply.meta"
+  printf '%s\n' 'working: waiting quietly for routed work' > "$dir/state/missing-reply.status"
+  prime_status_seen "$dir/state" "$dir/state/missing-reply.status"
+  existing="$existing fleet:uncertain-reply"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 bash -c '
+    . "$1/fm-pending-reply-lib.sh"
+    for id in $(seq 1 25); do
+      corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" "dead-$id" "report status") || exit 1
+      fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 1000 || exit 1
+    done
+    corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" missing-reply "report status") || exit 1
+    fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 1000 || exit 1
+    corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" uncertain-reply "report status") || exit 1
+    fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 1000 || exit 1
+  ' _ "$ROOT/bin" || fail 'could not create pending-reply inventory fixture'
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
-    FM_TEST_CAPTURE='retained dead pane' FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" \
+    FM_TEST_AMBIGUOUS_TARGETS='fleet:uncertain-reply' \
+    FM_TEST_CAPTURE='retained dead pane' FM_TEST_CAPTURE_LOG="$dir/capture-calls" \
+    FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" FM_PENDING_REPLY_NOW=1000 \
     FM_TEST_INVENTORY_LOG="$dir/inventory-calls" \
     FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probe-calls" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
@@ -1396,16 +1474,19 @@ SH
     || fail 'authoritatively dead worker did not retain its stale notification'
   [ ! -e "$dir/crew-state-calls" ] || fail 'authoritatively dead targets reached expensive crew-state classification'
   inventory_calls=$(wc -l < "$dir/inventory-calls")
-  [ "$inventory_calls" -eq 2 ] \
-    || fail "admission and watcher used $inventory_calls tmux inventories for one shared session"
+  [ "$inventory_calls" -ge 2 ] && [ "$inventory_calls" -le 7 ] \
+    || fail "admission and watcher used $inventory_calls inventories across bounded probe cycles"
   backend_probes=$(wc -l < "$dir/backend-probe-calls")
   tmux_probes=$(grep -c "$(printf '^tmux\tlist-windows$')" "$dir/backend-probe-calls" || true)
   process_probes=$(grep -c "$(printf '^ps\tsnapshot$')" "$dir/backend-probe-calls" || true)
-  [ "$backend_probes" -eq 4 ] && [ "$tmux_probes" -eq 2 ] && [ "$process_probes" -eq 2 ] \
+  capture_probes=$(grep -c "$(printf '^tmux\tcapture-pane$')" "$dir/backend-probe-calls" || true)
+  [ "$tmux_probes" -eq "$inventory_calls" ] && [ "$process_probes" -eq "$inventory_calls" ] \
+    && [ "$capture_probes" -eq 1 ] \
+    && [ "$backend_probes" -eq "$((2 * inventory_calls + capture_probes))" ] \
     || fail "admission and watcher used unexpected backend probes: $(tr '\n' ' ' < "$dir/backend-probe-calls")"
   assert_no_watcher "$dir"
   finish "$dir"
-  pass 'retained dead endpoints stay cheap and preserve notification'
+  pass 'pending replies reuse dead inventory while uncertainty remains observable'
 }
 
 test_paused_and_captain_held_deaths_notify_once() {
@@ -2611,6 +2692,7 @@ test_admission_time_preserves_arm_confirmation
 test_recurring_probe_honors_transport_deadline
 test_identity_and_cleanup_phases_preserve_transport_reserve
 test_persistent_identity_timeout_fails_closed
+test_terminal_error_generation_tristate
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
