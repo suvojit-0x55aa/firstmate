@@ -484,7 +484,9 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
-  pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
+  grep -F "$(printf 'entry\t%s\t' "$id")" "$state/.active-supervision-generation" >/dev/null \
+    || fail "preserved pathless metadata lost pending supervision ownership"
+  pass "fm-spawn.sh --backend orca: preserves metadata and ownership when pathless cleanup fails"
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
@@ -679,7 +681,9 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved metadata should not invent a terminal handle"
-  pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
+  grep -F "$(printf 'entry\t%s\t' "$id")" "$state/.active-supervision-generation" >/dev/null \
+    || fail "preserved abort metadata lost pending supervision ownership"
+  pass "fm-spawn.sh --backend orca: preserves metadata and ownership when abort cleanup fails"
 }
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {

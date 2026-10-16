@@ -308,7 +308,7 @@ EOF
 fi
 after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 [ "$after" = "$generation" ] || exit 1
-''', timeout=8, deadline=probe_deadline)
+''', timeout=max(8, remote_send_timeout + probe_cleanup_allowance), deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
     generation = None
@@ -742,24 +742,6 @@ def failure_episode(reason, registry_generation):
                 registry_generation=registry_generation, reason=normalized)
 
 
-def failure_episode_seen(expected):
-    if expected is None:
-        return False
-    try:
-        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
-        fd = os.open(FAILURE_EPISODE, flags)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
-                return False
-            current = json.loads(os.read(fd, 4097).decode('utf-8'))
-        finally:
-            os.close(fd)
-        return current == expected
-    except (OSError, UnicodeError, ValueError):
-        return False
-
-
 def write_failure_episode(value):
     fd, tmp = tempfile.mkstemp(prefix='.codex-stop-failure-episode.')
     try:
@@ -1113,10 +1095,6 @@ def owner(lock):
             reason = budget_reason
         episode = failure_episode(
             reason, leased_registry_generation or admission_registry_generation)
-        if terminal_cleanup_complete and failure_episode_seen(episode):
-            send(active, dict(rc=0, reason='', token=token))
-            terminal_delivered = True
-            return False
         pending_failure_episode = episode
         publish('delivering', 5)
         acknowledged = False

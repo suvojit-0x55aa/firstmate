@@ -802,12 +802,6 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
-  if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ]; then
-    SPAWN_REGISTRY_RESERVED=0
-    if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" != "$SPAWN_GEN" ]; then
-      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" any || true
-    fi
-  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -859,7 +853,7 @@ spawn_abort_cleanup() {
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
-          {
+          if {
             echo "window=$W"
             echo "endpoint_task_id=$ID"
             echo "worktree=${WT:-}"
@@ -875,9 +869,18 @@ spawn_abort_cleanup() {
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
             echo "spawn_gen=$SPAWN_GEN"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+          } > "$STATE/$ID.meta" 2>/dev/null \
+            && fm_supervision_registry_prepare "$STATE" "$ID" "$STATE/$ID.meta"; then
+            SPAWN_REGISTRY_RESERVED=0
+          fi
         fi
       fi
+    fi
+  fi
+  if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ]; then
+    SPAWN_REGISTRY_RESERVED=0
+    if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" != "$SPAWN_GEN" ]; then
+      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" any || true
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then

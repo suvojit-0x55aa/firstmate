@@ -138,6 +138,7 @@ Readiness starts with a read-only check; when that check reports a gap, it runs 
 A host that stays red prints the doctor's remaining gaps and their operator steps, restores the registry, and creates nothing on the remote host.
 It does not copy project trees or the primary process environment.
 A known provisioning failure rolls back the new route, while SSH exit 255 preserves it because remote completion is unknown and must be reconciled on the same host.
+The retained reservation rechecks its recorded host, root, and home through a bounded authoritative recovery call, publishes only an exact returned endpoint, cancels only a proven absence, and otherwise keeps ownership unresolved.
 
 Seeding also writes a durable `.fm-secondmate-parent` record next to the home's `.fm-secondmate-home` identity marker, naming this home's route to its parent as `local` or `remote`.
 The promised-public-reply subsystem is same-filesystem by construction, so a remote route can never carry a delegated public-reply promise; `bin/fm-teardown.sh`'s cleanup gate reads this record to treat a remote parent as out of scope rather than an unresolved binding.
@@ -164,8 +165,8 @@ Backends that already refuse secondmate launch, currently Orca and cmux, remain 
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 
-A persistent remote route's parent metadata intentionally has no local spawn-generation marker and identifies the route by its recorded host instead.
-The Bearings inventory-reconcile hook therefore accepts these markerless routes, revalidates the sampled host at delivery, and refuses a route that changed hosts; [`fm-secondmate-reconcile.sh`](../bin/fm-secondmate-reconcile.sh) owns the exact cooldown, identity, and reporting contract.
+A current remote route's parent metadata carries a local spawn generation as its primary identity.
+The Bearings inventory-reconcile hook revalidates that generation at delivery; it also accepts legacy markerless routes by revalidating their sampled host, and [`fm-secondmate-reconcile.sh`](../bin/fm-secondmate-reconcile.sh) owns the exact cooldown, compatibility, identity, and reporting contract.
 
 Send routed requests normally:
 

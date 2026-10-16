@@ -1375,7 +1375,7 @@ PY
   pass 'terminal errors distinguish current uncertain and changed generations'
 }
 
-test_current_generation_failure_episode_is_bounded() {
+test_current_generation_failure_remains_closed() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture bounded-failure-episode)
   install_controlled_watcher "$dir"
@@ -1388,12 +1388,12 @@ test_current_generation_failure_episode_is_bounded() {
   TEST_ROOT=$original_root
   wait_file "$dir/repeat-rc" 350
   [ "$(cat "$dir/rc")" = 2 ] || fail 'first current-generation watcher failure was not surfaced'
-  [ "$(cat "$dir/repeat-rc")" = 0 ] \
-    || fail 'unchanged current-generation watcher failure surfaced more than once'
+  [ "$(cat "$dir/repeat-rc")" = 2 ] \
+    || fail 'unchanged current-generation watcher failure was acknowledged without recovery'
   assert_contains "$(cat "$dir/out")" 'watcher failed' \
     'first current-generation failure lost its durable diagnostic'
-  [ ! -s "$dir/repeat-out" ] \
-    || fail 'deduplicated current-generation failure emitted a second continuation'
+  assert_contains "$(cat "$dir/repeat-out")" 'watcher failed' \
+    'repeated current-generation failure lost its fail-closed diagnostic'
   [ "$(jq -r .protocol "$dir/state/.codex-stop-failure-episode.json")" = fm-codex-stop-failure.v1 ] \
     || fail 'current-generation failure episode was not recorded durably'
   finish "$dir"
@@ -1421,7 +1421,7 @@ test_current_generation_failure_episode_is_bounded() {
   assert_contains "$(cat "$dir/repeat-out")" 'watcher failed' \
     'changed generation incorrectly inherited the prior failure suppression'
   finish "$dir"
-  pass 'current-generation Stop failures surface once per active snapshot episode'
+  pass 'current-generation Stop failures remain closed until recovery'
 }
 
 test_stalled_watcher_cannot_complete_quiet_window() {
@@ -4266,22 +4266,118 @@ test_registry_reservation_recovers_spawn_crash_windows() {
   rc=$?
   set -e
   [ "$rc" -eq 75 ] || fail 'remote unknown-completion fixture did not reach its boundary'
+  mkdir -p "$dir/data"
+  cat > "$dir/data/secondmates.md" <<EOF
+- remote - Remote fixture (host: host.example; root: /remote/root; home: /remote/home; scope: recovery; projects: project-a; added 2026-10-17)
+- remote-missing - Missing remote fixture (host: missing.example; root: /remote/missing-root; home: /remote/missing-home; scope: recovery; projects: project-a; added 2026-10-17)
+EOF
+  cat > "$dir/fakebin/recovery-ssh" <<'SH'
+#!/usr/bin/env bash
+case "${FM_TEST_REMOTE_RECOVERY:-unknown}" in
+  unknown) exit 255 ;;
+  alive)
+    printf '%s\n' 'schema=fm-remote-secondmate-recovery.v1' 'state=alive' \
+      'backend=herdr' 'target=fm-remote:pane-remote' 'herdr_session=fm-remote' 'harness=codex'
+    ;;
+  missing) printf '%s\n' 'schema=fm-remote-secondmate-recovery.v1' 'state=missing' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod 0700 "$dir/fakebin/recovery-ssh"
+  set +e
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$dir/data" \
+    FM_SSH_BIN="$dir/fakebin/recovery-ssh" FM_TEST_REMOTE_RECOVERY=unknown \
+    FM_SEND_REMOTE_BUDGET=2 FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/remote-unavailable"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'unavailable remote recovery exposed an incomplete inventory'
+  grep -F "$(printf 'reservation\tremote\tremote-gen')" \
+    "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'unknown remote completion released its reservation'
+
+  cat > "$dir/data/secondmates.md" <<EOF
+- remote - Remote fixture (host: host.example; root: /remote/drift-root; home: /remote/home; scope: recovery; projects: project-a; added 2026-10-17)
+- remote-missing - Missing remote fixture (host: missing.example; root: /remote/missing-root; home: /remote/missing-home; scope: recovery; projects: project-a; added 2026-10-17)
+EOF
+  set +e
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$dir/data" \
+    FM_SSH_BIN="$dir/fakebin/recovery-ssh" FM_TEST_REMOTE_RECOVERY=alive \
+    FM_SEND_REMOTE_BUDGET=2 FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/remote-drift"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'remote recovery followed a route that changed roots'
+  grep -F "$(printf 'reservation\tremote\tremote-gen')" \
+    "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'route drift released unknown remote ownership'
+  cat > "$dir/data/secondmates.md" <<EOF
+- remote - Remote fixture (host: host.example; root: /remote/root; home: /remote/home; scope: recovery; projects: project-a; added 2026-10-17)
+- remote-missing - Missing remote fixture (host: missing.example; root: /remote/missing-root; home: /remote/missing-home; scope: recovery; projects: project-a; added 2026-10-17)
+EOF
+
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$dir/data" \
+    FM_SSH_BIN="$dir/fakebin/recovery-ssh" FM_TEST_REMOTE_RECOVERY=alive \
+    FM_SEND_REMOTE_BUDGET=2 FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/remote-known" \
+    || fail 'authoritative remote recovery did not converge'
+  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/remote-known")
+  [ "$inventory" = $'live\nremote\nuncertain' ] \
+    || fail "remote unknown recovery produced the wrong inventory: $inventory"
+  [ "$(sed -n 's/^window=//p' "$dir/state/remote.meta")" = remote:remote ] \
+    && [ "$(sed -n 's/^remote_host=//p' "$dir/state/remote.meta")" = host.example ] \
+    && [ "$(sed -n 's/^remote_target=//p' "$dir/state/remote.meta")" = fm-remote:pane-remote ] \
+    && [ "$(sed -n 's/^spawn_gen=//p' "$dir/state/remote.meta")" = remote-gen ] \
+    || fail 'remote unknown recovery did not preserve its route ownership'
+
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
-    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
-  ' _ "$ROOT/bin" > "$dir/remote-unknown" \
-    || fail 'remote unknown completion did not converge conservatively'
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" remote-missing missing-gen || exit 1
+    printf "%s\n" "window=remote:remote-missing" "endpoint_task_id=remote-missing" \
+      "worktree=/remote/missing-home" "project=/remote/missing-root" "harness=codex" \
+      "kind=secondmate" "mode=secondmate" "yolo=off" "home=/remote/missing-home" \
+      "projects=project-a" "remote_host=missing.example" "remote_root=/remote/missing-root" \
+      "remote_backend=herdr" "remote_herdr_session=fm-remote" "remote_target=unknown" \
+      "spawn_gen=missing-gen" > "$FM_STATE_OVERRIDE/.remote-missing.staged" || exit 1
+    fm_supervision_registry_mark_reservation \
+      "$FM_STATE_OVERRIDE" remote-missing missing-gen remote-unknown remote \
+      remote:remote-missing missing.example "$FM_STATE_OVERRIDE/.remote-missing.staged" || exit 1
+    exit 76
+  ' _ "$ROOT/bin" >/dev/null 2>&1
+  rc=$?
   set -e
-  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/remote-unknown")
+  [ "$rc" -eq 76 ] || fail 'remote missing fixture did not reach its crash boundary'
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$dir/data" \
+    FM_SSH_BIN="$dir/fakebin/recovery-ssh" FM_TEST_REMOTE_RECOVERY=missing \
+    FM_SEND_REMOTE_BUDGET=2 FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/remote-missing" \
+    || fail 'authoritative remote absence did not converge'
+  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/remote-missing")
   [ "$inventory" = $'live\nremote\nuncertain' ] \
-    || fail "remote unknown recovery produced the wrong inventory: $inventory"
-  [ "$(sed -n 's/^window=//p' "$dir/state/remote.meta")" = remote:remote ] \
-    && [ "$(sed -n 's/^remote_host=//p' "$dir/state/remote.meta")" = host.example ] \
-    && [ "$(sed -n 's/^spawn_gen=//p' "$dir/state/remote.meta")" = remote-gen ] \
-    || fail 'remote unknown recovery did not preserve its route ownership'
+    || fail "remote absence changed the wrong inventory: $inventory"
+  [ ! -e "$dir/state/remote-missing.meta" ] \
+    && ! grep -F "$(printf 'reservation\tremote-missing\t')" \
+      "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'proven remote absence retained lifecycle ownership'
 
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -4316,7 +4412,43 @@ test_registry_reservation_recovers_spawn_crash_windows() {
   pass 'spawn reservations recover live, dead, uncertain, published, and remote outcomes'
 }
 
-test_transaction_journals_recover_every_backend_byte_exact() {
+test_remote_recovery_protocol_reports_exact_endpoint() {
+  local dir home out
+  dir=$(fixture remote-recovery-protocol)
+  home="$dir/remote-home"
+  mkdir -p "$home/bin" "$home/state/parent-route" "$dir/fakebin"
+  : > "$home/AGENTS.md"
+  printf '%s\n' remote > "$home/.fm-secondmate-home"
+  printf '%s\n' 'window=fm-remote:pane-recovery' 'endpoint_task_id=remote' \
+    'worktree=/remote/worktree' 'project=/remote/project' 'harness=codex' \
+    'kind=secondmate' 'backend=herdr' 'herdr_session=fm-remote' \
+    'herdr_workspace_id=workspace-recovery' 'herdr_tab_id=tab-recovery' \
+    'herdr_pane_id=pane-recovery' 'spawn_gen=remote-host-gen' \
+    > "$home/state/parent-route/remote.meta"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  pane:get) printf '%s\n' '{"result":{"pane":{"pane_id":"pane-recovery"}}}' ;;
+  agent:get) printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod 0700 "$dir/fakebin/herdr"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" recovery remote) \
+    || fail 'remote recovery protocol could not inspect an exact endpoint'
+  [ "$out" = $'schema=fm-remote-secondmate-recovery.v1\nstate=alive\nbackend=herdr\ntarget=fm-remote:pane-recovery\nherdr_session=fm-remote\nharness=codex' ] \
+    || fail "remote recovery protocol returned an inexact endpoint: $out"
+  rm -f "$home/state/parent-route/remote.meta"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" recovery remote) \
+    || fail 'remote recovery protocol could not report authoritative absence'
+  [ "$out" = $'schema=fm-remote-secondmate-recovery.v1\nstate=missing' ] \
+    || fail "remote recovery protocol did not report exact absence: $out"
+  pass 'remote recovery protocol reports exact endpoints and absence'
+}
+
+test_transaction_journals_recover_every_backend() {
   local dir rc task
   dir=$(fixture transaction-journal-backends)
   install_endpoint_inventory_herdr "$dir"
@@ -4412,7 +4544,19 @@ test_transaction_journals_recover_every_backend_byte_exact() {
   set -e
   [ "$rc" -eq 79 ] || fail 'validator-complete backend journals did not reach their crash boundary'
 
-  PATH="$dir/fakebin:$PATH" \
+  mkdir -p "$dir/data"
+  cat > "$dir/data/secondmates.md" <<EOF
+- remote-pending - Pending remote fixture (host: pending.example; root: /remote/pending-root; home: /remote/pending-home; scope: recovery; projects: project-a; added 2026-10-17)
+EOF
+  cat > "$dir/fakebin/recovery-ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'schema=fm-remote-secondmate-recovery.v1' 'state=alive' \
+  'backend=herdr' 'target=fm-remote:pane-pending' 'herdr_session=fm-remote' 'harness=codex'
+SH
+  chmod 0700 "$dir/fakebin/recovery-ssh"
+
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_DATA_OVERRIDE="$dir/data" FM_SSH_BIN="$dir/fakebin/recovery-ssh" \
     FM_TEST_HERDR_EXISTING_TARGETS='default:pane-1 default:pane-2' \
     FM_TEST_TMUX_RESERVATIONS='@42=fleet:fm-tmux-task=/tmp/tmux\c-work' \
     FM_TEST_EXISTING_TARGETS='fleet:fm-tmux-task' \
@@ -4423,7 +4567,7 @@ test_transaction_journals_recover_every_backend_byte_exact() {
     . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
   ' _ "$ROOT/bin" > "$dir/inventory" || fail 'backend transaction journals did not recover'
-  for task in tmux-task herdr-flat herdr-projected zellij-task cmux-task orca-task remote-pending remote-created; do
+  for task in tmux-task herdr-flat herdr-projected zellij-task cmux-task orca-task remote-created; do
     cmp "$dir/state/.$task.staged" "$dir/state/$task.meta" \
       || fail "$task transaction journal did not preserve metadata bytes"
   done
@@ -4436,10 +4580,11 @@ test_transaction_journals_recover_every_backend_byte_exact() {
   [ "$(sed -n 's/^remote_target=//p' "$dir/state/remote-created.meta")" = fm-remote:pane-4 ] \
     && [ "$(sed -n 's/^remote_root=//p' "$dir/state/remote-created.meta")" = /remote/root ] \
     || fail 'remote-created journal lost its exact route'
-  [ "$(sed -n 's/^remote_target=//p' "$dir/state/remote-pending.meta")" = unknown ] \
+  [ "$(sed -n 's/^remote_target=//p' "$dir/state/remote-pending.meta")" = fm-remote:pane-pending ] \
     && [ "$(sed -n 's/^remote_host=//p' "$dir/state/remote-pending.meta")" = pending.example ] \
-    || fail 'remote-before-response journal lost its conservative exact route'
-  pass 'transaction journals recover every supported backend with byte-exact validator-complete metadata'
+    && [ "$(sed -n 's/^remote_root=//p' "$dir/state/remote-pending.meta")" = /remote/pending-root ] \
+    || fail 'remote-before-response journal did not converge to its authoritative route'
+  pass 'transaction journals preserve backend metadata and converge remote unknown completion'
 }
 
 test_registered_check_kills_term_ignoring_process_group() {
@@ -4607,9 +4752,39 @@ test_check_grace_and_absolute_lease_are_preserved() {
     'printf "%s\n" "$$" > "$FM_HOME/check-grace-child"' \
     'while :; do sleep 1; done' > "$dir/state/grace.check.sh"
   chmod 0700 "$dir/state/grace.check.sh"
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env perl
+use strict;
+use warnings;
+my ($flag, $grace, $bound, @command) = @ARGV;
+exit 98 unless defined $flag && $flag eq '-k' && $grace =~ /^\d+$/ && $bound =~ /^\d+$/;
+open my $log, '>', $ENV{FM_TEST_TIMEOUT_LOG} or exit 97;
+print {$log} "$grace\t$bound\n";
+close $log;
+my $pid = fork;
+exit 96 unless defined $pid;
+if (!$pid) {
+  setpgrp(0, 0);
+  exec @command;
+  exit 95;
+}
+local $SIG{ALRM} = sub {
+  kill 'TERM', -$pid;
+  select undef, undef, undef, $grace;
+  kill 'KILL', -$pid;
+  waitpid $pid, 0;
+  exit 124;
+};
+alarm $bound;
+waitpid $pid, 0;
+exit($? >> 8);
+SH
+  chmod 0700 "$dir/fakebin/timeout"
   started=$(monotonic_seconds)
   set +e
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CHECK_TIMEOUT=1 \
+  PATH="$dir/fakebin:$PATH" FM_TEST_TIMEOUT_LOG="$dir/timeout-call" \
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CHECK_TIMEOUT=1 \
     FM_CHECK_KILL_GRACE=10 FM_CHECK_REAP_ALLOWANCE=1 \
     bash -c '. "$1/fm-watch.sh"; run_check_capture "$2"' \
       _ "$ROOT/bin" "$dir/state/grace.check.sh"
@@ -4619,6 +4794,8 @@ test_check_grace_and_absolute_lease_are_preserved() {
   [ "$rc" -eq 0 ] || fail "configured-grace check runner failed: rc=$rc"
   [ "$elapsed" -ge 10 ] && [ "$elapsed" -le 14 ] \
     || fail "configured kill grace was not retained as 10 seconds: ${elapsed}s"
+  [ "$(cat "$dir/timeout-call")" = $'10\t1' ] \
+    || fail 'external timeout did not receive the configured TERM-to-KILL grace'
   child=$(cat "$dir/check-grace-child")
   ! kill -0 "$child" 2>/dev/null || fail 'configured-grace cancellation returned before reap'
 
@@ -4798,7 +4975,7 @@ test_identity_and_cleanup_phases_preserve_transport_reserve
 test_registry_retirement_preserves_conclusive_generation_change
 test_persistent_identity_timeout_fails_closed
 test_terminal_error_generation_tristate
-test_current_generation_failure_episode_is_bounded
+test_current_generation_failure_remains_closed
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
@@ -4819,7 +4996,8 @@ test_registry_pending_snapshot_is_immediately_authoritative
 test_registry_snapshot_index_is_generation_bound
 test_incarnation_allocator_is_durable_unique_and_nonreusable
 test_registry_reservation_recovers_spawn_crash_windows
-test_transaction_journals_recover_every_backend_byte_exact
+test_remote_recovery_protocol_reports_exact_endpoint
+test_transaction_journals_recover_every_backend
 test_registered_check_kills_term_ignoring_process_group
 test_bounded_check_starts_without_observer_endpoint
 test_bounded_observer_remains_live_during_check

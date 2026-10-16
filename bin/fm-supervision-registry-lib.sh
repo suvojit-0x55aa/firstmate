@@ -288,9 +288,53 @@ fm_supervision_registry_recover_reservation_meta_locked() {
   mv -f -- "$tmp" "$meta"
 }
 
+fm_supervision_registry_remote_recovery() {
+  local meta=$1 task=$2 host=$3 script_dir root parent_home data budget output parsed
+  local remote_root remote_home
+  remote_root=$(fm_backend_meta_exact_value "$meta" remote_root 2>/dev/null || true)
+  remote_home=$(fm_backend_meta_exact_value "$meta" home 2>/dev/null || true)
+  [ -n "$remote_root" ] && [ -n "$remote_home" ] || return 1
+  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || return 1
+  root=$(cd "$script_dir/.." && pwd) || return 1
+  parent_home=${FM_HOME:-$root}
+  data=${FM_DATA_OVERRIDE:-$parent_home/data}
+  # shellcheck source=bin/fm-timeout-lib.sh
+  . "$script_dir/fm-timeout-lib.sh"
+  budget=${FM_SEND_REMOTE_BUDGET:-30}
+  case "$budget" in ''|*[!0-9]*|0) return 1 ;; esac
+  output=$(FM_HOME="$parent_home" FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$root}" \
+    FM_DATA_OVERRIDE="$data" FM_ON_EXPECTED_REMOTE_HOST="$host" \
+    FM_ON_EXPECTED_REMOTE_ROOT="$remote_root" FM_ON_EXPECTED_REMOTE_HOME="$remote_home" \
+    fm_run_timed "$budget" "$script_dir/fm-on.sh" "$task" \
+      fm-remote-secondmate-control.sh recovery "$task" 2>/dev/null) || return 1
+  parsed=$(printf '%s\n' "$output" | awk -F= '
+    BEGIN { OFS="\t" }
+    {
+      key=$1
+      value=substr($0, length(key) + 2)
+      if (key == "schema" || key == "state" || key == "backend" ||
+          key == "target" || key == "herdr_session" || key == "harness") {
+        if (++seen[key] > 1) exit 2
+        field[key]=value
+      } else if ($0 != "") exit 2
+    }
+    END {
+      if (field["schema"] != "fm-remote-secondmate-recovery.v1" ||
+          field["state"] !~ /^(alive|dead|missing|unreadable|unverified)$/) exit 2
+      if (field["state"] == "alive" || field["state"] == "dead") {
+        if (field["backend"] != "herdr" || field["target"] !~ /^fm-remote:.+/ ||
+            field["herdr_session"] != "fm-remote" || field["harness"] == "") exit 2
+      }
+      print field["state"], field["target"], field["harness"]
+    }
+  ') || return 1
+  printf '%s\n' "$parsed"
+}
+
 fm_supervision_registry_reconcile_locked() {
   local state=$1 path protocol generation kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail meta current identity verdict
-  local recovery_identity recovery_state recovery_path recovery_target transaction_meta
+  local recovery_identity recovery_state recovery_path recovery_target transaction_meta recovery_result recovery_tmp
+  local recovery_harness expected_harness
   path=$(fm_supervision_registry_generation_path "$state")
   fm_supervision_registry_snapshot_valid "$path" || return 1
   IFS="$(printf '\t')" read -r protocol generation < "$path" || return 1
@@ -316,7 +360,42 @@ fm_supervision_registry_reconcile_locked() {
         recovery_path=-
         recovery_target=$target
         case "$backend:$target" in
-          remote:*|remote-herdr:*) ;;
+          remote:remote:*)
+            transaction_meta=$(fm_supervision_registry_transaction_meta_locked \
+              "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" 2>/dev/null || true)
+            [ -n "$transaction_meta" ] || return 1
+            recovery_result=$(fm_supervision_registry_remote_recovery \
+              "$transaction_meta" "$task" "$detail" 2>/dev/null) || continue
+            IFS="$(printf '\t')" read -r verdict recovery_target recovery_harness <<EOF
+$recovery_result
+EOF
+            if [ "$verdict" = missing ]; then
+              fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || return 1
+              continue
+            fi
+            case "$verdict:$recovery_target" in
+              alive:fm-remote:*|dead:fm-remote:*) ;;
+              *) continue ;;
+            esac
+            case "$recovery_target" in *[$'\t\r\n']*) continue ;; esac
+            expected_harness=$(fm_backend_meta_exact_value "$transaction_meta" harness 2>/dev/null || true)
+            [ -n "$expected_harness" ] && [ "$recovery_harness" = "$expected_harness" ] || continue
+            recovery_tmp=$(umask 077; mktemp "$state/.$task.meta.remote-recovery.XXXXXX") || return 1
+            if ! awk -F= -v target="$recovery_target" '
+                $1 == "remote_target" { if (++seen > 1) exit 2; print "remote_target=" target; next }
+                { print }
+                END { if (seen != 1) exit 2 }
+              ' "$transaction_meta" > "$recovery_tmp" \
+              || ! fm_supervision_registry_staged_meta_valid \
+                "$recovery_tmp" "$task" "$spawn_gen" created remote-herdr "$recovery_target" "$detail" \
+              || ! mv -f -- "$recovery_tmp" "$meta"; then
+              rm -f -- "$recovery_tmp"
+              return 1
+            fi
+            fm_supervision_registry_write_locked "$state" "$task" "$meta" pending set || return 1
+            continue
+            ;;
+          remote-herdr:fm-remote:*) ;;
           tmux:@*)
             recovery_identity=$(fm_backend_reservation_identity "$backend" "$target" "$detail") \
               || recovery_identity=$'unverified\t-'
