@@ -1288,9 +1288,9 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
-fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory]
+fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory] [active-only]
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local batch_inventory=${2-} inventory_backend inventory_target inventory_state inventory_route
+  local batch_inventory=${2-} active_only=${3:-} inventory_backend inventory_target inventory_state inventory_route
   local inventory_home inventory_task inventory_kind inventory_spawn_gen
   local observation observation_key observation_route observation_cache_key found
   local lookup_dir lookup_file observation_file task_key
@@ -1323,6 +1323,10 @@ EOF
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)
+    if [ "$active_only" = active-only ]; then
+      task_key=$(fm_backend_agent_state_cache_key "$task_id") || continue
+      [ -f "$lookup_dir/tasks/$task_key" ] || continue
+    fi
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
       # Cheap no-op unless an escalation for this record is still open; this is
@@ -1402,8 +1406,7 @@ EOF
             || printf '%s\n' "$task_id" >> "$FM_PENDING_REPLY_PLAN_LOOKUP_LOG"
           if [ "$inventory_backend" = "$backend" ] \
             && [ "$inventory_target" = "$target" ] \
-            && [ "$inventory_route" = "$observation_route" ] \
-            && [ "$inventory_route" = local ]; then
+            && [ "$inventory_route" = "$observation_route" ]; then
             case "$inventory_state" in
               dead|missing)
                 observation=unavailable

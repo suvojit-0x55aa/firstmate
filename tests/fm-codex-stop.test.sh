@@ -91,11 +91,6 @@ run_bounded_watcher_cycle() {
       . "$1/fm-wake-lib.sh"
       . "$1/fm-backend.sh"
       . "$1/fm-supervision-registry-lib.sh"
-      for meta in "$FM_STATE_OVERRIDE"/*.meta; do
-        [ -f "$meta" ] || continue
-        task=${meta##*/}; task=${task%.meta}
-        fm_supervision_registry_register "$FM_STATE_OVERRIDE" "$task" "$meta"
-      done
       fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
     ' _ "$ROOT/bin" || fail 'could not initialize the active supervision fixture registry'
   fi
@@ -180,7 +175,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v7\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v1\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v8\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v2\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -386,7 +381,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v7\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v1\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v8\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v2\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -1537,8 +1532,8 @@ SH
   grep -F "$(printf '\tstale\tfleet:dead-25\tstale: fleet:dead-25')" "$dir/state/.wake-queue" >/dev/null \
     || fail 'authoritatively dead worker did not retain its stale notification'
   [ ! -e "$dir/crew-state-calls" ] || fail 'authoritatively dead targets reached expensive crew-state classification'
-  [ "$(wc -l < "$dir/plan-lookups" | tr -d '[:space:]')" = 27 ] \
-    || fail 'pending replies did not perform exactly one keyed classification lookup per owner'
+  [ "$(wc -l < "$dir/plan-lookups" | tr -d '[:space:]')" = 3 ] \
+    || fail 'pending replies did not restrict keyed classification lookup to active owners'
   inventory_calls=$(wc -l < "$dir/inventory-calls")
   [ "$inventory_calls" -ge 2 ] && [ "$inventory_calls" -le 7 ] \
     || fail "admission and watcher used $inventory_calls inventories across bounded probe cycles"
@@ -1770,6 +1765,11 @@ test_duplicate_endpoint_owners_share_stale_pass() {
     printf '%s\n' 'working: shared endpoint fixture' > "$dir/state/$task.status"
     prime_status_seen "$dir/state" "$dir/state/$task.status"
   done
+  cat > "$dir/fast-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'state: stopped · source: pane · bare shell'
+SH
+  chmod +x "$dir/fast-crew-state.sh"
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:shared' \
     FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
@@ -1777,6 +1777,7 @@ test_duplicate_endpoint_owners_share_stale_pass() {
     . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_register "$FM_STATE_OVERRIDE" b-owner "$FM_STATE_OVERRIDE/b-owner.meta"
     fm_supervision_registry_register "$FM_STATE_OVERRIDE" c-owner "$FM_STATE_OVERRIDE/c-owner.meta"
+    fm_supervision_registry_retire "$FM_STATE_OVERRIDE" a-owner
   ' _ "$ROOT/bin" || fail 'could not register active duplicate-endpoint owners'
   if command -v md5 >/dev/null 2>&1; then
     pane_hash=$(printf '%s' 'retained endpoint' | md5 -q)
@@ -1788,6 +1789,7 @@ test_duplicate_endpoint_owners_share_stale_pass() {
   set +e
   FM_TEST_EXISTING_TARGETS='fleet:shared' FM_TEST_LIVE_TARGETS='fleet:shared' \
     FM_TEST_CAPTURE_LOG="$dir/captures" FM_TEST_BOUNDED_WATCH_TIMEOUT=6 \
+    FM_CREW_STATE_BIN="$dir/fast-crew-state.sh" \
     run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
     > "$dir/out" 2> "$dir/err"
   rc=$?
@@ -3019,6 +3021,10 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
   install_endpoint_inventory_tmux "$dir"
   printf '%s\n' 'window=fleet:live' 'spawn_gen=live-a' > "$dir/state/live.meta"
   printf '%s\n' 'window=fleet:retained' 'spawn_gen=retained-a' > "$dir/state/retained.meta"
+  printf '%s\n' 'window=fleet:newly-dead' 'spawn_gen=dead-a' > "$dir/state/newly-dead.meta"
+  mkdir -p "$dir/state/.death-notified-v3/retained"
+  printf 'fm-death-notified.v3\tspawn:retained-a\tretained\ttmux\tfleet:retained\n' \
+    > "$dir/state/.death-notified-v3/retained/receipt"
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:live fleet:retained' \
     FM_TEST_LIVE_TARGETS='fleet:live' FM_STATE_OVERRIDE="$dir/state" bash -c '
       . "$1/fm-wake-lib.sh"
@@ -3028,7 +3034,8 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
       fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
     ' _ "$ROOT/bin" > "$dir/recovered" || fail 'active registry recovery failed'
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
-  [ "$inventory" = live ] || fail "registry recovery admitted retained dead history: $inventory"
+  [ "$inventory" = $'live\nnewly-dead' ] \
+    || fail "registry recovery lost a new death or admitted surfaced history: $inventory"
   generation=$(cut -f2 "$dir/state/.active-supervision-generation")
   printf '%s\n' 'window=fleet:new' 'spawn_gen=new-a' > "$dir/state/new.meta"
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -3040,10 +3047,140 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
     fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
   ' _ "$ROOT/bin" > "$dir/transitioned" || fail 'active registry lifecycle transition failed'
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/transitioned")
-  [ "$inventory" = new ] || fail "registry lifecycle retained the wrong active set: $inventory"
+  [ "$inventory" = $'new\nnewly-dead' ] || fail "registry lifecycle retained the wrong active set: $inventory"
   [ "$(cut -f2 "$dir/state/.active-supervision-generation")" != "$generation" ] \
     || fail 'registry lifecycle transition did not revoke the prior generation'
   pass 'active supervision recovery and lifecycle transitions own inventory'
+}
+
+test_registry_pending_snapshot_is_immediately_authoritative() {
+  local dir before after inventory
+  dir=$(fixture active-supervision-pending-snapshot)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:existing' 'spawn_gen=existing-a' > "$dir/state/existing.meta"
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:existing' \
+    FM_TEST_LIVE_TARGETS='fleet:existing' FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-wake-lib.sh"
+      . "$1/fm-backend.sh"
+      . "$1/fm-supervision-registry-lib.sh"
+      fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
+    ' _ "$ROOT/bin" || fail 'could not initialize registry snapshot'
+  before=$(cut -f2 "$dir/state/.active-supervision-generation")
+  printf '%s\n' 'window=fleet:pending' 'spawn_gen=pending-a' > "$dir/state/pending.meta"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_prepare "$FM_STATE_OVERRIDE" pending "$FM_STATE_OVERRIDE/pending.meta"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/pending-inventory" || fail 'pending lifecycle publication failed'
+  after=$(cut -f2 "$dir/state/.active-supervision-generation")
+  [ "$after" != "$before" ] || fail 'pending lifecycle publication did not replace the registry generation'
+  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/pending-inventory")
+  [ "$inventory" = $'existing\npending' ] || fail "pending owner was not atomically visible: $inventory"
+  pass 'pending lifecycle ownership publishes through one authoritative snapshot'
+}
+
+test_active_only_pending_replies_exclude_archive() {
+  local dir
+  dir=$(fixture active-only-pending-replies)
+  for task in active archived dead-active; do
+    printf '%s\n' "window=fleet:$task" 'kind=secondmate' 'harness=claude' 'backend=tmux' \
+      > "$dir/state/$task.meta"
+  done
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    . "$1/fm-pending-reply-lib.sh"
+    for task in active archived dead-active; do
+      corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" "$task" report) || exit 1
+      fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 1000 || exit 1
+    done
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+    fm_supervision_registry_retire "$FM_STATE_OVERRIDE" archived || exit 1
+    fm_pending_reply_backend_observation() {
+      printf "%s\n" "$2" >> "$FM_HOME/observations"
+      printf idle
+    }
+    inventory=$(printf "tmux\tfleet:active\talive\tlocal\t-\tactive\tsecondmate\t-\n")
+    inventory="$inventory$(printf "\ntmux\tfleet:dead-active\tdead\tlocal\t-\tdead-active\tsecondmate\t-")"
+    fm_pending_reply_tick "$FM_STATE_OVERRIDE" "$inventory" active-only
+  ' _ "$ROOT/bin" || fail 'active-only pending reply tick failed'
+  [ "$(cat "$dir/observations")" = 'fleet:active' ] \
+    || fail 'bounded pending replies captured an archived or exact-dead endpoint'
+  pass 'bounded pending replies observe only active available owners'
+}
+
+test_mixed_active_owner_policy_surfaces_once() {
+  local dir pane_hash rc captures archive_busy_gen
+  dir=$(fixture mixed-active-owner-policy)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:shared' 'kind=ship' 'harness=grok' 'backend=tmux' > "$dir/state/a-archive.meta"
+  archive_busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/state" a-archive) \
+    || fail 'could not arm archived busy owner'
+  printf 'busy_gen=%s\n' "$archive_busy_gen" >> "$dir/state/a-archive.meta"
+  printf '%s\n' 'working: archived owner' > "$dir/state/a-archive.status"
+  printf '%s\n' 'window=fleet:shared' 'kind=ship' 'harness=claude' 'backend=tmux' > "$dir/state/b-working.meta"
+  printf '%s\n' 'working: active owner' > "$dir/state/b-working.status"
+  printf '%s\n' 'window=fleet:shared' 'kind=ship' 'harness=claude' 'backend=tmux' > "$dir/state/c-blocked.meta"
+  printf '%s\n' 'needs-decision: captain action required' > "$dir/state/c-blocked.status"
+  cat > "$dir/stopped-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'state: stopped · source: pane · bare shell'
+SH
+  chmod +x "$dir/stopped-crew-state.sh"
+  prime_status_seen "$dir/state" "$dir/state/a-archive.status"
+  prime_status_seen "$dir/state" "$dir/state/b-working.status"
+  prime_status_seen "$dir/state" "$dir/state/c-blocked.status"
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:shared' FM_TEST_LIVE_TARGETS='fleet:shared' \
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-wake-lib.sh"; . "$1/fm-backend.sh"; . "$1/fm-supervision-registry-lib.sh"
+      fm_supervision_registry_register "$FM_STATE_OVERRIDE" b-working "$FM_STATE_OVERRIDE/b-working.meta"
+      fm_supervision_registry_register "$FM_STATE_OVERRIDE" c-blocked "$FM_STATE_OVERRIDE/c-blocked.meta"
+      fm_supervision_registry_retire "$FM_STATE_OVERRIDE" a-archive
+    ' _ "$ROOT/bin" || fail 'could not register mixed active owners'
+  pane_hash=$(hash_text 'retained endpoint')
+  printf '%s' "$pane_hash" > "$dir/state/.hash-fleet_shared"
+  printf '%s\n' 1 > "$dir/state/.count-fleet_shared"
+  set +e
+  FM_TEST_EXISTING_TARGETS='fleet:shared' FM_TEST_LIVE_TARGETS='fleet:shared' \
+    FM_TEST_CAPTURE='retained endpoint' FM_TEST_CAPTURE_LOG="$dir/captures" \
+    FM_CREW_STATE_BIN="$dir/stopped-crew-state.sh" \
+    FM_TEST_BOUNDED_WATCH_TIMEOUT=6 run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/out" 2> "$dir/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || fail 'blocked active owner was suppressed by a sibling policy'
+  grep -F "$(printf '\tstale\tfleet:shared\tstale: fleet:shared')" "$dir/state/.wake-queue" >/dev/null \
+    || fail 'mixed active-owner policy did not surface the blocked owner'
+  captures=$(wc -l < "$dir/captures" | tr -d ' ')
+  [ "$captures" -eq 1 ] || fail "mixed owners caused $captures endpoint captures"
+  pass 'active owner policies fold over one endpoint observation'
+}
+
+test_shared_endpoint_fanout_consumes_cycle_lease() {
+  local dir task
+  dir=$(fixture shared-endpoint-fanout-budget)
+  install_endpoint_inventory_tmux "$dir"
+  for task in $(seq 1 20); do
+    printf '%s\n' 'window=fleet:shared' 'kind=ship' 'harness=claude' 'backend=tmux' \
+      > "$dir/state/owner-$task.meta"
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-task-inbox-lib.sh"
+      fm_task_inbox_write "$FM_STATE_OVERRIDE" "$2" "due instruction" >/dev/null
+    ' _ "$ROOT/bin" "owner-$task" || fail "could not create owner-$task inbox"
+  done
+  FM_TEST_EXISTING_TARGETS='fleet:shared' FM_TEST_LIVE_TARGETS='fleet:shared' \
+    FM_TASK_INBOX_GRACE_SECS=0 FM_SEND_REMOTE_BUDGET=20 FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=80 \
+    run_stop "$dir" 4
+  wait_file "$dir/rc" 120
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'shared endpoint fan-out escaped Stop refusal'
+  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+    'per-owner backend submits were omitted from the atomic cycle lease'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'shared endpoint fan-out is fully charged to the cycle lease'
 }
 
 if [ -n "${FM_CODEX_STOP_FOCUSED_CASES:-}" ]; then
@@ -3081,6 +3218,10 @@ test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_active_supervision_registry_owns_lifecycle_inventory
+test_registry_pending_snapshot_is_immediately_authoritative
+test_active_only_pending_replies_exclude_archive
+test_mixed_active_owner_policy_surfaces_once
+test_shared_endpoint_fanout_consumes_cycle_lease
 test_small_live_endpoint_inventory_remains_bounded
 test_failed_existence_probe_is_conservatively_budgeted
 test_remote_endpoints_avoid_local_backend_probes

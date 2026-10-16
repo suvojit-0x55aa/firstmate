@@ -284,9 +284,9 @@ hash_pane() {
 # treated as not-provably-working and surfaces rather than being absorbed.
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
-window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
-  task=$(window_to_task "$w" "$STATE")
+window_is_busy() {  # <window> <tail40> [task]
+  local w=$1 tail40=$2 task=${3:-} meta verdict
+  [ -n "$task" ] || task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
   if [ -n "$task" ] && [ -f "$meta" ]; then
     verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
@@ -298,8 +298,8 @@ window_is_busy() {  # <window> <tail40>
 }
 
 window_kind() {
-  local w=$1 meta kind
-  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  local w=$1 task=${2:-} meta kind
+  if [ -n "$task" ]; then meta="$STATE/$task.meta"; else meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true); fi
   if [ -n "$meta" ]; then
     kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
     [ -n "$kind" ] || kind=ship
@@ -313,8 +313,8 @@ window_kind() {
 # defaulting to tmux (absent backend= means tmux; the P1 compatibility
 # contract) when no matching meta carries the field, or none matches at all.
 window_backend() {
-  local w=$1 meta backend
-  meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+  local w=$1 task=${2:-} meta backend
+  if [ -n "$task" ]; then meta="$STATE/$task.meta"; else meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true); fi
   if [ -n "$meta" ]; then
     backend=$(grep '^backend=' "$meta" | cut -d= -f2- || true)
     [ -n "$backend" ] || backend=tmux
@@ -370,7 +370,7 @@ observe_endpoint_once() {  # <backend> <window> <task>
   FM_ENDPOINT_OBSERVATION_AVAILABLE=1
   FM_ENDPOINT_TAIL40=$(fm_backend_capture "$1" "$2" 40 "fm-$3" 2>/dev/null) \
     || { FM_ENDPOINT_TAIL40=; FM_ENDPOINT_OBSERVATION_AVAILABLE=0; }
-  if window_is_busy "$2" "$FM_ENDPOINT_TAIL40"; then
+  if window_is_busy "$2" "$FM_ENDPOINT_TAIL40" "$3"; then
     FM_ENDPOINT_BUSY_STATE=busy
   else
     FM_ENDPOINT_BUSY_STATE=idle
@@ -394,7 +394,11 @@ inbox_steer_check() {  # <window> <task> [target-state] [backend]
   if [ "$target_state" = unknown ]; then
     [ -n "$backend" ] || backend=$(window_backend "$w")
     observe_endpoint_once "$backend" "$w" "$task"
-    target_state=$FM_ENDPOINT_BUSY_STATE
+    if window_is_busy "$w" "$FM_ENDPOINT_TAIL40" "$task"; then
+      target_state=busy
+    else
+      target_state=idle
+    fi
   fi
   [ "$target_state" != busy ] || return 0
   case "$verb" in
@@ -464,10 +468,12 @@ recorded_windows() {
 }
 
 supervision_task_active() {
-  local task=$1 dir
+  local task=$1 rc
   [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] || return 0
-  dir=$(fm_supervision_registry_dir "$STATE")
-  [ -f "$dir/$task" ] && [ ! -L "$dir/$task" ]
+  fm_supervision_registry_contains "$STATE" "$task" "${FM_CODEX_REGISTRY_GENERATION:-}"
+  rc=$?
+  [ "$rc" -ne 2 ] || exit 1
+  return "$rc"
 }
 
 active_window_inventory() {
@@ -852,10 +858,10 @@ pause_state_class() {  # <window> <task>
   # Read once past the declared-wait gate and reused by both liveness gates below,
   # so a mate's stale poll costs one metadata scan rather than one per gate, and the
   # far more common no-declaration path above still costs none.
-  kind=$(window_kind "$win")
+  kind=$(window_kind "$win" "$task")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$kind" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win" "$task")" "$win" 2>/dev/null) || agent_alive=unknown
       if [ "$agent_alive" != dead ]; then
         rm -f "$recheck_file"
         printf 'none'
@@ -872,7 +878,7 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ "$kind" != secondmate ]; then
-    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win" "$task")" "$win" 2>/dev/null) || agent_alive=unknown
     if [ "$agent_alive" != dead ]; then
       rm -f "$recheck_file"
       printf 'none'
@@ -1474,7 +1480,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v7\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v1\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v8\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v2\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -1635,31 +1641,54 @@ while :; do
   agent_state_inventory=$(printf '%s\n' "$agent_state_inventory" \
     | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k4,4 -k2,2 -k6,6)
   if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
-    agent_state_inventory=$(printf '%s\n' "$agent_state_inventory" | awk -F '\t' '
+    scored_inventory=
+    while IFS="$(printf '\t')" read -r score_backend score_target score_state score_route \
+      score_home score_task score_kind score_spawn_gen; do
+      [ -n "$score_backend" ] || continue
+      score_last=$(last_status_line "$STATE/$score_task.status")
+      if status_is_captain_relevant "$score_last"; then
+        score_priority=0
+      elif status_is_paused_or_captain_held "$score_last"; then
+        score_priority=1
+      elif [ "$score_state" = dead ] || [ "$score_state" = missing ] || [ "$score_route" = remote ]; then
+        score_priority=3
+      elif [ "$score_kind" = secondmate ]; then
+        score_priority=4
+      else
+        case "$(crew_absorb_class "$score_task")" in
+          none) score_priority=1 ;;
+          paused) score_priority=2 ;;
+          *) score_priority=3 ;;
+        esac
+      fi
+      scored_inventory="${scored_inventory}${scored_inventory:+$'\n'}${score_backend}\t${score_target}\t${score_state}\t${score_route}\t${score_home}\t${score_task}\t${score_kind}\t${score_spawn_gen}\t${score_priority}"
+    done <<EOF
+$agent_state_inventory
+EOF
+    agent_state_inventory=$(printf '%b\n' "$scored_inventory" | awk -F '\t' '
       BEGIN { OFS="\t" }
       {
-        row[NR]=$0
+        row[NR]=$1 OFS $2 OFS $3 OFS $4 OFS $5 OFS $6 OFS $7 OFS $8
         group[NR]=$1 SUBSEP $4 SUBSEP $2
-        if (!(group[NR] in first)) {
-          first[group[NR]]=$6
-          first_kind[group[NR]]=$7
-        }
-        if ($7 != "secondmate" && !(group[NR] in ordinary)) {
-          ordinary[group[NR]]=$6
-          ordinary_kind[group[NR]]=$7
+        if (!(group[NR] in priority) || $9 < priority[group[NR]]) {
+          priority[group[NR]]=$9
+          selected[group[NR]]=$6
+          selected_kind[group[NR]]=$7
         }
       }
       END {
         for (i=1; i<=NR; i++) {
           key=group[i]
-          task=(key in ordinary ? ordinary[key] : first[key])
-          kind=(key in ordinary_kind ? ordinary_kind[key] : first_kind[key])
-          print row[i], task, kind
+          print row[i], selected[key], selected_kind[key]
         }
       }
     ')
   fi
-  fm_pending_reply_tick "$STATE" "$agent_state_inventory" || true
+  if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+    fm_pending_reply_tick "$STATE" "$agent_state_inventory" active-only || true
+  else
+    fm_pending_reply_tick "$STATE" "$agent_state_inventory" || true
+  fi
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
@@ -1944,7 +1973,7 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if window_is_busy "$w" "$tail40" "$task"; then busy_now=0; else busy_now=1; fi
     if [ "$busy_now" -eq 0 ]; then
       retire_death_notification "$key" "$spawn_gen" "$death_owner" || exit 1
       rm -f "$sf"

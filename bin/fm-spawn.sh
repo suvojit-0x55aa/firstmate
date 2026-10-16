@@ -640,6 +640,13 @@ spawn_remote_secondmate() {
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
   mv -f -- "$tmp" "$meta"
+  fm_supervision_registry_prepare "$STATE" "$id" "$meta" || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id metadata was published, but pending supervision ownership could not be recorded" >&2
+    return 1
+  }
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK"
@@ -2787,6 +2794,11 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+fm_supervision_registry_prepare "$STATE" "$ID" "$STATE/$ID.meta" || {
+  echo "error: $ID metadata was published, but pending supervision ownership could not be recorded" >&2
+  exit 1
+}
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

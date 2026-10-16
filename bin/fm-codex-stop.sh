@@ -203,38 +203,53 @@ def admission_cycle_work(probe_deadline=None):
 . "$1/fm-backend.sh" || exit 1
 . "$1/fm-supervision-registry-lib.sh" || exit 1
 . "$1/fm-pending-reply-lib.sh" || exit 1
+. "$1/fm-task-inbox-lib.sh" || exit 1
 set -o pipefail
 fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
 generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
-registry_dir=$(fm_supervision_registry_dir "$FM_STATE_OVERRIDE")
 printf 'generation\t%s\n' "$generation"
 inventory=$(fm_supervision_registry_inventory "$FM_STATE_OVERRIDE" "$generation") || exit 1
-{
-  while IFS= read -r meta; do
-    [ -n "$meta" ] || continue
-    target=$(fm_backend_target_of_meta "$meta")
-    [ -n "$target" ] || continue
-    backend=$(fm_backend_of_meta "$meta")
-    route=local
-    case "$target" in remote:*) route=remote ;; esac
-    [ -z "$(fm_meta_get "$meta" remote_host)" ] || route=remote
-    record_home=$(fm_meta_get "$meta" home); [ -n "$record_home" ] || record_home=-
-    printf '%s\t%s\t%s\t%s\n' "$backend" "$target" "$route" "$record_home"
-  done <<EOF
+owners=
+while IFS= read -r meta; do
+  [ -n "$meta" ] || continue
+  task=${meta##*/}; task=${task%.meta}
+  target=$(fm_backend_target_of_meta "$meta")
+  [ -n "$target" ] || continue
+  backend=$(fm_backend_of_meta "$meta")
+  route=local
+  case "$target" in remote:*) route=remote ;; esac
+  [ -z "$(fm_meta_get "$meta" remote_host)" ] || route=remote
+  record_home=$(fm_meta_get "$meta" home); [ -n "$record_home" ] || record_home=-
+  owners="${owners}${owners:+$'\n'}${backend}\t${target}\t${route}\t${record_home}\t${task}"
+done <<EOF
 $inventory
 EOF
-} | awk -F '\t' '!seen[$1 SUBSEP $3 SUBSEP $2]++' | fm_backend_agent_state_batch |
-while IFS="$(printf '\t')" read -r backend target agent_state route record_home; do
+states=$(printf '%b\n' "$owners" | awk -F '\t' '!seen[$1 SUBSEP $3 SUBSEP $2]++ { print $1, $2, $3, $4 }' OFS="$(printf '\t')" \
+  | fm_backend_agent_state_batch) || exit 1
+plan=$({ printf '%s\n' "$states"; printf '__FM_OWNERS__\n'; printf '%b\n' "$owners"; } | awk -F '\t' '
+  BEGIN { OFS="\t" }
+  $0 == "__FM_OWNERS__" { owners=1; next }
+  !owners { verdict[$1 SUBSEP $4 SUBSEP $2]=$3; next }
+  { print $1, $2, verdict[$1 SUBSEP $3 SUBSEP $2], $3, $4, $5 }
+') || exit 1
+while IFS="$(printf '\t')" read -r backend target agent_state route record_home task; do
   case "$agent_state" in
     dead|missing) ;;
-    *) printf 'budget-window\t%s\t%s\t%s\n' "$backend" "$route" "$target" ;;
+    *)
+      printf 'budget-window\t%s\t%s\t%s\n' "$backend" "$route" "$target"
+      printf 'active-owner\t%s\n' "$task"
+      action=$(fm_task_inbox_due_action "$FM_STATE_OVERRIDE" "$task") || action=quiet
+      case "${action%% *}" in ring|escalate) printf 'owner-fanout\tinbox:%s\n' "$task" ;; esac
+      ;;
   esac
-done
+done <<EOF
+$plan
+EOF
 for file in "$FM_STATE_OVERRIDE"/*.status "$FM_STATE_OVERRIDE"/*.turn-ended; do
   [ -f "$file" ] || continue
   task=$(basename "$file")
   task=${task%.status}; task=${task%.turn-ended}
-  [ -f "$registry_dir/$task" ] && [ ! -L "$registry_dir/$task" ] || continue
+  fm_supervision_registry_contains "$FM_STATE_OVERRIDE" "$task" "$generation" || continue
   if ! fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file"; then
     printf 'signal\t%s\n' "$(basename "$file")"
   fi
@@ -254,9 +269,11 @@ if [ -d "$dir" ]; then
     esac
     [ "$((now - delivered))" -ge "$grace" ] || continue
     task_id=$(fm_pending_reply_get "$rec" task_id)
-    [ -f "$registry_dir/$task_id" ] && [ ! -L "$registry_dir/$task_id" ] || continue
-    fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id" || continue
-    printf 'remote-recovery\t%s\n' "$(basename "$rec")"
+    fm_supervision_registry_contains "$FM_STATE_OVERRIDE" "$task_id" "$generation" || continue
+    printf 'owner-fanout\tpending:%s\n' "$(basename "$rec")"
+    if fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id"; then
+      printf 'remote-recovery\t%s\n' "$(basename "$rec")"
+    fi
   done
 fi
 after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
@@ -267,6 +284,8 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     generation = None
     signal_tasks = set()
     remote_recoveries = set()
+    owner_fanouts = set()
+    active_owners = set()
     windows = set()
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
@@ -282,11 +301,16 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
             signal_tasks.add(value)
         elif kind == 'remote-recovery':
             remote_recoveries.add(value)
+        elif kind == 'owner-fanout':
+            owner_fanouts.add(value)
+        elif kind == 'active-owner':
+            active_owners.add(value)
         if kind == 'budget-window' and separator and value:
             windows.add(value)
     if not generation:
         return None
-    return generation, signal_tasks, len(remote_recoveries), len(windows)
+    return (generation, signal_tasks, len(remote_recoveries), len(windows),
+            len(active_owners), len(owner_fanouts))
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
@@ -303,7 +327,8 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
     work = admission_cycle_work(probe_deadline)
     if work is None:
         return cycle_limit + 1, check_limit or 1, 0
-    admission_registry_generation, signal_tasks, remote_recoveries, budget_windows = work
+    (admission_registry_generation, signal_tasks, remote_recoveries, budget_windows,
+     active_owners, owner_fanouts) = work
     if budget_deadline is not None:
         cycle_budget = max(0, math.floor(
             budget_deadline - time.monotonic() - startup_phase_allowance - checkpoint -
@@ -317,9 +342,9 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
     # scan itself exceeds the bounded helper call, admission fails closed.
     non_check_components = math.ceil(
         watcher_cadence + inactive_reconcile_timeout + signal_grace +
-        2 * crew_state_timeout * (len(signal_tasks) + budget_windows) +
-        worktree_write_timeout * budget_windows +
-        2 * remote_send_timeout * remote_recoveries + 5)
+        2 * crew_state_timeout * (len(signal_tasks) + active_owners) +
+        worktree_write_timeout * active_owners +
+        2 * remote_send_timeout * (remote_recoveries + owner_fanouts) + 5)
     if check_limit is None:
         check_limit = max(1, math.floor((cycle_budget - non_check_components) / check_timeout))
     checks_this_cycle = min(due_checks, check_limit)
@@ -432,10 +457,10 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('inventory', 'active-registry-v1'),
+        ('inventory', 'active-registry-v2'),
         ('check-batch-handoff', 'resume-owner-cycle-v4'),
     )
-    return 'fm-codex-bounded.v7\t' + '\t'.join(
+    return 'fm-codex-bounded.v8\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
