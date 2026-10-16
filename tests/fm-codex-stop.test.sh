@@ -198,6 +198,10 @@ if [ "${1:-}" = list-windows ]; then
   done
   exit 0
 fi
+if [ "${1:-}" = capture-pane ]; then
+  printf '%s\n' "${FM_TEST_CAPTURE:-retained endpoint}"
+  exit 0
+fi
 if [ "${1:-}" = display-message ]; then
   target=
   format=
@@ -706,6 +710,49 @@ test_failed_existence_probe_is_conservatively_budgeted() {
   [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'uncertain endpoint inventory started an under-budgeted watcher'
   finish "$dir"
   pass 'failed existence probes remain conservatively budgeted'
+}
+
+test_many_dead_endpoints_take_cheap_watcher_path() {
+  local dir id existing= key pane_hash
+  dir=$(fixture retained-dead-endpoints)
+  install_endpoint_inventory_tmux "$dir"
+  cat > "$dir/slow-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$FM_HOME/crew-state-calls"
+sleep 1
+printf '%s\n' 'state: stopped · source: pane · bare shell'
+SH
+  chmod +x "$dir/slow-crew-state.sh"
+  pane_hash=$(hash_text 'retained dead pane')
+  for id in $(seq 1 25); do
+    printf 'window=fleet:dead-%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$id" \
+      > "$dir/state/dead-$id.meta"
+    if [ "$id" -lt 25 ]; then
+      printf '%s\n' 'paused: retained completed worker' > "$dir/state/dead-$id.status"
+    else
+      printf '%s\n' 'working: agent exited without a terminal event' > "$dir/state/dead-$id.status"
+    fi
+    prime_status_seen "$dir/state" "$dir/state/dead-$id.status"
+    key="fleet_dead-$id"
+    printf '%s' "$pane_hash" > "$dir/state/.hash-$key"
+    printf '%s\n' 1 > "$dir/state/.count-$key"
+    existing="$existing fleet:dead-$id"
+  done
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
+    FM_TEST_CAPTURE='retained dead pane' FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    run_stop "$dir" 4
+  wait_file "$dir/rc" 300
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'retained dead endpoint inventory escaped Stop supervision'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'retained dead endpoint inventory lost the required dead-worker notification'
+  assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'retained dead endpoints reached unbudgeted watcher work'
+  assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'retained dead endpoints recreated the admission refusal'
+  grep -F "$(printf '\tstale\tfleet:dead-25\tstale: fleet:dead-25')" "$dir/state/.wake-queue" >/dev/null \
+    || fail 'authoritatively dead worker did not retain its stale notification'
+  [ ! -e "$dir/crew-state-calls" ] || fail 'authoritatively dead targets reached expensive crew-state classification'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'retained dead endpoints stay cheap and preserve notification'
 }
 
 test_due_custom_and_pr_checks_remain_bounded() {
@@ -1462,6 +1509,7 @@ test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_small_live_endpoint_inventory_remains_bounded
 test_failed_existence_probe_is_conservatively_budgeted
+test_many_dead_endpoints_take_cheap_watcher_path
 test_due_custom_and_pr_checks_remain_bounded
 test_actionable_checks_resume_bounded_sweep
 test_due_remote_recovery_fits_cycle_budget

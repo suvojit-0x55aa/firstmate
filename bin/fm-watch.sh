@@ -812,6 +812,27 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <window-key>
+  local win=$1 task=$2 kind=$3 last=$4 key=$5 marker=authoritatively-dead sf
+  if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
+    return 0
+  fi
+  if status_is_paused_or_captain_held "$last"; then
+    handle_paused_stale "$win" "$task" "$marker"
+    return 0
+  fi
+  sf="$STATE/.stale-$key"
+  [ "$(cat "$sf" 2>/dev/null || true)" != "$marker" ] || return 0
+  fm_wake_append stale "$win" "stale: $win" || exit 1
+  printf '%s' "$marker" > "$sf"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_write_tracking "$key"
+  if status_is_captain_relevant "$last"; then
+    mark_surfaced "$STATE/$task.status"
+  fi
+  wake "stale: $win"
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -1441,14 +1462,24 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
-    # Steering-inbox loss detection runs before the secondmate stale
-    # exemption below, because a mate's steers land in an inbox too.
-    [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
+    if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+      agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null || printf unreadable)
+      case "$agent_state" in
+        dead)
+          handle_authoritatively_dead_target "$w" "$task" "$kind" "$last" "$key"
+          continue
+          ;;
+        missing) continue ;;
+      esac
+    fi
+    # Steering-inbox loss detection runs before the secondmate stale
+    # exemption below, because a mate's steers land in an inbox too.
+    [ -z "$task" ] || inbox_steer_check "$w" "$task"
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
     # the same declarations pause_state_class reconciles below, which is why this

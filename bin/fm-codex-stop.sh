@@ -620,6 +620,7 @@ def owner(lock):
                             else:
                                 arm_environment = os.environ.copy()
                                 arm_environment['FM_GUARD_GRACE'] = str(cycle_limit)
+                                arm_environment['FM_CODEX_BOUNDED_WATCH'] = '1'
                                 arm_environment['FM_CHECKS_PER_CYCLE'] = str(check_batch_limit)
                                 arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
                                 output = tempfile.TemporaryFile()
