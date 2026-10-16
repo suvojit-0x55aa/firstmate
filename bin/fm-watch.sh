@@ -923,18 +923,11 @@ surface_nonterminal_stale() {  # <window> <hash>
 }
 
 death_owner_id() {  # <window> <task> <backend>
-  printf '%s\0%s\0%s' "$2" "$3" "$1" | od -An -v -tx1 | tr -d ' \n'
+  fm_supervision_death_owner_id "$1" "$2" "$3"
 }
 
 death_state_path() {  # <record-family> <owner-id>
-  local root="$STATE/.$1-v3" encoded=$2 path chunk
-  path=$root
-  while [ "${#encoded}" -gt 120 ]; do
-    chunk=${encoded:0:120}
-    path="$path/$chunk"
-    encoded=${encoded:120}
-  done
-  printf '%s/%s' "$path" "${encoded:-00}"
+  fm_supervision_death_state_path "$STATE" "$1" "$2"
 }
 
 death_state_remove() {  # <record-family> <owner-id>
@@ -1476,7 +1469,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v3\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v4\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_KILL_GRACE" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \

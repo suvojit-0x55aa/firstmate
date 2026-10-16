@@ -460,7 +460,7 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('inventory', 'active-registry-v3'),
+        ('inventory', 'active-registry-v4'),
         ('check-batch-handoff', 'resume-owner-cycle-v4'),
     )
     return 'fm-codex-bounded.v9\t' + '\t'.join(

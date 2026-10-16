@@ -116,6 +116,19 @@ death_receipt_contents() {
   find "$root" -type f -exec cat {} \;
 }
 
+write_exact_death_receipt() {
+  local state=$1 task=$2 target=$3 backend=$4 spawn_gen=$5
+  FM_STATE_OVERRIDE="$state" FM_TEST_TASK="$task" FM_TEST_TARGET="$target" \
+    FM_TEST_BACKEND="$backend" FM_TEST_SPAWN_GEN="$spawn_gen" bash -c '
+      . "$1/fm-supervision-registry-lib.sh"
+      owner=$(fm_supervision_death_owner_id "$FM_TEST_TARGET" "$FM_TEST_TASK" "$FM_TEST_BACKEND") || exit 1
+      receipt=$(fm_supervision_death_state_path "$FM_STATE_OVERRIDE" death-notified "$owner") || exit 1
+      mkdir -p "${receipt%/*}" || exit 1
+      printf "fm-death-notified.v3\tspawn:%s\t%s\t%s\t%s\n" \
+        "$FM_TEST_SPAWN_GEN" "$FM_TEST_TASK" "$FM_TEST_BACKEND" "$FM_TEST_TARGET" > "$receipt"
+    ' _ "$ROOT/bin"
+}
+
 assert_no_watcher() {
   local pid
   pid=$(cat "$1/state/.watch.lock/pid" 2>/dev/null || true)
@@ -175,7 +188,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v3\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v4\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -381,7 +394,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v3\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v4\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -3022,9 +3035,8 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
   printf '%s\n' 'window=fleet:live' 'spawn_gen=live-a' > "$dir/state/live.meta"
   printf '%s\n' 'window=fleet:retained' 'spawn_gen=retained-a' > "$dir/state/retained.meta"
   printf '%s\n' 'window=fleet:newly-dead' 'spawn_gen=dead-a' > "$dir/state/newly-dead.meta"
-  mkdir -p "$dir/state/.death-notified-v3/retained"
-  printf 'fm-death-notified.v3\tspawn:retained-a\tretained\ttmux\tfleet:retained\n' \
-    > "$dir/state/.death-notified-v3/retained/receipt"
+  write_exact_death_receipt "$dir/state" retained fleet:retained tmux retained-a \
+    || fail 'could not publish the retained endpoint receipt fixture'
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:live fleet:retained' \
     FM_TEST_LIVE_TARGETS='fleet:live' FM_STATE_OVERRIDE="$dir/state" bash -c '
       . "$1/fm-wake-lib.sh"
@@ -3051,6 +3063,53 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
   [ "$(cut -f2 "$dir/state/.active-supervision-generation")" != "$generation" ] \
     || fail 'registry lifecycle transition did not revoke the prior generation'
   pass 'active supervision recovery and lifecycle transitions own inventory'
+}
+
+test_registry_receipt_recovery_is_owner_addressed() {
+  local dir id target key targets= inventory
+  dir=$(fixture owner-addressed-registry-receipts)
+  install_endpoint_inventory_tmux "$dir"
+  for id in $(seq 1 80); do
+    target="fleet:retained-$id"
+    targets="$targets $target"
+    printf 'window=%s\nspawn_gen=retained-%s\n' "$target" "$id" > "$dir/state/retained-$id.meta"
+    if [ "$id" -le 40 ]; then
+      write_exact_death_receipt "$dir/state" "retained-$id" "$target" tmux "retained-$id" \
+        || fail "could not publish exact receipt $id"
+    else
+      key=$(printf '%s' "$target" | tr ':/' '__' | tr '.' '_')
+      printf 'fm-death-notified.v2\tspawn:retained-%s\tretained-%s\ttmux\t%s\n' \
+        "$id" "$id" "$target" > "$dir/state/.death-notified-$key"
+    fi
+  done
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+  cat > "$dir/fakebin/find" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *".death-notified-v3"*)
+    : > "$FM_TEST_RECEIPT_SCAN_LOG"
+    exit 97
+    ;;
+esac
+exec /usr/bin/find "$@"
+SH
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+exec "$dir/fakebin/tmux-real" "\$@"
+SH
+  chmod +x "$dir/fakebin/find" "$dir/fakebin/tmux"
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$targets" \
+    FM_TEST_RECEIPT_SCAN_LOG="$dir/receipt-tree-scanned" FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-wake-lib.sh"
+      . "$1/fm-backend.sh"
+      . "$1/fm-supervision-registry-lib.sh"
+      fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+      fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+    ' _ "$ROOT/bin" > "$dir/recovered" || fail 'large surfaced-death registry recovery failed'
+  inventory=$(cat "$dir/recovered")
+  [ -z "$inventory" ] || fail 'surfaced dead history entered active supervision'
+  [ ! -e "$dir/receipt-tree-scanned" ] || fail 'registry recovery scanned the receipt tree'
+  pass 'registry recovery resolves exact and legacy receipts per owner'
 }
 
 test_registry_pending_snapshot_is_immediately_authoritative() {
@@ -3104,7 +3163,74 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" created created-gen || exit 1
+    fm_supervision_registry_mark_reservation \
+      "$FM_STATE_OVERRIDE" created created-gen created tmux @42 fleet:created || exit 1
+    fm_supervision_registry_cancel_reservation \
+      "$FM_STATE_OVERRIDE" created created-gen reserved || exit 1
+    exit 74
+  ' _ "$ROOT/bin" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 74 ] || fail 'post-creation crash fixture did not reach its crash boundary'
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/created-unpublished"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail 'created endpoint without metadata was not retained fail-closed'
+  grep -F "$(printf 'reservation\tcreated\tcreated-gen\t')" \
+    "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'created endpoint ownership was erased after owner death'
+  fm_state="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_cancel_reservation "$fm_state" created created-gen
+  ' _ "$ROOT/bin" || fail 'could not retire the created-endpoint fixture'
+
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" remote remote-gen || exit 1
+    fm_supervision_registry_mark_reservation \
+      "$FM_STATE_OVERRIDE" remote remote-gen remote-unknown remote remote:remote host.example || exit 1
+    exit 75
+  ' _ "$ROOT/bin" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 75 ] || fail 'remote unknown-completion fixture did not reach its boundary'
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/remote-unknown"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail 'remote unknown completion was not retained fail-closed'
+  fm_state="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_cancel_reservation "$fm_state" remote remote-gen
+  ' _ "$ROOT/bin" || fail 'could not retire the remote unknown-completion fixture'
+
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" published published-gen || exit 1
+    fm_supervision_registry_mark_reservation \
+      "$FM_STATE_OVERRIDE" published published-gen created tmux @43 fleet:published || exit 1
     printf "%s\n" "window=fleet:published" "spawn_gen=published-gen" \
       > "$FM_STATE_OVERRIDE/published.meta" || exit 1
     exit 73
@@ -3123,7 +3249,7 @@ test_registry_reservation_recovers_spawn_crash_windows() {
   grep -F "$(printf 'entry\tpublished\tpublished-gen\tpending')" \
     "$dir/state/.active-supervision-generation" >/dev/null \
     || fail 'published reservation did not become pending lifecycle ownership'
-  pass 'spawn reservations recover both sides of metadata publication'
+  pass 'spawn reservations recover creation, publication, and remote uncertainty'
 }
 
 test_registered_check_kills_term_ignoring_process_group() {
@@ -3289,6 +3415,7 @@ test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_active_supervision_registry_owns_lifecycle_inventory
+test_registry_receipt_recovery_is_owner_addressed
 test_registry_pending_snapshot_is_immediately_authoritative
 test_registry_reservation_recovers_spawn_crash_windows
 test_registered_check_kills_term_ignoring_process_group
