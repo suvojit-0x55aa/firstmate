@@ -777,6 +777,7 @@ make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
+  new-window) printf '@101\n'; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
@@ -839,6 +840,7 @@ make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
+  new-window) printf '@102\n'; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
       printf x >> "$counter"

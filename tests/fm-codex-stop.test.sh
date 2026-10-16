@@ -38,6 +38,20 @@ fixture() {
 }
 run_stop() { # <home> [checkpoint]
   local home=$1
+  # Legacy fixtures used an empty .meta merely as a boolean.  The production
+  # predicate now (correctly) treats a valid empty active snapshot as idle, so
+  # make those fixtures real recoverable task records instead of relying on the
+  # retained-metadata archive as liveness evidence.
+  for fixture_meta in "$home/state"/*.meta; do
+    [ -f "$fixture_meta" ] || continue
+    [ -s "$fixture_meta" ] && continue
+    fixture_task=${fixture_meta##*/}; fixture_task=${fixture_task%.meta}
+    {
+      printf 'window=firstmate:fm-%s\n' "$fixture_task"
+      printf 'worktree=%s\nproject=%s\n' "$home" "$home"
+      printf 'harness=codex\nkind=ship\nspawn_gen=fixture-%s\n' "$fixture_task"
+    } > "$fixture_meta"
+  done
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT="${2:-2}" \
     FM_CHECK_INTERVAL="${FM_CHECK_INTERVAL:-999999}" FM_HEARTBEAT=999999 FM_POLL="${FM_POLL:-1}" \
     FM_GUARD_GRACE="${FM_GUARD_GRACE:-3}" FM_BACKEND=tmux \
@@ -57,6 +71,10 @@ run_stop() { # <home> [checkpoint]
       printf "%s\n" "$rc" > "$FM_HOME/rc"
       if [ "${FM_CODEX_REPEAT:-0}" = 1 ]; then
         jq -r .owner "$FM_HOME/state/.codex-stop.json" > "$FM_HOME/first-owner"
+        if [ -n "${FM_CODEX_REPEAT_PAUSE_FILE:-}" ]; then
+          printf "%s\n" paused > "$FM_CODEX_REPEAT_PAUSE_FILE"
+          while [ ! -f "$FM_CODEX_REPEAT_PAUSE_FILE.release" ]; do sleep 0.02; done
+        fi
         "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex < "$FM_HOME/payload" > "$FM_HOME/repeat-out" 2>&1
         echo "$?" > "$FM_HOME/repeat-rc"
       fi
@@ -65,10 +83,37 @@ run_stop() { # <home> [checkpoint]
     ' &
   HARNESS=$!
 }
+
+initialize_empty_active_supervision_registry() { # <home>
+  FM_STATE_OVERRIDE="$1/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" || fail 'could not initialize an empty active supervision registry'
+}
+
+register_active_supervision_tasks() { # <home> <task>...
+  local home=$1
+  shift
+  FM_STATE_OVERRIDE="$home/state" FM_TEST_ACTIVE_TASKS="$*" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    for task in $FM_TEST_ACTIVE_TASKS; do
+      fm_supervision_registry_register \
+        "$FM_STATE_OVERRIDE" "$task" "$FM_STATE_OVERRIDE/$task.meta" || exit 1
+    done
+  ' _ "$ROOT/bin" || fail 'could not register the active supervision fixture tasks'
+}
+
 wait_file() {
   local i=0 limit=${2:-150}
   while [ ! -s "$1" ] && [ "$i" -lt "$limit" ]; do sleep 0.1; i=$((i + 1)); done
   [ -s "$1" ] || fail "timeout waiting for $1"
+}
+monotonic_seconds() {
+  python3 -c 'import time; print(int(time.monotonic()))'
 }
 finish() { touch "$1/release"; wait "$HARNESS"; }
 
@@ -85,22 +130,25 @@ ack_watcher_cycle() {
 }
 
 run_bounded_watcher_cycle() {
-  local home=$1 fakebin=$2
+  local home=$1 fakebin=$2 deadline_ns
   if [ ! -f "$home/state/.active-supervision-generation" ]; then
-    FM_STATE_OVERRIDE="$home/state" bash -c '
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$home/state" bash -c '
       . "$1/fm-wake-lib.sh"
       . "$1/fm-backend.sh"
       . "$1/fm-supervision-registry-lib.sh"
       fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
     ' _ "$ROOT/bin" || fail 'could not initialize the active supervision fixture registry'
   fi
+  deadline_ns=$(python3 -c 'import time; print(time.monotonic_ns() + 120_000_000_000)') \
+    || fail 'could not allocate a bounded watcher lease deadline'
   perl -e 'my $timeout=shift @ARGV; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm $timeout; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     "${FM_TEST_BOUNDED_WATCH_TIMEOUT:-3}" \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
       FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE="${FM_TEST_CHECKS_PER_CYCLE:-1}" \
+      FM_CODEX_LEASE_DEADLINE_NS="$deadline_ns" \
       FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 \
       FM_WATCH_HANDLING_SUCCESSOR="${FM_TEST_WATCH_HANDLING_SUCCESSOR:-0}" \
-      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+      FM_POLL="${FM_TEST_WATCH_POLL:-0.02}" FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
       PATH="$fakebin:$PATH" "$ROOT/bin/fm-watch.sh"
 }
 
@@ -138,7 +186,7 @@ assert_no_watcher() {
     ''|*[!0-9]*) return 0 ;;
   esac
   ps -p "$pid" -o pid= -o ppid= -o stat= -o args= > "$1/watcher-after-cleanup" 2>/dev/null || true
-  if kill -0 "$pid" 2>/dev/null; then fail "owned watcher $pid survived Stop cleanup: $(cat "$1/watcher-after-cleanup")"; fi
+  if is_live_non_zombie "$pid"; then fail "owned watcher $pid survived Stop cleanup: $(cat "$1/watcher-after-cleanup")"; fi
 }
 
 assert_no_watch_owner_dirs() {
@@ -154,8 +202,18 @@ install_controlled_watcher() {
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 child=
-printf '%s\n' "$$" > "$FM_HOME/controlled-arm-pid"
+FM_WATCH_ARM_OWNER_PID=${BASHPID:-$$}
+FM_WATCH_ARM_OWNER_IDENTITY=$(fm_pid_identity "$FM_WATCH_ARM_OWNER_PID") || exit 1
+export FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
+printf '%s\n' "$FM_WATCH_ARM_OWNER_PID" > "$FM_HOME/controlled-arm-pid"
+if [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
+  printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
+    "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
+    "$FM_WATCH_ARM_OWNER_IDENTITY" > "$FM_HOME/state/.codex-arm-owner.tmp" || exit 1
+  mv -f "$FM_HOME/state/.codex-arm-owner.tmp" "$FM_HOME/state/.codex-arm-owner" || exit 1
+fi
 stop_arm() {
   printf '%s\n' term > "$FM_HOME/controlled-arm-term"
   sleep "${FM_TEST_ARM_TERM_DELAY:-0}"
@@ -176,9 +234,24 @@ ARM
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 lock="$FM_HOME/state/.watch.lock"
+watcher_pid=${BASHPID:-$$}
+identity=$(fm_pid_identity "$watcher_pid") || exit 1
+if [ -n "${FM_WATCH_ARM_OWNER_PID:-}" ]; then
+  IFS="$(printf '\t')" read -r launch_protocol launch_lease launch_owner_pid \
+    launch_owner_identity launch_phase < "$FM_HOME/state/.codex-arm-owner" || exit 1
+  [ "$launch_protocol" = fm-codex-arm-launch.v1 ] \
+    && [ "$launch_lease" = "$FM_CODEX_CHECK_BATCH_LEASE" ] \
+    && [ "$launch_owner_pid" = "$FM_WATCH_ARM_OWNER_PID" ] \
+    && [ "$launch_owner_identity" = "$FM_WATCH_ARM_OWNER_IDENTITY" ] \
+    && [ "$launch_phase" = pending ] || exit 1
+  printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
+    "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
+    "$FM_WATCH_ARM_OWNER_IDENTITY" "$watcher_pid" "$identity" \
+    > "$FM_HOME/state/.codex-arm-owner.tmp" || exit 1
+  mv -f "$FM_HOME/state/.codex-arm-owner.tmp" "$FM_HOME/state/.codex-arm-owner" || exit 1
+fi
 mkdir "$lock" || exit 1
-identity=$(fm_pid_identity "$$") || exit 1
-printf '%s\n' "$$" > "$lock/pid"
+printf '%s\n' "$watcher_pid" > "$lock/pid"
 printf '%s\n' "$FM_HOME" > "$lock/fm-home"
 printf '%s\n' "$SCRIPT_DIR/fm-watch.sh" > "$lock/watcher-path"
 printf '%s\n' "$identity" > "$lock/pid-identity"
@@ -188,13 +261,18 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v5\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
-      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
+    printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v6\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
+      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_REAP_ALLOWANCE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
       "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
       "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" "$batch_lease" \
       > "$lock/codex-bounded-capability"
+    if [ -n "${FM_WATCH_ARM_OWNER_PID:-}" ]; then
+      printf 'fm-codex-arm-owner.v1\t%s\t%s\t%s\t%s\t%s\n' \
+        "$batch_lease" "$FM_WATCH_ARM_OWNER_PID" "$FM_WATCH_ARM_OWNER_IDENTITY" \
+        "$watcher_pid" "$identity" > "$lock/codex-arm-ownership"
+    fi
     ;;
   *) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
 esac
@@ -205,7 +283,7 @@ trap clean_watcher EXIT
 trap 'exit 0' HUP INT TERM
 touch "$FM_HOME/state/.last-watcher-beat"
 printf '%s\n' "${FM_CHECKS_PER_CYCLE:-0}" > "$FM_HOME/controlled-check-limit"
-date +%s > "$FM_HOME/controlled-watcher-ready"
+python3 -c 'import time; print(int(time.monotonic()))' > "$FM_HOME/controlled-watcher-ready"
 cycles=0
 batch_sequence=1
 while :; do
@@ -246,11 +324,15 @@ while :; do
           > "$lock/codex-check-batch-boundary"
         next_sequence=$((batch_sequence + 1))
         request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
-        if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v4\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
-          batch_sequence=$next_sequence
-          printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
-          rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
-        fi
+        request_prefix=$(printf '%s' "$request" | cut -f1-3)
+        case "$request_prefix" in
+          "$(printf 'fm-codex-check-batch.v4\t%s\t%s' "$batch_lease" "$next_sequence")"|\
+          "$(printf 'fm-codex-check-batch.v5\t%s\t%s' "$batch_lease" "$next_sequence")")
+            batch_sequence=$next_sequence
+            printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
+            rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
+            ;;
+        esac
       fi
       ;;
   esac
@@ -394,7 +476,7 @@ SH
 
 install_attached_watcher() {
   local dir=$1
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-supervision-registry-lib.sh,fm-pending-reply-lib.sh,fm-task-inbox-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh,fm-backend.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-supervision-registry-lib.sh,fm-pending-reply-lib.sh,fm-task-inbox-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh,fm-backend.sh,fm-pr-lib.sh,fm-check-lib.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch.sh" <<'WATCH'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -412,8 +494,8 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v5\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
-      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
+    printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v6\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
+      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_REAP_ALLOWANCE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
       "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -440,13 +522,17 @@ while :; do
   if [ -n "${batch_lease:-}" ]; then
     next_sequence=$((batch_sequence + 1))
     request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
-    if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v4\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
-      batch_sequence=$next_sequence
-      printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
-      rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
-      printf 'fm-codex-check-batch.v1\t%s\t%s\n' "$batch_lease" "$batch_sequence" \
-        > "$lock/codex-check-batch-boundary"
-    fi
+    request_prefix=$(printf '%s' "$request" | cut -f1-3)
+    case "$request_prefix" in
+      "$(printf 'fm-codex-check-batch.v4\t%s\t%s' "$batch_lease" "$next_sequence")"|\
+      "$(printf 'fm-codex-check-batch.v5\t%s\t%s' "$batch_lease" "$next_sequence")")
+        batch_sequence=$next_sequence
+        printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
+        rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
+        printf 'fm-codex-check-batch.v1\t%s\t%s\n' "$batch_lease" "$batch_sequence" \
+          > "$lock/codex-check-batch-boundary"
+        ;;
+    esac
   fi
   sleep 1
 done
@@ -594,7 +680,7 @@ test_quiet_renewal() {
 test_wedged_arm_cannot_report_quiet_renewal() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture wedged-arm)
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-backend.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-supervision-registry-lib.sh,fm-pending-reply-lib.sh,fm-task-inbox-lib.sh,fm-hook-host-lib.sh,fm-backend.sh,fm-pr-lib.sh,fm-check-lib.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/wedged-arm"
@@ -626,7 +712,7 @@ test_late_watcher_gets_full_quiet_window() {
   wait_file "$dir/controlled-watcher-ready"
   ready=$(cat "$dir/controlled-watcher-ready")
   wait_file "$dir/rc"
-  finished=$(date +%s)
+  finished=$(monotonic_seconds)
   [ "$((finished - ready))" -ge 2 ] || fail 'late watcher startup consumed the quiet checkpoint'
   [ "$(cat "$dir/rc")" = 2 ] || fail 'late healthy watcher did not request quiet renewal'
   assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'late healthy watcher omitted quiet renewal reason'
@@ -670,7 +756,7 @@ def delayed_popen(*args, **kwargs):
 
 subprocess.Popen = delayed_popen
 PY
-      started=$(date +%s)
+      started=$(monotonic_seconds)
       PYTHONPATH="$dir/admission-fault" FM_TEST_ADMISSION_MARKER="$dir/admission-delay" \
         FM_TEST_ADMISSION_DELAY=5 FM_TEST_ARM_DELAY=2 FM_ARM_CONFIRM_TIMEOUT=3 \
         FM_CHECK_TIMEOUT=1 FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 10
@@ -688,7 +774,7 @@ PY
     assert_not_contains "$(cat "$dir/out")" 'watcher failed' "$mode admission run shortened arm confirmation"
     if [ "$mode" = delayed ]; then
       delayed_limit=$limit
-      elapsed=$(( $(date +%s) - started ))
+      elapsed=$(( $(monotonic_seconds) - started ))
       [ -s "$dir/admission-delay.done" ] || fail 'delayed admission did not execute'
       [ "$elapsed" -lt 20 ] || fail 'delayed admission escaped the bounded Stop window'
     else
@@ -738,14 +824,14 @@ def delayed_popen(*args, **kwargs):
 
 subprocess.Popen = delayed_popen
 PY
-  started=$(date +%s)
+  started=$(monotonic_seconds)
   PYTHONPATH="$dir/probe-fault" FM_TEST_RECURRING_PROBE_MARKER="$dir/recurring-probe" \
     FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 FM_ARM_CONFIRM_TIMEOUT=1 \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
     FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
   wait_file "$dir/rc" 150
-  elapsed=$(( $(date +%s) - started ))
+  elapsed=$(( $(monotonic_seconds) - started ))
   [ -s "$dir/recurring-probe.done" ] || fail 'recurring cycle probe delay did not execute'
   [ "$(cat "$dir/rc")" = 2 ] || fail 'slow recurring cycle probe allowed Stop to fail open'
   assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
@@ -756,6 +842,180 @@ PY
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'recurring cycle probes preserve the fixed transport reserve'
+}
+
+test_idle_probe_wins_at_terminal_reserve() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture idle-at-terminal-reserve)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  mkdir "$dir/idle-boundary-fault"
+  cat > "$dir/idle-boundary-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+import time
+
+original_popen = subprocess.Popen
+
+
+def delayed_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    home = os.environ.get('FM_HOME', '')
+    trigger = os.path.join(home, 'idle-boundary-trigger')
+    done = os.path.join(home, 'idle-boundary-delay-done')
+    if (os.path.exists(trigger) and not os.path.exists(done) and
+            isinstance(command, list) and len(command) > 2 and
+            'fm_supervision_needed' in command[2]):
+        # Let the authoritative no-work result arrive as the controller enters
+        # its terminal reserve. The result is still conclusive and must outrank
+        # a synthesized deadline refusal.
+        time.sleep(20)
+        with open(done, 'w', encoding='utf-8') as stream:
+            stream.write('done\n')
+    return original_popen(*args, **kwargs)
+
+
+subprocess.Popen = delayed_popen
+PY
+  PYTHONPATH="$dir/idle-boundary-fault" FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 \
+    FM_ARM_CONFIRM_TIMEOUT=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 FM_SEND_REMOTE_BUDGET=1 \
+    FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 FM_POLL=0.05 \
+    TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready" 150
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_retire "$FM_STATE_OVERRIDE" task
+  ' _ "$ROOT/bin" || fail 'boundary fixture could not retire active ownership'
+  rm "$dir/state/task.meta"
+  : > "$dir/idle-boundary-trigger"
+  wait_file "$dir/rc" 250
+  [ -s "$dir/idle-boundary-delay-done" ] || fail 'boundary idle probe delay did not execute'
+  [ "$(cat "$dir/rc")" = 0 ] || fail 'conclusive idle probe at the terminal reserve was discarded'
+  assert_not_contains "$(cat "$dir/out")" 'Firstmate Codex supervision:' \
+    'conclusive idle probe at the terminal reserve emitted a continuation'
+  for _ in $(seq 1 80); do [ ! -e "$dir/state/.watch.lock" ] && break; sleep 0.1; done
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'conclusive idle probe outranks terminal reserve refusal'
+}
+
+test_registry_turnover_refreshes_budget_refusal() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture registry-turnover-budget)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  mkdir "$dir/registry-turnover-fault"
+  cat > "$dir/registry-turnover-fault/sitecustomize.py" <<'PY'
+import json
+import os
+import subprocess
+
+original_popen = subprocess.Popen
+
+
+def owner_phase(home):
+    try:
+        with open(os.path.join(home, 'state', '.codex-stop.json'), encoding='utf-8') as stream:
+            return json.load(stream).get('phase', '')
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return ''
+
+
+def run_retirement(home):
+    body = '''
+. "$1/fm-wake-lib.sh"
+. "$1/fm-backend.sh"
+. "$1/fm-supervision-registry-lib.sh"
+fm_supervision_registry_retire "$FM_STATE_OVERRIDE" task
+'''
+    environment = os.environ.copy()
+    environment['FM_STATE_OVERRIDE'] = os.path.join(home, 'state')
+    process = original_popen(
+        ['bash', '-c', body, 'registry-turnover', os.path.join(home, 'bin')],
+        env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    _stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError('could not retire turnover fixture: ' + stderr)
+    try:
+        os.unlink(os.path.join(home, 'state', 'task.meta'))
+    except FileNotFoundError:
+        pass
+    with open(os.path.join(home, 'registry-turnover-retired'), 'w', encoding='utf-8') as stream:
+        stream.write('done\n')
+
+
+class RetiringNeedProbe:
+    def __init__(self, process, home):
+        self.process = process
+        self.home = home
+
+    def __getattr__(self, name):
+        return getattr(self.process, name)
+
+    def communicate(self, *args, **kwargs):
+        result = self.process.communicate(*args, **kwargs)
+        marker = os.path.join(self.home, 'registry-turnover-retired')
+        with open(os.path.join(self.home, 'registry-turnover-needed.log'), 'a',
+                  encoding='utf-8') as stream:
+            stream.write(str(self.process.returncode) + '\n')
+        if not os.path.exists(marker):
+            run_retirement(self.home)
+        return result
+
+
+def turnover_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    home = os.environ.get('FM_HOME', '')
+    trigger = os.path.join(home, 'registry-turnover-trigger')
+    retired = os.path.join(home, 'registry-turnover-retired')
+    admission_failed = os.path.join(home, 'registry-turnover-admission-failed')
+    if (os.path.exists(trigger) and os.path.exists(retired) and
+            not os.path.exists(admission_failed) and isinstance(command, list) and
+            len(command) > 2 and 'remote-recovery' in command[2]):
+        with open(admission_failed, 'w', encoding='utf-8') as stream:
+            stream.write('done\n')
+        replacement = ['bash', '-c', 'exit 1']
+        if args:
+            args = (replacement, *args[1:])
+        else:
+            kwargs['args'] = replacement
+        return original_popen(*args, **kwargs)
+    process = original_popen(*args, **kwargs)
+    if (os.path.exists(trigger) and owner_phase(home) == 'preflighting' and
+            isinstance(command, list) and len(command) > 2 and
+            'fm_supervision_needed' in command[2]):
+        return RetiringNeedProbe(process, home)
+    return process
+
+
+subprocess.Popen = turnover_popen
+PY
+  : > "$dir/registry-turnover-trigger"
+  PYTHONPATH="$dir/registry-turnover-fault" FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 \
+    FM_ARM_CONFIRM_TIMEOUT=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 FM_SEND_REMOTE_BUDGET=1 \
+    FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 FM_POLL=0.05 \
+    TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc" 250
+  [ -s "$dir/registry-turnover-retired" ] \
+    || fail 'turnover fixture did not retire ownership after the prior need probe'
+  [ -s "$dir/registry-turnover-admission-failed" ] \
+    || fail 'turnover fixture did not invalidate the admission inventory scan'
+  [ "$(tail -1 "$dir/registry-turnover-needed.log")" = 1 ] \
+    || fail 'turnover refusal did not complete a fresh authoritative idle probe'
+  [ "$(cat "$dir/rc")" = 0 ] \
+    || fail 'stale pre-turnover need result converted an empty inventory into a budget refusal'
+  assert_not_contains "$(cat "$dir/out")" 'Firstmate Codex supervision:' \
+    'empty inventory after admission turnover emitted a continuation'
+  for _ in $(seq 1 80); do [ ! -e "$dir/state/.watch.lock" ] && break; sleep 0.1; done
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'registry turnover refreshes supervision need before a budget refusal'
 }
 
 test_identity_and_cleanup_phases_preserve_transport_reserve() {
@@ -830,7 +1090,7 @@ def delayed_popen(*args, **kwargs):
 
 subprocess.Popen = delayed_popen
 PY
-    started=$(date +%s)
+    started=$(monotonic_seconds)
     if [ "$mode" = cancel ]; then
       term_delay=2.5
       transport_timeout=55
@@ -845,7 +1105,7 @@ PY
       TEST_ROOT="$dir" run_stop "$dir" 1
     TEST_ROOT=$original_root
     wait_file "$dir/rc" 250
-    elapsed=$(( $(date +%s) - started ))
+    elapsed=$(( $(monotonic_seconds) - started ))
     [ "$(cat "$dir/rc")" = 2 ] || fail "$mode reserve path allowed Stop to fail open"
     assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
       "$mode reserve path lost the supervision-budget refusal"
@@ -864,6 +1124,82 @@ PY
     finish "$dir"
   done
   pass 'identity and near-reserve cleanup finish before refusal commit'
+}
+
+test_registry_retirement_preserves_conclusive_generation_change() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture retired-generation-cleanup)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  mkdir "$dir/retired-generation-fault"
+  cat > "$dir/retired-generation-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+
+original_popen = subprocess.Popen
+
+
+def read_value(path):
+    try:
+        with open(path, encoding='utf-8') as stream:
+            return stream.read().strip()
+    except FileNotFoundError:
+        return ''
+
+
+def generation_probe_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    home = os.environ.get('FM_HOME', '')
+    trigger = os.path.join(home, 'retired-generation-trigger')
+    if (os.path.exists(trigger) and isinstance(command, list) and len(command) > 2 and
+            'fm_pid_identity' in command[2] and
+            command[-1] == read_value(os.path.join(home, 'state', '.lock'))):
+        count_path = os.path.join(home, 'retired-generation-probes')
+        try:
+            count = int(read_value(count_path))
+        except ValueError:
+            count = 0
+        count += 1
+        with open(count_path, 'w', encoding='utf-8') as stream:
+            stream.write(str(count) + '\n')
+        # The recurring probe conclusively observes a replaced session. If the
+        # controller unnecessarily probes again after watcher cleanup, make
+        # that second observation indeterminate so the regression fails.
+        replacement = ['bash', '-c', 'exit 1' if count == 1 else 'sleep 30']
+        if args:
+            args = (replacement, *args[1:])
+        else:
+            kwargs['args'] = replacement
+    return original_popen(*args, **kwargs)
+
+
+subprocess.Popen = generation_probe_popen
+PY
+  PYTHONPATH="$dir/retired-generation-fault" FM_TEST_ARM_TERM_DELAY=2.5 \
+    FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
+    FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready" 150
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_retire "$FM_STATE_OVERRIDE" task
+  ' _ "$ROOT/bin" || fail 'retirement fixture could not retire active ownership'
+  rm "$dir/state/task.meta"
+  : > "$dir/retired-generation-trigger"
+  wait_file "$dir/rc" 200
+  [ "$(cat "$dir/retired-generation-probes")" = 1 ] \
+    || fail 'conclusive generation change was discarded and probed again after cleanup'
+  [ -s "$dir/controlled-arm-term-delay-done" ] \
+    || fail 'generation-change fixture did not consume its cleanup allowance'
+  [ "$(cat "$dir/rc")" = 0 ] || fail 'proven generation change after registry retirement did not exit silently'
+  assert_not_contains "$(cat "$dir/out")" 'Firstmate Codex supervision:' \
+    'proven generation change after registry retirement emitted a continuation'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'registry retirement retains conclusive generation change across cleanup'
 }
 
 test_persistent_identity_timeout_fails_closed() {
@@ -1039,6 +1375,55 @@ PY
   pass 'terminal errors distinguish current uncertain and changed generations'
 }
 
+test_current_generation_failure_episode_is_bounded() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture bounded-failure-episode)
+  install_controlled_watcher "$dir"
+  printf '%s\n' 'kind=ship' 'harness=codex' 'spawn_gen=failure-episode-1' \
+    > "$dir/state/task.meta"
+  initialize_empty_active_supervision_registry "$dir"
+  register_active_supervision_tasks "$dir" task
+  FM_CODEX_REPEAT=1 FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+    TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/repeat-rc" 350
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'first current-generation watcher failure was not surfaced'
+  [ "$(cat "$dir/repeat-rc")" = 0 ] \
+    || fail 'unchanged current-generation watcher failure surfaced more than once'
+  assert_contains "$(cat "$dir/out")" 'watcher failed' \
+    'first current-generation failure lost its durable diagnostic'
+  [ ! -s "$dir/repeat-out" ] \
+    || fail 'deduplicated current-generation failure emitted a second continuation'
+  [ "$(jq -r .protocol "$dir/state/.codex-stop-failure-episode.json")" = fm-codex-stop-failure.v1 ] \
+    || fail 'current-generation failure episode was not recorded durably'
+  finish "$dir"
+
+  dir=$(fixture regenerated-failure-episode)
+  install_controlled_watcher "$dir"
+  printf '%s\n' 'kind=ship' 'harness=codex' 'spawn_gen=failure-episode-2' \
+    > "$dir/state/task.meta"
+  initialize_empty_active_supervision_registry "$dir"
+  register_active_supervision_tasks "$dir" task
+  FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
+    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/repeat-paused" 250
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_register "$FM_STATE_OVERRIDE" task "$FM_STATE_OVERRIDE/task.meta"
+  ' _ "$ROOT/bin" || fail 'could not advance the active snapshot generation'
+  touch "$dir/repeat-paused.release"
+  wait_file "$dir/repeat-rc" 350
+  [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] \
+    || fail 'a changed active generation did not receive one new failure episode'
+  assert_contains "$(cat "$dir/repeat-out")" 'watcher failed' \
+    'changed generation incorrectly inherited the prior failure suppression'
+  finish "$dir"
+  pass 'current-generation Stop failures surface once per active snapshot episode'
+}
+
 test_stalled_watcher_cannot_complete_quiet_window() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture stalled-watcher)
@@ -1079,14 +1464,17 @@ test_complete_watcher_cycle_can_deliver_actionable_wake() {
   local dir
   dir=$(fixture complete-cycle)
   : > "$dir/state/task.meta"
-  printf '%s\n' 'working: initial signal state' > "$dir/state/complete.status"
-  prime_status_seen "$dir/state" "$dir/state/complete.status"
+  printf '%s\n' 'working: initial signal state' > "$dir/state/task.status"
+  prime_status_seen "$dir/state" "$dir/state/task.status"
   FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 run_stop "$dir" 45
   wait_file "$dir/state/.watch.lock/pid"
-  printf '%s\n' 'done: complete cycle' > "$dir/state/complete.status"
+  printf '%s\n' 'done: complete cycle' > "$dir/state/task.status"
   wait_file "$dir/rc" 450
   [ "$(cat "$dir/rc")" = 2 ] || fail 'complete watcher cycle lost its actionable wake'
-  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'complete watcher cycle did not deliver its queued wake'
+  case $(cat "$dir/out") in
+    *'watcher delivered an actionable wake'*|*'durable wake pending'*) ;;
+    *) fail 'complete watcher cycle did not deliver its actionable wake' ;;
+  esac
   assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'complete watcher cycle was reported as stalled'
   [ -s "$dir/state/.wake-queue" ] || fail 'complete watcher cycle did not retain its actionable wake'
   assert_no_watcher "$dir"
@@ -1208,6 +1596,8 @@ test_sequential_checks_fit_complete_cycle_bound() {
 test_sequential_task_classification_fits_complete_cycle_bound() {
   local dir id calls=0 i=0
   dir=$(fixture sequential-task-classification)
+  install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   cat > "$dir/slow-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s status\n' "$1" >> "$FM_HOME/classification-calls"
@@ -1218,12 +1608,17 @@ printf '%s\n' 'state: working · source: run-step · running'
 SH
   chmod +x "$dir/slow-crew-state.sh"
   for id in first second third; do
-    printf '%s\n' 'kind=ship' > "$dir/state/$id.meta"
+    printf 'window=fleet:%s\nworktree=%s\nproject=%s\nbackend=tmux\nkind=ship\nharness=codex\nspawn_gen=%s-1\n' \
+      "$id" "$dir" "$dir" "$id" > "$dir/state/$id.meta"
     printf '%s\n' 'working: initial signal state' > "$dir/state/$id.status"
     prime_status_seen "$dir/state" "$dir/state/$id.status"
   done
+  register_active_supervision_tasks "$dir" first second third
   : > "$dir/classification-calls"
-  FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 \
+  PATH="$dir/fakebin:$PATH" \
+    FM_TEST_EXISTING_TARGETS='fleet:first fleet:second fleet:third' \
+    FM_TEST_LIVE_TARGETS='fleet:first fleet:second fleet:third' \
+    FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 \
     FM_CREW_STATE_NM_TIMEOUT=10 FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" \
     run_stop "$dir" 120
   wait_file "$dir/state/.watch.lock/pid"
@@ -1295,28 +1690,38 @@ test_fresh_checks_do_not_consume_cycle_budget() {
 }
 
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
-  local dir original_root=$TEST_ROOT id existing
+  local dir original_root=$TEST_ROOT id inventory_sessions
   dir=$(fixture stale-endpoint-inventory)
   install_controlled_watcher "$dir"
   install_endpoint_inventory_tmux "$dir"
-  for id in $(seq 1 100); do
-    printf 'window=fleet:dead-%s\n' "$id" > "$dir/state/dead-$id.meta"
+  initialize_empty_active_supervision_registry "$dir"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pending-reply-lib.sh"
+    fm_pending_reply_index_recover "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" || fail 'could not initialize the pending-reply hot-set index'
+  mkdir -p "$dir/state/pending-replies"
+  id=1
+  while [ "$id" -le 10000 ]; do
+    printf 'window=archive-%s:dead\nspawn_gen=archive-%s\n' "$id" "$id" \
+      > "$dir/state/archive-$id.meta"
+    printf 'done: archived-%s\n' "$id" > "$dir/state/archive-$id.status"
+    printf 'archived-%s\n' "$id" > "$dir/state/archive-$id.turn-ended"
+    printf 'schema=fm-pending-reply.v1\ncorr_id=%016x\ntask_id=archive-%s\nphase=awaiting_report\ndelivered_epoch=1\ngrace_secs=0\n' \
+      "$id" "$id" > "$(printf '%s/pending-replies/%016x' "$dir/state" "$id")"
+    id=$((id + 1))
   done
   printf '%s\n' 'window=fleet:live-a' > "$dir/state/live-a.meta"
   printf '%s\n' 'window=fleet:live-b' > "$dir/state/live-b.meta"
-  printf '%s\n' 'window=fleet:live-c' > "$dir/state/live-c.meta"
-  existing='fleet:live-a fleet:live-b fleet:live-c'
-  for id in $(seq 1 10); do
-    existing="$existing fleet:dead-$id"
-  done
+  register_active_supervision_tasks "$dir" live-a live-b
   for id in $(seq 1 12); do
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/check-$id.check.sh"
     chmod 0700 "$dir/state/check-$id.check.sh"
     FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "check-$id" >/dev/null \
       || fail "could not register stale-inventory check $id"
   done
-  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
-    FM_TEST_LIVE_TARGETS='fleet:live-a fleet:live-b fleet:live-c' \
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:live-a fleet:live-b' \
+    FM_TEST_LIVE_TARGETS='fleet:live-a fleet:live-b' \
+    FM_TEST_INVENTORY_LOG="$dir/inventory-access" \
     FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 TEST_ROOT="$dir" run_stop "$dir" 180
   TEST_ROOT=$original_root
   wait_file "$dir/controlled-watcher-ready"
@@ -1325,18 +1730,168 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
   [ "$(cat "$dir/rc")" = 2 ] || fail 'stale endpoint history blocked the Codex Stop watcher'
   assert_contains "$(cat "$dir/out")" 'durable wake pending' 'stale endpoint history prevented watcher startup'
   assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'absent historical endpoints consumed the live cycle budget'
+  inventory_sessions=$(LC_ALL=C sort -u "$dir/inventory-access")
+  [ "$inventory_sessions" = fleet ] \
+    || fail "archived endpoint paths entered recurring admission: $inventory_sessions"
+  assert_not_contains "$(cat "$dir/out")" 'archive-' \
+    'archived status, turn-end, or pending-reply records entered recurring supervision'
   assert_no_watcher "$dir"
   finish "$dir"
-  pass 'large stale endpoint history does not consume the live cycle budget'
+  pass '10,000 archived task records stay outside the active supervision hot set'
+}
+
+test_production_shaped_stale_inventory_arms_supervision() {
+  local dir id active_inventory registered_checks inventory_sessions now old_mtime age
+  dir=$(fixture production-shaped-stale-inventory)
+  install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
+  id=1
+  while [ "$id" -le 59 ]; do
+    printf 'window=archive-%s:dead\nspawn_gen=archive-%s\n' "$id" "$id" \
+      > "$dir/state/archive-$id.meta"
+    id=$((id + 1))
+  done
+  for id in live-a live-b; do
+    printf 'window=fleet:%s\nworktree=%s\nproject=%s\nbackend=tmux\nkind=secondmate\nharness=codex\nspawn_gen=%s-1\n' \
+      "$id" "$dir" "$dir" "$id" > "$dir/state/$id.meta"
+  done
+  register_active_supervision_tasks "$dir" live-a live-b
+  active_inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" | sed 's|.*/||; s/\.meta$//') \
+    || fail 'could not read the production-shaped active inventory'
+  [ "$active_inventory" = $'live-a\nlive-b' ] \
+    || fail "live-only inventory did not retain exactly the active endpoints: $active_inventory"
+
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" ran > "$FM_HOME/production-due-check-ran"' \
+    'printf "%s\n" ready' > "$dir/state/production-due.check.sh"
+  chmod 0700 "$dir/state/production-due.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" production-due >/dev/null \
+    || fail 'could not register the production-shaped due check'
+  registered_checks=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    fm_check_index_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin") || fail 'could not read the production-shaped check index'
+  [ "$registered_checks" = "$dir/state/production-due.check.sh" ] \
+    || fail "production-shaped check index was not exact: $registered_checks"
+  : > "$dir/state/.last-check"
+  now=$(date +%s)
+  old_mtime=$((now - 93415))
+  python3 - "$dir/state/.last-check" "$old_mtime" <<'PY'
+import os
+import sys
+
+stamp = int(sys.argv[2])
+os.utime(sys.argv[1], (stamp, stamp))
+PY
+  age=$(( $(date +%s) - $(python3 -c 'import os, sys; print(int(os.path.getmtime(sys.argv[1])))' "$dir/state/.last-check") ))
+  [ "$age" -ge 93415 ] && [ "$age" -le 93416 ] \
+    || fail "production-shaped check age was $age seconds instead of 93415"
+
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:live-a fleet:live-b' \
+    FM_TEST_LIVE_TARGETS='fleet:live-a fleet:live-b' \
+    FM_TEST_INVENTORY_LOG="$dir/inventory-access" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=10 FM_CHECK_INTERVAL=300 \
+    FM_CHECK_TIMEOUT=5 \
+    run_stop "$dir" 120
+  wait_file "$dir/rc" 450
+  [ "$(cat "$dir/rc")" = 2 ] \
+    || fail 'production-shaped stale inventory blocked Codex Stop supervision'
+  assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+    '59 stale metadata records multiplied the watcher admission budget'
+  wait_file "$dir/production-due-check-ran" 10
+  assert_contains "$(cat "$dir/state/.wake-queue")" 'production-due.check.sh' \
+    'the sole overdue registered check was not retained by the live watcher cycle'
+  inventory_sessions=$(LC_ALL=C sort -u "$dir/inventory-access")
+  [ "$inventory_sessions" = fleet ] \
+    || fail "stale metadata entered the production-shaped endpoint probes: $inventory_sessions"
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass '59 stale task records and one overdue check preserve live-only Stop admission'
+}
+
+test_empty_active_snapshot_ignores_retained_metadata() {
+  local dir
+  dir=$(fixture empty-active-snapshot)
+  initialize_empty_active_supervision_registry "$dir"
+  printf '%s\n' 'window=fleet:retained' 'spawn_gen=retained-old' \
+    > "$dir/state/retained.meta"
+  if FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-supervision-lib.sh"
+    fm_supervision_needed "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin"; then
+    fail 'a retained metadata archive overrode an authoritative empty snapshot'
+  fi
+  run_stop "$dir" 4
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 0 ] || fail 'idle Stop refused with an empty active snapshot'
+  [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'idle Stop launched a watcher for retained metadata'
+  [ ! -e "$dir/state/.codex-stop-failure-episode.json" ] \
+    || fail 'idle Stop retained a stale failure episode'
+  finish "$dir"
+  pass 'an authoritative empty snapshot leaves retained metadata idle'
+}
+
+test_active_indexes_discover_new_obligations() {
+  local dir
+  dir=$(fixture active-index-discovery)
+  initialize_empty_active_supervision_registry "$dir"
+  printf '%s\n' 'window=fleet:active' 'kind=secondmate' 'backend=tmux' \
+    'spawn_gen=active-1' > "$dir/state/active.meta"
+  register_active_supervision_tasks "$dir" active
+  printf '%s\n' 'done: indexed status' > "$dir/state/active.status"
+  printf '%s\n' 'indexed turn' > "$dir/state/active.turn-ended"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-task-inbox-lib.sh"
+    . "$1/fm-pending-reply-lib.sh"
+    fm_task_inbox_write "$FM_STATE_OVERRIDE" active "indexed instruction" >/dev/null || exit 1
+    corr=$(FM_PENDING_REPLY_GRACE_SECS=0 FM_PENDING_REPLY_NOW=100 \
+      fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" active report) || exit 1
+    FM_PENDING_REPLY_NOW=100 fm_pending_reply_mark_delivered \
+      "$FM_STATE_OVERRIDE" "$corr" 100 || exit 1
+    printf "%s\n" "$corr" > "$FM_HOME/active-corr"
+  ' _ "$ROOT/bin" || fail 'could not create indexed post-snapshot obligations'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TASK_INBOX_GRACE_SECS=0 \
+    FM_TASK_INBOX_RING_MAX=0 FM_PENDING_REPLY_NOW=200 bash -c '
+    . "$1/fm-watch.sh"
+    generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+    FM_CODEX_REGISTRY_INDEX=$(mktemp -d "$FM_STATE_OVERRIDE/.test-index.XXXXXX") || exit 1
+    fm_supervision_registry_snapshot_index \
+      "$FM_STATE_OVERRIDE" "$generation" "$FM_CODEX_REGISTRY_INDEX" || exit 1
+    FM_CODEX_BOUNDED_WATCH=1
+    scan_signals > "$FM_HOME/indexed-signals" || exit 1
+    fm_task_inbox_due_action "$FM_STATE_OVERRIDE" active > "$FM_HOME/indexed-inbox" || exit 1
+    fm_pending_reply_backend_observation() { printf "idle\n"; }
+    fm_pending_reply_send_recovery() {
+      printf "%s\n" "$2" > "$FM_HOME/indexed-reply"
+      fm_pending_reply_set "$(fm_pending_reply_path "$1" "$2")" phase recovery_sent
+    }
+    inventory=$(printf "tmux\tfleet:active\talive\tlocal\t-\tactive\tsecondmate\tactive-1\n")
+    fm_pending_reply_tick "$FM_STATE_OVERRIDE" "$inventory" active-only || exit 1
+    find "$FM_CODEX_REGISTRY_INDEX" -depth -delete
+  ' _ "$ROOT/bin" || fail 'active indexed discovery failed'
+  [ "$(wc -l < "$dir/indexed-signals" | tr -d ' ')" = 2 ] \
+    || fail 'post-snapshot status and turn-end were not both discovered'
+  assert_contains "$(cat "$dir/indexed-inbox")" 'escalate ' \
+    'post-snapshot inbox was not discovered through its task index'
+  [ "$(cat "$dir/indexed-reply")" = "$(cat "$dir/active-corr")" ] \
+    || fail 'post-snapshot pending reply was not discovered through its task index'
+  pass 'active indexes discover status, turn-end, inbox, and reply obligations'
 }
 
 test_small_live_endpoint_inventory_remains_bounded() {
   local dir id
   dir=$(fixture live-endpoint-inventory)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   for id in first second; do
     printf 'window=fleet:%s\n' "$id" > "$dir/state/$id.meta"
   done
+  register_active_supervision_tasks "$dir" first second
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:first fleet:second' \
     FM_TEST_LIVE_TARGETS='fleet:first' FM_TEST_AMBIGUOUS_TARGETS='fleet:second' \
     FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=10 FM_CREW_STATE_NM_TIMEOUT=100 \
@@ -1367,7 +1922,7 @@ test_failed_existence_probe_is_conservatively_budgeted() {
 }
 
 test_remote_endpoints_avoid_local_backend_probes() {
-  local dir
+  local dir inventory_count
   dir=$(fixture remote-endpoint-isolation)
   install_endpoint_inventory_tmux "$dir"
   printf '%s\n' 'window=remote:mate' 'kind=secondmate' \
@@ -1385,8 +1940,11 @@ test_remote_endpoints_avoid_local_backend_probes() {
     || fail 'local death did not persist its exact notification receipt'
   ! grep -R -qF 'remote:mate' "$dir/state/.death-notified-v3" \
     || fail 'remote collision produced a false local death receipt'
-  [ "$(grep -c '^fleet$' "$dir/inventories")" = 2 ] \
-    || fail 'admission and watcher did not each inventory the local tmux scope once'
+  inventory_count=$(grep -c '^fleet$' "$dir/inventories")
+  [ "$inventory_count" -ge 2 ] \
+    || fail 'admission and watcher did not inventory the local tmux scope'
+  [ "$(grep -vc '^fleet$' "$dir/inventories")" = 0 ] \
+    || fail 'a non-local tmux scope entered the admission or watcher inventory'
   ! grep -qF 'remote' "$dir/inventories" || fail 'remote endpoint was probed through a local backend'
   [ ! -e "$dir/captures" ] || fail 'remote endpoint was captured through a local backend'
   finish "$dir"
@@ -1457,7 +2015,7 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
 }
 
 test_admission_timeout_reaps_probe_descendants() {
-  local dir pid alive attempt
+  local dir pid alive
   dir=$(fixture admission-timeout-descendant)
   mkdir -p "$dir/fakebin"
   cat > "$dir/fakebin/tmux" <<'SH'
@@ -1482,7 +2040,7 @@ SH
   wait_file "$dir/probe-descendant.pid" 50
   pid=$(cat "$dir/probe-descendant.pid")
   alive=1
-  for attempt in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     if ! kill -0 "$pid" 2>/dev/null; then
       alive=0
       break
@@ -1496,7 +2054,7 @@ SH
 }
 
 test_many_dead_endpoints_take_cheap_watcher_path() {
-  local dir id existing= key pane_hash inventory_calls tmux_probes process_probes capture_probes backend_probes
+  local dir id existing='' key pane_hash inventory_calls tmux_probes process_probes capture_probes backend_probes
   dir=$(fixture retained-dead-endpoints)
   install_endpoint_inventory_tmux "$dir"
   cat > "$dir/slow-crew-state.sh" <<'SH'
@@ -1586,6 +2144,7 @@ test_duplicate_endpoint_pending_replies_share_classification() {
   for mode in dead missing; do
     dir=$(fixture "duplicate-endpoint-$mode-pending")
     install_endpoint_inventory_tmux "$dir"
+    initialize_empty_active_supervision_registry "$dir"
     target="fleet:shared-$mode"
     printf 'window=%s\nkind=secondmate\nharness=grok\nbackend=tmux\n' "$target" \
       > "$dir/state/a-owner.meta"
@@ -1593,6 +2152,7 @@ test_duplicate_endpoint_pending_replies_share_classification() {
       > "$dir/state/b-pending.meta"
     printf '%s\n' 'working: awaiting a correlated report' > "$dir/state/b-pending.status"
     prime_status_seen "$dir/state" "$dir/state/b-pending.status"
+    register_active_supervision_tasks "$dir" a-owner b-pending
     FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 bash -c '
       . "$1/fm-pending-reply-lib.sh"
       corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" b-pending "report status") || exit 1
@@ -1601,10 +2161,11 @@ test_duplicate_endpoint_pending_replies_share_classification() {
     set +e
     if [ "$mode" = dead ]; then
       FM_PENDING_REPLY_NOW=1000 FM_TEST_EXISTING_TARGETS="$target" \
-        FM_TEST_CAPTURE_LOG="$dir/captures" \
+        FM_TEST_CAPTURE_LOG="$dir/captures" FM_TEST_BOUNDED_WATCH_TIMEOUT=6 \
         run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/out" 2> "$dir/err"
     else
       FM_PENDING_REPLY_NOW=1000 FM_TEST_CAPTURE_LOG="$dir/captures" \
+        FM_TEST_BOUNDED_WATCH_TIMEOUT=6 \
         run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/out" 2> "$dir/err"
     fi
     rc=$?
@@ -1624,7 +2185,7 @@ test_duplicate_endpoint_pending_replies_share_classification() {
 }
 
 test_bounded_check_batch_parks_at_safe_boundary() {
-  local dir watcher rc original_root=$TEST_ROOT sequence
+  local dir watcher rc original_root=$TEST_ROOT sequence deadline_ns
   dir=$(fixture bounded-check-batch-boundary)
   for name in a-first b-second; do
     printf '%s\n' '#!/usr/bin/env bash' \
@@ -1636,8 +2197,11 @@ test_bounded_check_batch_parks_at_safe_boundary() {
     FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null \
       || fail "could not register $name boundary fixture"
   done
+  deadline_ns=$(python3 -c 'import time; print(time.monotonic_ns() + 120_000_000_000)') \
+    || fail 'could not allocate the parked watcher lease deadline'
   env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=30 \
     FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 FM_CODEX_CHECK_BATCH_LEASE=test-lease \
+    FM_CODEX_LEASE_DEADLINE_NS="$deadline_ns" \
     FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 FM_POLL=0.02 FM_HEARTBEAT=999999 \
     FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher=$!
@@ -1680,8 +2244,54 @@ test_bounded_check_batch_parks_at_safe_boundary() {
   pass 'bounded checks park and heartbeat cannot impersonate completion'
 }
 
+test_retiring_session_owner_hands_off_current_stop() {
+  local dir old_harness owner resume output rc
+  dir=$(fixture retiring-session-owner-handoff)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  FM_TEST_WATCH_MODE=heartbeat-only FM_SIGNAL_GRACE=0 FM_CHECK_TIMEOUT=1 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$ROOT
+  old_harness=$HARNESS
+  wait_file "$dir/state/.watch.lock/pid" 250
+  owner=$(jq -r .owner "$dir/state/.codex-stop.json")
+  (
+    while [ ! -e "$dir/replacement-started" ]; do sleep 0.02; done
+    sleep 0.5
+    kill -CONT "$owner" 2>/dev/null || true
+  ) &
+  resume=$!
+  kill -STOP "$owner" 2>/dev/null || fail 'could not freeze the retiring session owner'
+
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_CODEX_WATCH_CHECKPOINT=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL=1 FM_GUARD_GRACE=3 \
+    FM_BACKEND=tmux FM_TEST_WATCH_MODE=heartbeat-only FM_SIGNAL_GRACE=0 \
+    FM_CHECK_TIMEOUT=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    "$TEST_CODEX" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      : > "$FM_HOME/replacement-started"
+      "$TEST_ROOT/bin/fm-turnend-guard.sh" --codex \
+        <<< "{\"session_id\":\"replacement\",\"stop_hook_active\":true}" \
+        > "$FM_HOME/replacement-out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/replacement-rc"
+    '
+  wait "$resume" 2>/dev/null || true
+  wait_file "$dir/replacement-rc" 250
+  rc=$(cat "$dir/replacement-rc")
+  output=$(cat "$dir/replacement-out")
+  touch "$dir/release"
+  wait "$old_harness" 2>/dev/null || true
+
+  [ "$rc" = 2 ] || fail 'retiring owner handoff allowed Stop to fail open'
+  assert_contains "$output" 'quiet checkpoint elapsed' \
+    'retiring prior-session owner prevented the current owner from completing supervision'
+  assert_not_contains "$output" 'owner unavailable' \
+    'retiring prior-session owner leaked a generic transport symptom'
+  pass 'a retiring prior-session owner hands the current Stop to its successor'
+}
+
 test_bounded_check_resume_requires_live_owner() {
-  local dir watcher owner_identity deadline request registry_generation
+  local dir watcher owner_identity deadline deadline_ns request registry_generation
   dir=$(fixture bounded-check-resume-owner)
   for name in a-first b-second; do
     printf '%s\n' '#!/usr/bin/env bash' \
@@ -1691,8 +2301,11 @@ test_bounded_check_resume_requires_live_owner() {
     FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null \
       || fail "could not register $name owner fixture"
   done
+  deadline_ns=$(python3 -c 'import time; print(time.monotonic_ns() + 120_000_000_000)') \
+    || fail 'could not allocate the resume-owner watcher lease deadline'
   env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
     FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 FM_CODEX_CHECK_BATCH_LEASE=owner-lease \
+    FM_CODEX_LEASE_DEADLINE_NS="$deadline_ns" \
     FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 FM_POLL=0.02 FM_HEARTBEAT=999999 \
     FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher=$!
@@ -1733,7 +2346,7 @@ test_bounded_check_resume_requires_live_owner() {
 }
 
 test_bounded_check_resume_requires_complete_cycle_budget() {
-  local dir watcher owner_identity deadline registry_generation
+  local dir watcher owner_identity deadline deadline_ns registry_generation
   dir=$(fixture bounded-check-resume-cycle-budget)
   for name in a-first b-second c-third d-fourth e-fifth f-sixth; do
     printf '%s\n' '#!/usr/bin/env bash' \
@@ -1743,8 +2356,11 @@ test_bounded_check_resume_requires_complete_cycle_budget() {
     FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null \
       || fail "could not register $name cycle-budget fixture"
   done
+  deadline_ns=$(python3 -c 'import time; print(time.monotonic_ns() + 120_000_000_000)') \
+    || fail 'could not allocate the cycle-budget watcher lease deadline'
   env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
     FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=3 FM_CODEX_CHECK_BATCH_LEASE=cycle-lease \
+    FM_CODEX_LEASE_DEADLINE_NS="$deadline_ns" \
     FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 FM_POLL=0.02 FM_HEARTBEAT=999999 \
     FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher=$!
@@ -1819,7 +2435,7 @@ SH
   printf '%s\n' 0 > "$dir/state/.count-fleet_shared"
   set +e
   FM_TEST_EXISTING_TARGETS='fleet:shared' FM_TEST_LIVE_TARGETS='fleet:shared' \
-    FM_TEST_CAPTURE_LOG="$dir/captures" FM_TEST_BOUNDED_WATCH_TIMEOUT=6 \
+    FM_TEST_CAPTURE_LOG="$dir/captures" FM_TEST_BOUNDED_WATCH_TIMEOUT=6 FM_TEST_WATCH_POLL=10 \
     FM_CREW_STATE_BIN="$dir/fast-crew-state.sh" \
     run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
     > "$dir/out" 2> "$dir/err"
@@ -2016,7 +2632,7 @@ test_missing_endpoint_preserves_inbox_escalation() {
 }
 
 test_dead_endpoint_honors_explicit_notification_receipt() {
-  local dir id existing= pane_hash key meta_reads
+  local dir id existing='' pane_hash key meta_reads
   dir=$(fixture dead-endpoint-marker-migration)
   install_endpoint_inventory_tmux "$dir"
   cat > "$dir/fakebin/grep" <<'SH'
@@ -2048,8 +2664,8 @@ SH
     FM_TEST_CAPTURE='historical dead pane' FM_TEST_CAPTURE_LOG="$dir/capture-calls" \
     FM_SIGNAL_GRACE=0 run_stop "$dir" 2
   wait_file "$dir/rc" 250
-  [ "$(cat "$dir/rc")" = 2 ] || fail 'explicit death receipts escaped Stop supervision'
-  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'explicit death receipts emitted another death wake'
+  [ "$(cat "$dir/rc")" = 0 ] || fail 'fully surfaced dead history did not leave Stop idle'
+  [ ! -s "$dir/out" ] || fail 'fully surfaced dead history emitted a supervision notice'
   [ ! -s "$dir/state/.wake-queue" ] || fail 'explicit death receipts queued a duplicate notification'
   for id in $(seq 1 25); do
     [ "$(cat "$dir/state/.stale-fleet_dead-history-$id")" = authoritatively-dead ] \
@@ -2060,7 +2676,11 @@ SH
   [ "$(death_receipt_count "$dir")" -eq 25 ] \
     || fail 'explicit death receipts did not migrate to exact owner identities'
   [ ! -e "$dir/capture-calls" ] || fail 'explicit death receipts captured an exact-dead endpoint'
-  meta_reads=$(wc -l < "$dir/meta-read-log")
+  if [ -f "$dir/meta-read-log" ]; then
+    meta_reads=$(wc -l < "$dir/meta-read-log")
+  else
+    meta_reads=0
+  fi
   [ "$meta_reads" -le 2500 ] \
     || fail "exact-dead inventory performed $meta_reads metadata reads instead of linear work"
   assert_no_watcher "$dir"
@@ -2346,7 +2966,7 @@ SH
   FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" z-ready >/dev/null \
     || fail 'could not register final due custom check fixture'
   PATH="$dir/fakebin:$PATH" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=10 \
-    FM_CHECK_TIMEOUT=30 run_stop "$dir" 180
+    FM_CHECK_TIMEOUT=30 run_stop "$dir" 90
   wait_file "$dir/rc"
   [ "$(cat "$dir/rc")" = 2 ] || fail 'bounded due custom and PR checks lost their actionable wake'
   assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'due registered checks were still charged as one unbounded sweep'
@@ -2362,7 +2982,7 @@ SH
 }
 
 test_actionable_checks_resume_bounded_sweep() {
-  local dir state rc
+  local dir state rc FM_TEST_BOUNDED_WATCH_TIMEOUT=6
   dir=$(fixture actionable-check-resume)
   state="$dir/state"
   mkdir "$dir/fakebin"
@@ -2502,12 +3122,150 @@ SH
   pass 'actionable custom and merged checks resume bounded sweeps fairly'
 }
 
+test_check_sweep_order_is_canonical_across_locales() {
+  local locale_name locale_key dir state id cycle rc action_id expected_initial expected_next actual
+  expected_initial=$'A-dash\nZ.dot\n_under\na_lower\nz-last'
+  expected_next=$'A-dash\nB-late\nZ.dot\n_under\na_lower\nz-last\nzz-late'
+  for locale_name in ${FM_TEST_CHECK_ORDER_LOCALES:-C en_US.UTF-8 sv_SE.UTF-8}; do
+    locale -a | grep -Fx "$locale_name" >/dev/null \
+      || fail "required locale is not installed: $locale_name"
+    locale_key=$(printf '%s' "$locale_name" | tr '.-' '__')
+    dir=$(fixture "canonical-check-order-$locale_key")
+    state="$dir/state"
+    mkdir -p "$dir/fakebin"
+    for id in A-dash Z.dot _under a_lower z-last; do
+      printf '%s\n' '#!/usr/bin/env bash' \
+        "printf '%s\\n' '$id' >> \"\$FM_HOME/check-runs\"" \
+        "[ ! -f \"\$FM_HOME/action-$id\" ] || printf '%s\\n' ready" \
+        > "$state/$id.check.sh"
+      chmod 0700 "$state/$id.check.sh"
+      FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+        || fail "could not register $locale_name check $id"
+    done
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+      "$ROOT/bin/fm-pr-check-migrate.sh" --checks-safe >/dev/null \
+      || fail "could not preflight $locale_name check migration"
+    for cycle in 1 2 3; do
+      case "$cycle" in
+        1) action_id=Z.dot ;;
+        2) action_id=a_lower ;;
+        3) action_id=z-last ;;
+      esac
+      rm -f "$dir"/action-*
+      touch "$dir/action-$action_id"
+      set +e
+      LC_ALL="$locale_name" FM_TEST_CHECKS_PER_CYCLE=2 \
+        FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_BOUNDED_WATCH_TIMEOUT=10 \
+        run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+          > "$dir/initial-$cycle.out" 2> "$dir/initial-$cycle.err"
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] \
+        || fail "$locale_name initial sweep $cycle ended unexpectedly: rc=$rc $(cat "$dir/initial-$cycle.err")"
+      ack_watcher_cycle "$state" >/dev/null \
+        || fail "could not acknowledge $locale_name initial sweep $cycle"
+      if [ "$cycle" -eq 1 ]; then
+        for id in B-late zz-late; do
+          printf '%s\n' '#!/usr/bin/env bash' \
+            "printf '%s\\n' '$id' >> \"\$FM_HOME/check-runs\"" \
+            "[ ! -f \"\$FM_HOME/action-$id\" ] || printf '%s\\n' ready" \
+            > "$state/$id.check.sh"
+          chmod 0700 "$state/$id.check.sh"
+          FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+            || fail "could not register deferred $locale_name check $id"
+        done
+      fi
+    done
+    actual=$(cat "$dir/check-runs")
+    [ "$actual" = "$expected_initial" ] \
+      || fail "$locale_name changed the frozen starting sweep order: $actual"
+    [ ! -e "$state/.check-sweep-cursor" ] && [ ! -e "$state/.check-sweep-high-water" ] \
+      || fail "$locale_name starting sweep did not finish finitely"
+    rm -f "$state/.last-check"
+    for cycle in 1 2 3 4; do
+      case "$cycle" in
+        1) action_id=B-late ;;
+        2) action_id=_under ;;
+        3) action_id=z-last ;;
+        4) action_id=zz-late ;;
+      esac
+      rm -f "$dir"/action-*
+      touch "$dir/action-$action_id"
+      set +e
+      LC_ALL="$locale_name" FM_TEST_CHECKS_PER_CYCLE=2 \
+        FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_BOUNDED_WATCH_TIMEOUT=10 \
+        run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+          > "$dir/next-$cycle.out" 2> "$dir/next-$cycle.err"
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] \
+        || fail "$locale_name next sweep $cycle ended unexpectedly: rc=$rc $(cat "$dir/next-$cycle.err")"
+      ack_watcher_cycle "$state" >/dev/null \
+        || fail "could not acknowledge $locale_name next sweep $cycle"
+    done
+    actual=$(tail -n 7 "$dir/check-runs")
+    [ "$actual" = "$expected_next" ] \
+      || fail "$locale_name did not run deferred insertions in the next finite sweep: $actual"
+  done
+  pass 'check sweeps use one C-collated immutable order across installed locales'
+}
+
+test_supervision_rows_preserve_backslash_bytes() {
+  local dir generation index selected
+  dir=$(fixture byte-preserving-supervision-rows)
+  initialize_empty_active_supervision_registry "$dir"
+  printf '%s\n' 'window=fleet:shared' 'kind=ship' 'harness=claude' \
+    'home=/tmp/home \c-tail\\slash with spaces' 'spawn_gen=row-a' \
+    > "$dir/state/row-a.meta"
+  printf '%s\n' 'window=fleet:shared' 'kind=secondmate' 'harness=claude' \
+    'home=/tmp/other !punctuation!\\path' 'spawn_gen=row-b' \
+    > "$dir/state/row-b.meta"
+  printf '%s\n' 'working: row a' > "$dir/state/row-a.status"
+  printf '%s\n' 'done: row b' > "$dir/state/row-b.status"
+  register_active_supervision_tasks "$dir" row-a row-b
+  generation=$(head -1 "$dir/state/.active-supervision-generation" | cut -f2)
+  index=$(mktemp -d "$dir/state/.row-index.XXXXXX")
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_INDEX="$index" \
+    FM_TEST_GENERATION="$generation" bash -c '
+    . "$1/fm-watch.sh"
+    FM_CODEX_BOUNDED_WATCH=1
+    FM_CODEX_REGISTRY_INDEX=$FM_TEST_INDEX
+    fm_supervision_registry_snapshot_index \
+      "$FM_STATE_OVERRIDE" "$FM_TEST_GENERATION" "$FM_CODEX_REGISTRY_INDEX" || exit 1
+    owners=$(active_window_inventory) || exit 1
+    printf "%s\n" "$owners" > "$FM_HOME/owner-rows"
+    states=$(printf "%s\n" "$owners" | awk -F "\t" \
+      "BEGIN { OFS=\"\\t\" } { print \$3, \$1, \"alive\", \$5, \$6, \$2, \$4, \$7 }")
+    bounded_score_inventory "$states" "$FM_HOME/scored-scratch" > "$FM_HOME/scored-rows" || exit 1
+    fm_supervision_tsv_row "literal\\c" "double\\\\slash" "space value" \
+      > "$FM_HOME/encoded-row" || exit 1
+    printf "%s\t%s\t%s\n" "literal\\c" "double\\\\slash" "space value" \
+      > "$FM_HOME/expected-row"
+    cmp "$FM_HOME/expected-row" "$FM_HOME/encoded-row" || exit 1
+    bad=$(printf "bad\tfield")
+    ! fm_supervision_tsv_row "$bad" safe >/dev/null
+  ' _ "$ROOT/bin" || fail 'byte-preserving supervision row round trip failed'
+  [ "$(wc -l < "$dir/owner-rows" | tr -d ' ')" = 2 ] \
+    && [ "$(wc -l < "$dir/scored-rows" | tr -d ' ')" = 2 ] \
+    || fail 'duplicate endpoint owners were dropped during row scoring'
+  grep -F '/tmp/home \c-tail\\slash with spaces' "$dir/owner-rows" >/dev/null \
+    || fail 'owner inventory interpreted a literal backslash-c sequence'
+  grep -F '/tmp/home \c-tail\\slash with spaces' "$dir/scored-rows" >/dev/null \
+    || fail 'watcher scoring interpreted a literal backslash-c sequence'
+  selected=$(awk -F '\t' '{ print $(NF-1) ":" $NF }' "$dir/scored-rows" | LC_ALL=C sort -u)
+  [ "$selected" = row-b:secondmate ] \
+    || fail "duplicate-owner scoring lost its selected policy: $selected"
+  find "$index" -depth -delete
+  pass 'admission and watcher scoring preserve literal backslashes and duplicate owners'
+}
+
 test_due_remote_recovery_fits_cycle_budget() {
   local dir original_root=$TEST_ROOT corr
   dir=$(fixture due-remote-recovery)
   cp -R "$ROOT/bin/." "$dir/bin/"
   install_controlled_watcher "$dir"
-  printf '%s\n' 'remote_host=fixture.invalid' > "$dir/state/remote-task.meta"
+  printf '%s\n' 'window=remote:remote-task' 'remote_host=fixture.invalid' \
+    'kind=secondmate' 'spawn_gen=remote-task-a' > "$dir/state/remote-task.meta"
   corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 \
     FM_PENDING_REPLY_GRACE_SECS=0 bash -c '
       . "$1/fm-pending-reply-lib.sh"
@@ -2601,7 +3359,11 @@ PY
   PYTHONPATH="$dir/fault" FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 4
   TEST_ROOT=$original_root
   wait_file "$dir/rc" 200
-  scans=$(wc -l < "$dir/cycle-budget-scans")
+  if [ -f "$dir/cycle-budget-scans" ]; then
+    scans=$(wc -l < "$dir/cycle-budget-scans")
+  else
+    scans=0
+  fi
   [ "$scans" -le 12 ] || fail "cycle budget was rescanned $scans times during a four-second checkpoint"
   [ "$(cat "$dir/rc")" = 2 ] || fail 'throttled cycle scans prevented quiet renewal'
   assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'throttled cycle scans lost quiet renewal'
@@ -2654,10 +3416,43 @@ test_dead_arm_launcher_retires_owned_watcher_group() {
   pass 'dead arm launcher retains cancellation of its owned watcher group'
 }
 
+test_running_arm_cancellation_reaps_prelock_descendants() {
+  local dir original_root=$TEST_ROOT descendant
+  dir=$(fixture prelock-arm-descendant)
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  cat > "$dir/bin/fm-pr-check-migrate.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$$" > "$FM_HOME/prelock-descendant-pid"
+while :; do sleep 1; done
+SH
+  chmod +x "$dir/bin/fm-pr-check-migrate.sh"
+  : > "$dir/state/task.meta"
+  TEST_ROOT="$dir" run_stop "$dir" 15
+  TEST_ROOT=$original_root
+  wait_file "$dir/prelock-descendant-pid" 150
+  descendant=$(cat "$dir/prelock-descendant-pid")
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_retire "$FM_STATE_OVERRIDE" task
+  ' _ "$ROOT/bin" || fail 'pre-lock descendant fixture could not retire active ownership'
+  rm "$dir/state/task.meta"
+  wait_file "$dir/rc" 200
+  [ "$(cat "$dir/rc")" = 0 ] || fail 'pre-lock descendant cleanup did not close the idle Stop quietly'
+  if is_live_non_zombie "$descendant"; then
+    fail "pre-lock watcher descendant $descendant survived Stop cleanup"
+  fi
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'running arm cancellation reaps pre-lock watcher descendants'
+}
+
 test_reaped_uncertain_group_is_not_signalled() {
   local dir original_root=$TEST_ROOT sentinel
   dir=$(fixture uncertain-arm-group)
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-backend.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-supervision-registry-lib.sh,fm-pending-reply-lib.sh,fm-task-inbox-lib.sh,fm-hook-host-lib.sh,fm-backend.sh,fm-pr-lib.sh,fm-check-lib.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/uncertain-arm-pid"
@@ -2733,7 +3528,15 @@ test_cleanup_cancellation_revokes_handling() {
       TERM|KILL) kill "-$kind" "$hook" ;;
       afk) touch "$dir/state/.afk" ;;
       replacement) printf '99999999\n' > "$dir/state/.lock" ;;
-      no-need) rm "$dir/state/task.meta" ;;
+      no-need)
+        FM_STATE_OVERRIDE="$dir/state" bash -c '
+          . "$1/fm-wake-lib.sh"
+          . "$1/fm-backend.sh"
+          . "$1/fm-supervision-registry-lib.sh"
+          fm_supervision_registry_retire "$FM_STATE_OVERRIDE" task
+        ' _ "$ROOT/bin" || fail 'no-need fixture could not retire active ownership'
+        rm "$dir/state/task.meta"
+        ;;
     esac
     wait_file "$dir/rc"
     for _ in $(seq 1 80); do [ ! -e "$dir/state/.watch.lock" ] && break; sleep 0.1; done
@@ -2962,7 +3765,7 @@ test_uncertain_session_inert() {
 test_identity_mismatch_fails_closed_and_reaps_owned_group() {
   local dir original_root=$TEST_ROOT arm watcher
   dir=$(fixture identity-change)
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-backend.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-supervision-registry-lib.sh,fm-pending-reply-lib.sh,fm-task-inbox-lib.sh,fm-hook-host-lib.sh,fm-backend.sh,fm-pr-lib.sh,fm-check-lib.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_HOME/arm-pid"
@@ -3161,7 +3964,7 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
 }
 
 test_registry_receipt_recovery_is_owner_addressed() {
-  local dir id target key targets= inventory
+  local dir id target key targets='' inventory
   dir=$(fixture owner-addressed-registry-receipts)
   install_endpoint_inventory_tmux "$dir"
   for id in $(seq 1 80); do
@@ -3236,7 +4039,7 @@ test_registry_pending_snapshot_is_immediately_authoritative() {
 }
 
 test_registry_snapshot_index_is_generation_bound() {
-  local dir id targets= generation index first second rc
+  local dir id targets='' generation index first second rc
   dir=$(fixture active-supervision-membership-index)
   install_endpoint_inventory_tmux "$dir"
   for id in $(seq 1 80); do
@@ -3293,6 +4096,74 @@ test_registry_snapshot_index_is_generation_bound() {
   pass 'active-owner membership is indexed once per monotonic generation'
 }
 
+test_incarnation_allocator_is_durable_unique_and_nonreusable() {
+  local dir id pid first second values count expected pids=
+  dir=$(fixture incarnation-allocation)
+  initialize_empty_active_supervision_registry "$dir"
+  : > "$dir/incarnations"
+  for id in $(seq 1 64); do
+    (
+      FM_STATE_OVERRIDE="$dir/state" bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_allocate_incarnation "$FM_STATE_OVERRIDE" same-task
+      ' _ "$ROOT/bin" >> "$dir/incarnations"
+    ) &
+    pids="$pids $!"
+  done
+  for pid in $pids; do
+    wait "$pid" || fail 'parallel incarnation allocation failed'
+  done
+  for id in $(seq 1 4); do
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-wake-lib.sh"
+      . "$1/fm-supervision-registry-lib.sh"
+      fm_supervision_registry_allocate_incarnation "$FM_STATE_OVERRIDE" same-task
+    ' _ "$ROOT/bin" >> "$dir/incarnations" \
+      || fail 'post-process-restart incarnation allocation failed'
+  done
+  count=$(wc -l < "$dir/incarnations" | tr -d ' ')
+  [ "$count" = 68 ] || fail "incarnation allocator returned $count of 68 values"
+  [ "$(LC_ALL=C sort -u "$dir/incarnations" | wc -l | tr -d ' ')" = 68 ] \
+    || fail 'parallel incarnation allocation reused a value'
+  values=$(sed -E 's/^i([0-9]+)\..*/\1/' "$dir/incarnations" | sort -n)
+  expected=$(seq 1 68)
+  [ "$values" = "$expected" ] || fail 'durable incarnation sequence was not strictly monotonic'
+
+  first=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_allocate_incarnation "$FM_STATE_OVERRIDE" receipt-task
+  ' _ "$ROOT/bin") || fail 'could not allocate original receipt incarnation'
+  printf '%s\n' 'window=fleet:receipt' 'backend=tmux' "spawn_gen=$first" \
+    > "$dir/state/receipt-task.meta"
+  write_exact_death_receipt "$dir/state" receipt-task fleet:receipt tmux "$first" \
+    || fail 'could not persist old incarnation death receipt'
+  second=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_allocate_incarnation "$FM_STATE_OVERRIDE" receipt-task
+  ' _ "$ROOT/bin") || fail 'could not allocate replacement receipt incarnation'
+  printf '%s\n' 'window=fleet:receipt' 'backend=tmux' "spawn_gen=$second" \
+    > "$dir/state/receipt-task.meta"
+  if FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_death_surfaced \
+      "$FM_STATE_OVERRIDE" receipt-task "$FM_STATE_OVERRIDE/receipt-task.meta"
+  ' _ "$ROOT/bin"; then
+    fail 'an old death receipt suppressed a replacement incarnation'
+  fi
+  if FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_allocate_incarnation "$FM_STATE_OVERRIDE" same-task replayed-value
+  ' _ "$ROOT/bin"; then
+    fail 'the allocator accepted a caller-selected replay value'
+  fi
+  pass 'incarnation allocation is monotonic, parallel-safe, and non-replayable'
+}
+
 test_registry_reservation_recovers_spawn_crash_windows() {
   local dir inventory rc
   dir=$(fixture active-supervision-reservation-recovery)
@@ -3318,16 +4189,28 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" live live-gen || exit 1
+    printf "%s\n" "window=fleet:fm-live" "endpoint_task_id=live" \
+      "worktree=$2/live-worktree" "project=$2/live-project" "kind=ship" \
+      "spawn_gen=live-gen" > "$FM_STATE_OVERRIDE/.live.staged" || exit 1
     fm_supervision_registry_mark_reservation \
-      "$FM_STATE_OVERRIDE" live live-gen created tmux @42 fleet:fm-live || exit 1
+      "$FM_STATE_OVERRIDE" live live-gen created tmux @42 fleet:fm-live \
+      "$FM_STATE_OVERRIDE/.live.staged" || exit 1
     fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" dead dead-gen || exit 1
+    printf "%s\n" "window=fleet:fm-dead" "endpoint_task_id=dead" \
+      "worktree=$2/dead-worktree" "project=$2/dead-project" "kind=ship" \
+      "spawn_gen=dead-gen" > "$FM_STATE_OVERRIDE/.dead.staged" || exit 1
     fm_supervision_registry_mark_reservation \
-      "$FM_STATE_OVERRIDE" dead dead-gen created tmux @43 fleet:fm-dead || exit 1
+      "$FM_STATE_OVERRIDE" dead dead-gen created tmux @43 fleet:fm-dead \
+      "$FM_STATE_OVERRIDE/.dead.staged" || exit 1
     fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" uncertain uncertain-gen || exit 1
+    printf "%s\n" "window=fleet:fm-uncertain" "endpoint_task_id=uncertain" \
+      "worktree=$2/uncertain-worktree" "project=$2/uncertain-project" "kind=ship" \
+      "spawn_gen=uncertain-gen" > "$FM_STATE_OVERRIDE/.uncertain.staged" || exit 1
     fm_supervision_registry_mark_reservation \
-      "$FM_STATE_OVERRIDE" uncertain uncertain-gen created tmux @44 fleet:fm-uncertain || exit 1
+      "$FM_STATE_OVERRIDE" uncertain uncertain-gen created tmux @44 fleet:fm-uncertain \
+      "$FM_STATE_OVERRIDE/.uncertain.staged" || exit 1
     exit 74
-  ' _ "$ROOT/bin" >/dev/null 2>&1
+  ' _ "$ROOT/bin" "$dir" >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -eq 74 ] || fail 'post-creation crash fixture did not reach its crash boundary'
@@ -3369,8 +4252,15 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" remote remote-gen || exit 1
+    printf "%s\n" "window=remote:remote" "endpoint_task_id=remote" \
+      "worktree=/remote/home" "project=/remote/root" "harness=codex" \
+      "kind=secondmate" "mode=secondmate" "yolo=off" "home=/remote/home" \
+      "projects=project-a" "remote_host=host.example" "remote_root=/remote/root" \
+      "remote_backend=herdr" "remote_herdr_session=fm-remote" "remote_target=unknown" \
+      "spawn_gen=remote-gen" > "$FM_STATE_OVERRIDE/.remote.staged" || exit 1
     fm_supervision_registry_mark_reservation \
-      "$FM_STATE_OVERRIDE" remote remote-gen remote-unknown remote remote:remote host.example || exit 1
+      "$FM_STATE_OVERRIDE" remote remote-gen remote-unknown remote remote:remote host.example \
+      "$FM_STATE_OVERRIDE/.remote.staged" || exit 1
     exit 75
   ' _ "$ROOT/bin" >/dev/null 2>&1
   rc=$?
@@ -3399,12 +4289,15 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" published published-gen || exit 1
+    printf "%s\n" "window=fleet:fm-published" "endpoint_task_id=published" \
+      "worktree=$2/published-worktree" "project=$2/published-project" "kind=ship" \
+      "spawn_gen=published-gen" > "$FM_STATE_OVERRIDE/.published.staged" || exit 1
     fm_supervision_registry_mark_reservation \
-      "$FM_STATE_OVERRIDE" published published-gen created tmux @43 fleet:published || exit 1
-    printf "%s\n" "window=fleet:published" "spawn_gen=published-gen" \
-      > "$FM_STATE_OVERRIDE/published.meta" || exit 1
+      "$FM_STATE_OVERRIDE" published published-gen created tmux @43 fleet:fm-published \
+      "$FM_STATE_OVERRIDE/.published.staged" || exit 1
+    cp "$FM_STATE_OVERRIDE/.published.staged" "$FM_STATE_OVERRIDE/published.meta" || exit 1
     exit 73
-  ' _ "$ROOT/bin" >/dev/null 2>&1
+  ' _ "$ROOT/bin" "$dir" >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -eq 73 ] || fail 'post-metadata crash fixture did not reach its crash boundary'
@@ -3423,6 +4316,132 @@ test_registry_reservation_recovers_spawn_crash_windows() {
   pass 'spawn reservations recover live, dead, uncertain, published, and remote outcomes'
 }
 
+test_transaction_journals_recover_every_backend_byte_exact() {
+  local dir rc task
+  dir=$(fixture transaction-journal-backends)
+  install_endpoint_inventory_herdr "$dir"
+  install_endpoint_inventory_tmux "$dir"
+  set +e
+  PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_EXISTING_TARGETS=default:pane-1 \
+    FM_TEST_TMUX_RESERVATIONS='@42=fleet:fm-tmux-task=/tmp/tmux\c-work' \
+    FM_TEST_EXISTING_TARGETS='fleet:fm-tmux-task' \
+    FM_TEST_LIVE_TARGETS='fleet:fm-tmux-task' \
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+
+    printf "%s\n" "window=fleet:fm-tmux-task" "endpoint_task_id=tmux-task" \
+      "worktree=/tmp/tmux\\c-work" "project=/tmp/tmux\\c-project" "kind=ship" \
+      "spawn_gen=tmux-gen" > "$FM_STATE_OVERRIDE/.tmux-task.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" tmux-task tmux-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" tmux-task tmux-gen \
+      created tmux @42 fleet:fm-tmux-task "$FM_STATE_OVERRIDE/.tmux-task.staged" || exit 1
+
+    printf "%s\n" "window=default:pane-1" "endpoint_task_id=herdr-flat" \
+      "worktree=/tmp/work\\c-flat" "project=/tmp/project\\c-flat" "kind=ship" \
+      "backend=herdr" "herdr_session=default" "herdr_workspace_id=workspace-1" \
+      "herdr_tab_id=tab-1" "herdr_pane_id=pane-1" "spawn_gen=herdr-gen" \
+      > "$FM_STATE_OVERRIDE/.herdr-flat.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" herdr-flat herdr-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" herdr-flat herdr-gen \
+      created herdr default:pane-1 tab-1 "$FM_STATE_OVERRIDE/.herdr-flat.staged" || exit 1
+
+    printf "%s\n" "window=default:pane-2" "endpoint_task_id=herdr-projected" \
+      "worktree=/tmp/projected-work" "project=/tmp/projected-project" "kind=ship" \
+      "backend=herdr" "herdr_session=default" "herdr_workspace_id=workspace-2" \
+      "herdr_tab_id=tab-pane-2" "herdr_pane_id=pane-2" "spawn_gen=projected-gen" \
+      > "$FM_STATE_OVERRIDE/.herdr-projected.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" herdr-projected projected-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" herdr-projected projected-gen \
+      created herdr default:pane-2 tab-pane-2 \
+      "$FM_STATE_OVERRIDE/.herdr-projected.staged" || exit 1
+
+    printf "%s\n" "window=zellij-main:2" "endpoint_task_id=zellij-task" \
+      "worktree=/tmp/zellij-work" "project=/tmp/zellij-project" "kind=ship" \
+      "backend=zellij" "zellij_session=zellij-main" "zellij_tab_id=1" \
+      "zellij_pane_id=2" "spawn_gen=zellij-gen" \
+      > "$FM_STATE_OVERRIDE/.zellij-task.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" zellij-task zellij-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" zellij-task zellij-gen \
+      created zellij zellij-main:2 1 "$FM_STATE_OVERRIDE/.zellij-task.staged" || exit 1
+
+    printf "%s\n" "window=workspace-2:surface-2" "endpoint_task_id=cmux-task" \
+      "worktree=/tmp/cmux-work" "project=/tmp/cmux-project" "kind=ship" \
+      "backend=cmux" "cmux_workspace_id=workspace-2" "cmux_surface_id=surface-2" \
+      "spawn_gen=cmux-gen" > "$FM_STATE_OVERRIDE/.cmux-task.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" cmux-task cmux-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" cmux-task cmux-gen \
+      created cmux workspace-2:surface-2 workspace-2 "$FM_STATE_OVERRIDE/.cmux-task.staged" || exit 1
+
+    printf "%s\n" "window=fm-orca-task" "endpoint_task_id=orca-task" \
+      "worktree=/tmp/orca-work" "project=/tmp/orca-project" "kind=ship" \
+      "backend=orca" "orca_worktree_id=worktree-3" "terminal=terminal-3" \
+      "spawn_gen=orca-gen" > "$FM_STATE_OVERRIDE/.orca-task.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" orca-task orca-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" orca-task orca-gen \
+      created orca terminal-3 worktree-3 "$FM_STATE_OVERRIDE/.orca-task.staged" || exit 1
+
+    printf "%s\n" "window=remote:remote-pending" "endpoint_task_id=remote-pending" \
+      "worktree=/remote/pending-home" "project=/remote/pending-root" "harness=codex" \
+      "kind=secondmate" "mode=secondmate" "yolo=off" "home=/remote/pending-home" \
+      "projects=project-a" "remote_host=pending.example" \
+      "remote_root=/remote/pending-root" "remote_backend=herdr" \
+      "remote_herdr_session=fm-remote" "remote_target=unknown" \
+      "spawn_gen=remote-pending-gen" > "$FM_STATE_OVERRIDE/.remote-pending.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" remote-pending remote-pending-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" remote-pending remote-pending-gen \
+      remote-unknown remote remote:remote-pending pending.example \
+      "$FM_STATE_OVERRIDE/.remote-pending.staged" || exit 1
+
+    printf "%s\n" "window=remote:remote-created" "endpoint_task_id=remote-created" \
+      "worktree=/remote/home" "project=/remote/root" "harness=codex" \
+      "kind=secondmate" "mode=secondmate" "yolo=off" "home=/remote/home" \
+      "projects=project-a,project-b" "remote_host=remote.example" \
+      "remote_root=/remote/root" "remote_backend=herdr" \
+      "remote_herdr_session=fm-remote" "remote_target=fm-remote:pane-4" \
+      "spawn_gen=remote-created-gen" > "$FM_STATE_OVERRIDE/.remote-created.staged" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" remote-created remote-created-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" remote-created remote-created-gen \
+      created remote-herdr fm-remote:pane-4 remote.example \
+      "$FM_STATE_OVERRIDE/.remote-created.staged" || exit 1
+    exit 79
+  ' _ "$ROOT/bin" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 79 ] || fail 'validator-complete backend journals did not reach their crash boundary'
+
+  PATH="$dir/fakebin:$PATH" \
+    FM_TEST_HERDR_EXISTING_TARGETS='default:pane-1 default:pane-2' \
+    FM_TEST_TMUX_RESERVATIONS='@42=fleet:fm-tmux-task=/tmp/tmux\c-work' \
+    FM_TEST_EXISTING_TARGETS='fleet:fm-tmux-task' \
+    FM_TEST_LIVE_TARGETS='fleet:fm-tmux-task' \
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/inventory" || fail 'backend transaction journals did not recover'
+  for task in tmux-task herdr-flat herdr-projected zellij-task cmux-task orca-task remote-pending remote-created; do
+    cmp "$dir/state/.$task.staged" "$dir/state/$task.meta" \
+      || fail "$task transaction journal did not preserve metadata bytes"
+  done
+  for task in tmux-task herdr-flat herdr-projected zellij-task cmux-task orca-task; do
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-backend.sh"
+      fm_backend_validate_task_endpoint "$FM_STATE_OVERRIDE/$2.meta" "$2"
+    ' _ "$ROOT/bin" "$task" || fail "$task recovered metadata failed endpoint validation"
+  done
+  [ "$(sed -n 's/^remote_target=//p' "$dir/state/remote-created.meta")" = fm-remote:pane-4 ] \
+    && [ "$(sed -n 's/^remote_root=//p' "$dir/state/remote-created.meta")" = /remote/root ] \
+    || fail 'remote-created journal lost its exact route'
+  [ "$(sed -n 's/^remote_target=//p' "$dir/state/remote-pending.meta")" = unknown ] \
+    && [ "$(sed -n 's/^remote_host=//p' "$dir/state/remote-pending.meta")" = pending.example ] \
+    || fail 'remote-before-response journal lost its conservative exact route'
+  pass 'transaction journals recover every supported backend with byte-exact validator-complete metadata'
+}
+
 test_registered_check_kills_term_ignoring_process_group() {
   local dir started elapsed child rc
   dir=$(fixture registered-check-hard-timeout)
@@ -3433,20 +4452,222 @@ printf '%s\n' "$$" > "$FM_HOME/check-child-pid"
 while :; do sleep 1; done
 SH
   chmod 0700 "$dir/state/ignores-term.check.sh"
-  started=$(date +%s)
+  started=$(monotonic_seconds)
   set +e
   FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CHECK_TIMEOUT=1 FM_CHECK_KILL_GRACE=1 \
     bash -c '. "$1/fm-watch.sh"; run_check_capture "$2"' \
       _ "$ROOT/bin" "$dir/state/ignores-term.check.sh"
   rc=$?
   set -e
-  elapsed=$(( $(date +%s) - started ))
+  elapsed=$(( $(monotonic_seconds) - started ))
   [ "$rc" -eq 0 ] || fail "hard-timeout check runner failed: rc=$rc"
   [ "$elapsed" -le 4 ] || fail "TERM-ignoring check exceeded its kill/reap lease: ${elapsed}s"
   child=$(cat "$dir/check-child-pid" 2>/dev/null || true)
   [ -n "$child" ] || fail 'TERM-ignoring check never started'
   ! kill -0 "$child" 2>/dev/null || fail 'TERM-ignoring check survived the hard timeout'
   pass 'registered checks receive TERM then bounded KILL and reap'
+}
+
+test_bounded_check_starts_without_observer_endpoint() {
+  local dir rc
+  dir=$(fixture bounded-check-no-observer-endpoint)
+  initialize_empty_active_supervision_registry "$dir"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" started > "$FM_HOME/baseline-check-started"' \
+    'printf "%s\n" ready' > "$dir/state/baseline.check.sh"
+  chmod 0700 "$dir/state/baseline.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" baseline >/dev/null \
+    || fail 'could not register baseline bounded check'
+  set +e
+  FM_TEST_BOUNDED_WATCH_TIMEOUT=4 FM_TEST_CHECKS_PER_CYCLE=1 \
+    FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/baseline.out" 2> "$dir/baseline.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || fail 'bounded check did not start with an empty active endpoint inventory'
+  wait_file "$dir/baseline-check-started" 10
+  assert_contains "$(cat "$dir/state/.wake-queue")" $'check\t' \
+    'baseline bounded check did not publish its actionable result'
+  pass 'a due bounded check starts without an observer endpoint'
+}
+
+test_bounded_observer_remains_live_during_check() {
+  local dir watcher rc check_pid
+  dir=$(fixture observer-during-check)
+  install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
+  printf '%s\n' 'window=fleet:fm-active' "worktree=$dir" "project=$dir" \
+    'backend=tmux' 'kind=ship' 'harness=codex' 'spawn_gen=observer-1' \
+    > "$dir/state/active.meta"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-backend.sh"
+    fm_backend_validate_task_endpoint "$FM_STATE_OVERRIDE/active.meta" active
+  ' _ "$ROOT/bin" || fail 'observer fixture endpoint did not pass lifecycle validation'
+  register_active_supervision_tasks "$dir" active
+  printf '%s\n' 'working: initial' > "$dir/state/active.status"
+  printf '%s\n' initial > "$dir/state/active.turn-ended"
+  prime_status_seen "$dir/state" "$dir/state/active.status"
+  prime_status_seen "$dir/state" "$dir/state/active.turn-ended"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" "$$" > "$FM_HOME/observer-check-pid"' \
+    'printf "%s\n" started > "$FM_HOME/observer-check-started"' 'sleep 30' \
+    > "$dir/state/slow.check.sh"
+  chmod 0700 "$dir/state/slow.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" slow >/dev/null \
+    || fail 'could not register observer slow check'
+  set +e
+  FM_TEST_EXISTING_TARGETS='fleet:fm-active' FM_TEST_LIVE_TARGETS='fleet:fm-active' \
+    FM_TEST_BOUNDED_WATCH_TIMEOUT=30 FM_TEST_CHECKS_PER_CYCLE=1 \
+    FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_SIGNAL_GRACE=0 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/during.out" 2> "$dir/during.err" &
+  watcher=$!
+  set -e
+  wait_file "$dir/observer-check-started" 250
+  printf '%s\n' 'done: arrived during check' > "$dir/state/active.status"
+  printf '%s\n' 'turn arrived during check' > "$dir/state/active.turn-ended"
+  set +e
+  wait "$watcher"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || fail 'observer parked while a registered check was running'
+  assert_contains "$(cat "$dir/state/.wake-queue")" $'signal\tactive.status' \
+    'status arriving during a check was not queued by the observer'
+  assert_contains "$(cat "$dir/state/.wake-queue")" $'signal\tactive.turn-ended' \
+    'turn-end arriving during a check was not queued by the observer'
+  check_pid=$(cat "$dir/observer-check-pid")
+  ! kill -0 "$check_pid" 2>/dev/null || fail 'observer wake left its running check alive'
+  pass 'the cheap observer remains live while a registered check runs'
+}
+
+test_bounded_observer_remains_live_after_check_boundary() {
+  local dir watcher rc
+  dir=$(fixture observer-after-check-boundary)
+  install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
+  printf '%s\n' 'window=fleet:fm-active' "worktree=$dir" "project=$dir" \
+    'backend=tmux' 'kind=ship' 'harness=codex' 'spawn_gen=observer-2' \
+    > "$dir/state/active.meta"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-backend.sh"
+    fm_backend_validate_task_endpoint "$FM_STATE_OVERRIDE/active.meta" active
+  ' _ "$ROOT/bin" || fail 'parked-observer fixture endpoint did not pass lifecycle validation'
+  register_active_supervision_tasks "$dir" active
+  printf '%s\n' 'working: initial' > "$dir/state/active.status"
+  printf '%s\n' initial > "$dir/state/active.turn-ended"
+  prime_status_seen "$dir/state" "$dir/state/active.status"
+  prime_status_seen "$dir/state" "$dir/state/active.turn-ended"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/instant.check.sh"
+  chmod 0700 "$dir/state/instant.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" instant >/dev/null \
+    || fail 'could not register observer boundary check'
+  set +e
+  FM_TEST_EXISTING_TARGETS='fleet:fm-active' FM_TEST_LIVE_TARGETS='fleet:fm-active' \
+    FM_TEST_BOUNDED_WATCH_TIMEOUT=30 FM_TEST_CHECKS_PER_CYCLE=1 \
+    FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_SIGNAL_GRACE=0 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/parked.out" 2> "$dir/parked.err" &
+  watcher=$!
+  set -e
+  wait_file "$dir/state/.watch.lock/codex-check-batch-boundary" 250
+  printf '%s\n' 'done: arrived after boundary' > "$dir/state/active.status"
+  printf '%s\n' 'turn arrived after boundary' > "$dir/state/active.turn-ended"
+  set +e
+  wait "$watcher"
+  rc=$?
+  set -e
+  [ "$rc" -ne 124 ] || fail 'observer parked with its check batch boundary'
+  assert_contains "$(cat "$dir/state/.wake-queue")" $'signal\tactive.status' \
+    'status arriving after check parking was not queued by the observer'
+  assert_contains "$(cat "$dir/state/.wake-queue")" $'signal\tactive.turn-ended' \
+    'turn-end arriving after check parking was not queued by the observer'
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-watch.sh"
+    FM_CODEX_BOUNDED_WATCH=1
+    FM_CODEX_REGISTRY_INDEX=$(mktemp -d "$FM_STATE_OVERRIDE/.observer-index.XXXXXX") || exit 1
+    mkdir "$FM_CODEX_REGISTRY_INDEX/tasks" || exit 1
+    printf "%s\n" "$FM_STATE_OVERRIDE/active.meta" > "$FM_CODEX_REGISTRY_INDEX/inventory"
+    process_signal_changes() { printf "status-turn\n" >> "$FM_HOME/observer-ticks"; }
+    procevent_surface_queued() { printf "process-event\n" >> "$FM_HOME/observer-ticks"; }
+    inbox_steer_check() { printf "inbox\n" >> "$FM_HOME/observer-ticks"; }
+    bounded_observer_tick_during_check
+    find "$FM_CODEX_REGISTRY_INDEX" -depth -delete
+  ' _ "$ROOT/bin" || fail 'bounded observer tick did not complete'
+  [ "$(cat "$dir/observer-ticks")" = $'status-turn\nprocess-event\ninbox' ] \
+    || fail 'bounded observer omitted a signal, process-event, or inbox source'
+  pass 'the cheap observer remains live after check parking'
+}
+
+test_check_grace_and_absolute_lease_are_preserved() {
+  local dir started elapsed child rc watcher generation identity deadline
+  dir=$(fixture check-grace-and-lease)
+  initialize_empty_active_supervision_registry "$dir"
+  printf '%s\n' '#!/usr/bin/env bash' 'trap "" TERM' \
+    'printf "%s\n" "$$" > "$FM_HOME/check-grace-child"' \
+    'while :; do sleep 1; done' > "$dir/state/grace.check.sh"
+  chmod 0700 "$dir/state/grace.check.sh"
+  started=$(monotonic_seconds)
+  set +e
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CHECK_TIMEOUT=1 \
+    FM_CHECK_KILL_GRACE=10 FM_CHECK_REAP_ALLOWANCE=1 \
+    bash -c '. "$1/fm-watch.sh"; run_check_capture "$2"' \
+      _ "$ROOT/bin" "$dir/state/grace.check.sh"
+  rc=$?
+  set -e
+  elapsed=$(( $(monotonic_seconds) - started ))
+  [ "$rc" -eq 0 ] || fail "configured-grace check runner failed: rc=$rc"
+  [ "$elapsed" -ge 10 ] && [ "$elapsed" -le 14 ] \
+    || fail "configured kill grace was not retained as 10 seconds: ${elapsed}s"
+  child=$(cat "$dir/check-grace-child")
+  ! kill -0 "$child" 2>/dev/null || fail 'configured-grace cancellation returned before reap'
+
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CHECK_TIMEOUT=1 \
+    FM_CHECK_KILL_GRACE=10 FM_CHECK_REAP_ALLOWANCE=2 FM_CODEX_BOUNDED_WATCH=1 \
+    FM_MONOTONIC_NS_NOW=1000000000 FM_CODEX_LEASE_DEADLINE_NS=14000000000 bash -c '
+      . "$1/fm-watch.sh"
+      fm_codex_check_lease_allows_slot || exit 1
+      FM_CODEX_LEASE_DEADLINE_NS=13999999999
+      ! fm_codex_check_lease_allows_slot
+    ' _ "$ROOT/bin" || fail 'check-slot admission omitted configured grace or reap allowance'
+
+  generation=$(head -1 "$dir/state/.active-supervision-generation" | cut -f2)
+  identity=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1/fm-wake-lib.sh"; fm_pid_identity "$PPID"' _ "$ROOT/bin") \
+    || fail 'could not capture lease-test owner identity'
+  deadline=13000000000
+  printf '{"token":"lease-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline_ns":%s,"resume_cycle_timeout":1,"registry_generation":"%s","phase":"watching"}\n' \
+    "$$" "$identity" "$$" "$identity" "$deadline" "$generation" \
+    > "$dir/state/.codex-stop.json"
+  printf 'fm-codex-check-batch.v5\tlease\t2\tlease-token\t%s\t%s\t%s\t%s\t%s\t1\t%s\n' \
+    "$$" "$identity" "$$" "$identity" "$deadline" "$generation" > "$dir/exact.request"
+  printf 'fm-codex-check-batch.v5\tlease\t2\tlease-token\t%s\t%s\t%s\t%s\t14000000000\t1\t%s\n' \
+    "$$" "$identity" "$$" "$identity" "$generation" > "$dir/extended.request"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CODEX_CHECK_BATCH_LEASE=lease \
+    FM_MONOTONIC_NS_NOW=12000000000 bash -c '
+      . "$1/fm-watch.sh"
+      codex_check_batch_request_valid "$2" 2 || exit 1
+      ! codex_check_batch_request_valid "$3" 2
+    ' _ "$ROOT/bin" "$dir/exact.request" "$dir/extended.request" \
+    || fail 'resume accepted an extension of its immutable monotonic deadline'
+
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/capability.check.sh"
+  chmod 0700 "$dir/state/capability.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" capability >/dev/null \
+    || fail 'could not register lease capability check'
+  set +e
+  FM_CHECK_KILL_GRACE=10 FM_CHECK_REAP_ALLOWANCE=2 FM_TEST_BOUNDED_WATCH_TIMEOUT=3 \
+    FM_TEST_CHECKS_PER_CYCLE=1 FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/capability.out" 2> "$dir/capability.err" &
+  watcher=$!
+  set -e
+  wait_file "$dir/state/.watch.lock/codex-bounded-capability" 100
+  assert_contains "$(cat "$dir/state/.watch.lock/codex-bounded-capability")" \
+    $'check-kill-grace=10\tcheck-reap-allowance=2' \
+    'watcher capability rewrote the configured grace or reap allowance'
+  set +e
+  wait "$watcher"
+  set -e
+  pass 'configured check grace, reap, and one monotonic deadline survive every handoff'
 }
 
 test_active_only_pending_replies_exclude_archive() {
@@ -3571,9 +4792,13 @@ test_wedged_arm_cannot_report_quiet_renewal
 test_late_watcher_gets_full_quiet_window
 test_admission_time_preserves_arm_confirmation
 test_recurring_probe_honors_transport_deadline
+test_idle_probe_wins_at_terminal_reserve
+test_registry_turnover_refreshes_budget_refusal
 test_identity_and_cleanup_phases_preserve_transport_reserve
+test_registry_retirement_preserves_conclusive_generation_change
 test_persistent_identity_timeout_fails_closed
 test_terminal_error_generation_tristate
+test_current_generation_failure_episode_is_bounded
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
@@ -3585,12 +4810,21 @@ test_sequential_task_classification_fits_complete_cycle_bound
 test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
+test_production_shaped_stale_inventory_arms_supervision
+test_empty_active_snapshot_ignores_retained_metadata
+test_active_indexes_discover_new_obligations
 test_active_supervision_registry_owns_lifecycle_inventory
 test_registry_receipt_recovery_is_owner_addressed
 test_registry_pending_snapshot_is_immediately_authoritative
 test_registry_snapshot_index_is_generation_bound
+test_incarnation_allocator_is_durable_unique_and_nonreusable
 test_registry_reservation_recovers_spawn_crash_windows
+test_transaction_journals_recover_every_backend_byte_exact
 test_registered_check_kills_term_ignoring_process_group
+test_bounded_check_starts_without_observer_endpoint
+test_bounded_observer_remains_live_during_check
+test_bounded_observer_remains_live_after_check_boundary
+test_check_grace_and_absolute_lease_are_preserved
 test_active_only_pending_replies_exclude_archive
 test_mixed_active_owner_policy_surfaces_once
 test_shared_endpoint_fanout_consumes_cycle_lease
@@ -3603,6 +4837,7 @@ test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
 test_duplicate_endpoint_pending_replies_share_classification
 test_bounded_check_batch_parks_at_safe_boundary
+test_retiring_session_owner_hands_off_current_stop
 test_bounded_check_resume_requires_live_owner
 test_bounded_check_resume_requires_complete_cycle_budget
 test_duplicate_endpoint_owners_share_stale_pass
@@ -3618,11 +4853,14 @@ test_colliding_endpoint_keys_keep_independent_death_receipts
 test_ambiguous_busy_resume_retires_death_receipt
 test_due_custom_and_pr_checks_remain_bounded
 test_actionable_checks_resume_bounded_sweep
+test_check_sweep_order_is_canonical_across_locales
+test_supervision_rows_preserve_backslash_bytes
 test_due_remote_recovery_fits_cycle_budget
 test_codex_defers_remote_pending_reply_observation
 test_cycle_budget_scans_are_throttled
 test_large_check_inventory_is_batched_before_transport_deadline
 test_dead_arm_launcher_retires_owned_watcher_group
+test_running_arm_cancellation_reaps_prelock_descendants
 test_launcher_exit_before_child_publication_retires_owned_watcher
 test_reaped_uncertain_group_is_not_signalled
 test_final_source_wake_retains_continuation

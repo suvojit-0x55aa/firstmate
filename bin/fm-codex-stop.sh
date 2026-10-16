@@ -99,6 +99,7 @@ except Exception:
 RECORD = '.codex-stop.json'
 SOCKET = '.codex-stop.sock'
 LOCK = '.codex-stop.owner-lock'  # Stable inode: never unlink or replace.
+FAILURE_EPISODE = '.codex-stop-failure-episode.json'
 
 
 class TransportEnded(Exception):
@@ -141,8 +142,19 @@ try:
         raise ValueError
 except ValueError:
     check_timeout = 30
-check_kill_grace = 1
-check_slot_timeout = check_timeout + check_kill_grace
+try:
+    check_kill_grace = int(os.environ.get('FM_CHECK_KILL_GRACE', '1'))
+    if check_kill_grace <= 0:
+        raise ValueError
+except ValueError:
+    check_kill_grace = 1
+try:
+    check_reap_allowance = int(os.environ.get('FM_CHECK_REAP_ALLOWANCE', '1'))
+    if check_reap_allowance <= 0:
+        raise ValueError
+except ValueError:
+    check_reap_allowance = 1
+check_slot_timeout = check_timeout + check_kill_grace + check_reap_allowance
 try:
     check_interval = int(os.environ.get('FM_CHECK_INTERVAL', '300'))
 except ValueError:
@@ -188,6 +200,8 @@ protocol_reserve = 10
 probe_timeout = 3
 probe_cleanup_allowance = 3
 identity_allowance = probe_timeout + probe_cleanup_allowance
+arm_running_cleanup_allowance = 4
+arm_natural_exit_allowance = 0.2
 arm_cleanup_allowance = 2 * identity_allowance + 3
 terminal_orchestration_allowance = 1
 terminal_reserve = (protocol_reserve + arm_cleanup_allowance + identity_allowance +
@@ -203,42 +217,38 @@ admission_registry_generation = None
 def admission_cycle_work(probe_deadline=None):
     result = shell(r'''
 . "$1/fm-backend.sh" || exit 1
+. "$1/fm-wake-lib.sh" || exit 1
 . "$1/fm-supervision-registry-lib.sh" || exit 1
 . "$1/fm-pending-reply-lib.sh" || exit 1
 . "$1/fm-task-inbox-lib.sh" || exit 1
+. "$1/fm-pr-lib.sh" || exit 1
 set -o pipefail
 fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
 generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 printf 'generation\t%s\n' "$generation"
+registered_checks=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
+while IFS= read -r registered_check; do
+  [ -n "$registered_check" ] || continue
+  printf 'registered-check\t%s\n' "$registered_check"
+done <<EOF
+$registered_checks
+EOF
 registry_index=$(umask 077; mktemp -d "$FM_STATE_OVERRIDE/.active-supervision-index.XXXXXX") || exit 1
 cleanup_registry_index() { find "$registry_index" -depth -delete; }
 trap cleanup_registry_index EXIT
 fm_supervision_registry_snapshot_index "$FM_STATE_OVERRIDE" "$generation" "$registry_index" || exit 1
 inventory=$(cat "$registry_index/inventory") || exit 1
-owners=
-while IFS= read -r meta; do
-  [ -n "$meta" ] || continue
-  task=${meta##*/}; task=${task%.meta}
-  target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$target" ] || continue
-  backend=$(fm_backend_of_meta "$meta")
-  route=local
-  case "$target" in remote:*) route=remote ;; esac
-  [ -z "$(fm_meta_get "$meta" remote_host)" ] || route=remote
-  record_home=$(fm_meta_get "$meta" home); [ -n "$record_home" ] || record_home=-
-  owners="${owners}${owners:+$'\n'}${backend}\t${target}\t${route}\t${record_home}\t${task}"
-done <<EOF
-$inventory
-EOF
-states=$(printf '%b\n' "$owners" | awk -F '\t' '!seen[$1 SUBSEP $3 SUBSEP $2]++ { print $1, $2, $3, $4 }' OFS="$(printf '\t')" \
+owners_file="$registry_index/owners"
+[ -f "$owners_file" ] && [ ! -L "$owners_file" ] || exit 1
+states=$(awk -F '\t' '!seen[$1 SUBSEP $3 SUBSEP $2]++ { print $1, $2, $3, $4 }' OFS="$(printf '\t')" "$owners_file" \
   | fm_backend_agent_state_batch) || exit 1
-plan=$({ printf '%s\n' "$states"; printf '__FM_OWNERS__\n'; printf '%b\n' "$owners"; } | awk -F '\t' '
+plan=$({ printf '%s\n' "$states"; printf '__FM_OWNERS__\n'; cat "$owners_file"; } | awk -F '\t' '
   BEGIN { OFS="\t" }
   $0 == "__FM_OWNERS__" { owners=1; next }
   !owners { verdict[$1 SUBSEP $4 SUBSEP $2]=$3; next }
   { print $1, $2, verdict[$1 SUBSEP $3 SUBSEP $2], $3, $4, $5 }
 ') || exit 1
-while IFS="$(printf '\t')" read -r backend target agent_state route record_home task; do
+while IFS="$(printf '\t')" read -r backend target agent_state route record_home task _kind _spawn_gen; do
   case "$agent_state" in
     dead|missing) ;;
     *)
@@ -251,36 +261,50 @@ while IFS="$(printf '\t')" read -r backend target agent_state route record_home 
 done <<EOF
 $plan
 EOF
-for file in "$FM_STATE_OVERRIDE"/*.status "$FM_STATE_OVERRIDE"/*.turn-ended; do
-  [ -f "$file" ] || continue
-  task=$(basename "$file")
-  task=${task%.status}; task=${task%.turn-ended}
-  fm_supervision_registry_index_contains "$registry_index" "$task" || continue
-  if ! fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file"; then
-    printf 'signal\t%s\n' "$(basename "$file")"
-  fi
-done
-dir=${FM_PENDING_REPLY_DIR_OVERRIDE:-$FM_STATE_OVERRIDE/pending-replies}
-if [ -d "$dir" ]; then
-  now=$(fm_pending_reply_now)
-  for rec in "$dir"/*; do
-    [ -f "$rec" ] || continue
-    case "$(basename "$rec")" in .*) continue ;; esac
-    [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || continue
-    [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
-    delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-    grace=$(fm_pending_reply_get "$rec" grace_secs)
-    case "$delivered:$grace:$now" in
-      *[!0-9:]*|:*|*::*|*:) continue ;;
-    esac
-    [ "$((now - delivered))" -ge "$grace" ] || continue
-    task_id=$(fm_pending_reply_get "$rec" task_id)
-    fm_supervision_registry_index_contains "$registry_index" "$task_id" || continue
-    printf 'owner-fanout\tpending:%s\n' "$(basename "$rec")"
-    if fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id"; then
-      printf 'remote-recovery\t%s\n' "$(basename "$rec")"
+while IFS= read -r meta; do
+  [ -n "$meta" ] || continue
+  task=${meta##*/}; task=${task%.meta}
+  for suffix in status turn-ended; do
+    file="$FM_STATE_OVERRIDE/$task.$suffix"
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    if ! fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file"; then
+      printf 'signal\t%s\n' "$task.$suffix"
     fi
   done
+done <<EOF
+$inventory
+EOF
+dir=${FM_PENDING_REPLY_DIR_OVERRIDE:-$FM_STATE_OVERRIDE/pending-replies}
+if [ -d "$dir" ]; then
+  fm_pending_reply_index_recover "$FM_STATE_OVERRIDE" || exit 1
+  now=$(fm_pending_reply_now)
+  while IFS= read -r meta; do
+    [ -n "$meta" ] || continue
+    task_id=${meta##*/}; task_id=${task_id%.meta}
+    task_key=$(fm_pending_reply_task_key "$task_id") || exit 1
+    index_dir="$(fm_pending_reply_index_root "$FM_STATE_OVERRIDE")/$task_key"
+    [ -d "$index_dir" ] && [ ! -L "$index_dir" ] || continue
+    for indexed in "$index_dir"/*; do
+      [ -f "$indexed" ] && [ ! -L "$indexed" ] || continue
+      corr=${indexed##*/}
+      rec="$dir/$corr"
+      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+      [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || continue
+      [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
+      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+      grace=$(fm_pending_reply_get "$rec" grace_secs)
+      case "$delivered:$grace:$now" in
+        *[!0-9:]*|:*|*::*|*:) continue ;;
+      esac
+      [ "$((now - delivered))" -ge "$grace" ] || continue
+      printf 'owner-fanout\tpending:%s\n' "$corr"
+      if fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id"; then
+        printf 'remote-recovery\t%s\n' "$corr"
+      fi
+    done
+  done <<EOF
+$inventory
+EOF
 fi
 after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 [ "$after" = "$generation" ] || exit 1
@@ -293,6 +317,7 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     owner_fanouts = set()
     active_owners = set()
     windows = set()
+    registered_checks = set()
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
         if not separator or not value:
@@ -311,30 +336,31 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
             owner_fanouts.add(value)
         elif kind == 'active-owner':
             active_owners.add(value)
+        elif kind == 'registered-check':
+            registered_checks.add(value)
         if kind == 'budget-window' and separator and value:
             windows.add(value)
     if not generation:
         return None
     return (generation, signal_tasks, len(remote_recoveries), len(windows),
-            len(active_owners), len(owner_fanouts))
+            len(active_owners), len(owner_fanouts), len(registered_checks))
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
                           probe_deadline=None):
-    names = os.listdir('.')
     try:
         check_age = int(time.time()) - int(os.path.getmtime('.last-check'))
     except OSError:
         check_age = 999999
     due_checks = 0
-    if check_age >= check_interval:
-        due_checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
     global admission_registry_generation
     work = admission_cycle_work(probe_deadline)
     if work is None:
         return cycle_limit + 1, check_limit or 1, 0
     (admission_registry_generation, signal_tasks, remote_recoveries, budget_windows,
-     active_owners, owner_fanouts) = work
+     active_owners, owner_fanouts, registered_checks) = work
+    if check_age >= check_interval:
+        due_checks = registered_checks
     if budget_deadline is not None:
         cycle_budget = max(0, math.floor(
             budget_deadline - time.monotonic() - startup_phase_allowance - checkpoint -
@@ -455,6 +481,7 @@ def bounded_watcher_capability_content(check_limit):
         ('checks-per-cycle', check_limit),
         ('check-timeout', check_timeout),
         ('check-kill-grace', check_kill_grace),
+        ('check-reap-allowance', check_reap_allowance),
         ('check-interval', check_interval),
         ('poll', watcher_cadence),
         ('signal-grace', signal_grace),
@@ -464,10 +491,10 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('inventory', 'active-registry-v5'),
-        ('check-batch-handoff', 'resume-owner-cycle-v4'),
+        ('inventory', 'active-registry-v6'),
+        ('check-batch-handoff', 'resume-owner-cycle-v5'),
     )
-    return 'fm-codex-bounded.v9\t' + '\t'.join(
+    return 'fm-codex-bounded.v10\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
@@ -520,7 +547,7 @@ def request_watcher_check_batch(batch_lease, sequence, token, owner_pid,
                                 owner_identity, session_pid, session_identity,
                                 resume_deadline, resume_cycle_timeout,
                                 registry_generation):
-    value = (f'fm-codex-check-batch.v4\t{batch_lease}\t{sequence}\t{token}\t'
+    value = (f'fm-codex-check-batch.v5\t{batch_lease}\t{sequence}\t{token}\t'
              f'{owner_pid}\t{owner_identity}\t{session_pid}\t{session_identity}\t'
              f'{resume_deadline}\t{resume_cycle_timeout}\t{registry_generation}\n').encode('ascii')
     path = '.watch.lock/codex-check-batch-resume'
@@ -558,7 +585,8 @@ def check_batch_authorization(path, batch_lease, token):
         if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
             return False
         fields = os.read(fd, 1025).decode('ascii').rstrip('\n').split('\t')
-        return (len(fields) == 11 and fields[0] == 'fm-codex-check-batch.v4' and
+        return (len(fields) == 11 and fields[0] in ('fm-codex-check-batch.v4',
+                                                     'fm-codex-check-batch.v5') and
                 fields[1] == batch_lease and fields[3] == token)
     except FileNotFoundError:
         return None
@@ -699,6 +727,59 @@ def read_record():
         return {}
 
 
+def normalized_failure_reason(reason):
+    return ' '.join(reason.split()).lower()
+
+
+def failure_episode(reason, registry_generation):
+    normalized = normalized_failure_reason(reason)
+    if (not registry_generation or
+            (normalized != normalized_failure_reason(budget_reason) and
+             not normalized.startswith('watcher failed;'))):
+        return None
+    return dict(protocol='fm-codex-stop-failure.v1', session_id=session_id,
+                session_pid=session_pid, session_identity=session_identity,
+                registry_generation=registry_generation, reason=normalized)
+
+
+def failure_episode_seen(expected):
+    if expected is None:
+        return False
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(FAILURE_EPISODE, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                return False
+            current = json.loads(os.read(fd, 4097).decode('utf-8'))
+        finally:
+            os.close(fd)
+        return current == expected
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def write_failure_episode(value):
+    fd, tmp = tempfile.mkstemp(prefix='.codex-stop-failure-episode.')
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(value, stream, sort_keys=True)
+            stream.write('\n')
+        os.replace(tmp, FAILURE_EPISODE)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def clear_failure_episode():
+    try:
+        os.unlink(FAILURE_EPISODE)
+    except FileNotFoundError:
+        pass
+
+
 def send(conn, value):
     conn.sendall((json.dumps(value) + '\n').encode())
 
@@ -760,7 +841,7 @@ def owner(lock):
     check_batch_limit = 1
     active_cycle_limit = cycle_limit
     transport_deadline = None
-    resume_deadline_epoch = None
+    resume_deadline_ns = None
     resume_cycle_timeout = None
     leased_registry_generation = None
     arm_budget_failure = False
@@ -769,6 +850,7 @@ def owner(lock):
     generation_changed = False
     expected_batch_sequence = None
     resume_authorization = None
+    pending_failure_episode = None
 
     def remaining_cycle_limit(now):
         if phase == 'starting':
@@ -790,8 +872,8 @@ def owner(lock):
         record = dict(token=token, owner=os.getpid(), owner_identity=owner_identity,
                       session_pid=session_pid, session_identity=session_identity,
                       session_id=session_id, phase=phase, deadline=time.time() + seconds)
-        if resume_deadline_epoch is not None:
-            record['resume_deadline'] = resume_deadline_epoch
+        if resume_deadline_ns is not None:
+            record['resume_deadline_ns'] = resume_deadline_ns
         if resume_cycle_timeout is not None:
             record['resume_cycle_timeout'] = resume_cycle_timeout
         if leased_registry_generation is not None:
@@ -816,19 +898,70 @@ def owner(lock):
             if completed:
                 resume_authorization = None
         if arm is not None:
+            arm_status = arm.poll()
+            cleanup_allowance = (arm_running_cleanup_allowance
+                                 if arm_status is None else arm_cleanup_allowance)
             if (cleanup_deadline is not None and
-                    time.monotonic() + arm_cleanup_allowance > cleanup_deadline):
+                    time.monotonic() + cleanup_allowance > cleanup_deadline):
                 completed = False
-            elif arm.poll() is None:
-                arm.terminate()
+            elif arm_status is None:
                 try:
-                    arm.wait(timeout=3)
+                    # A watcher publishes its durable wake before its final
+                    # batch checkpoint and output line. Give that already-
+                    # finishing path a bounded chance to exit naturally so
+                    # cancellation cannot strand a completed sweep cursor.
+                    arm.wait(timeout=arm_natural_exit_allowance)
                 except subprocess.TimeoutExpired:
                     try:
-                        os.killpg(arm.pid, signal.SIGKILL)
+                        # The arm owns a fresh session/process group. Signal the
+                        # complete group: during pre-lock startup fm-watch may be
+                        # blocked in a migration child and terminating only the
+                        # arm can orphan that child after the watcher exits.
+                        os.killpg(arm.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
-                    arm.wait(timeout=1)
+                    except PermissionError:
+                        completed = False
+                    term_expires = time.monotonic() + 3 - arm_natural_exit_allowance
+                    while completed and time.monotonic() < term_expires:
+                        arm.poll()
+                        try:
+                            os.killpg(arm.pid, 0)
+                        except ProcessLookupError:
+                            break
+                        except PermissionError:
+                            completed = False
+                            break
+                        time.sleep(0.05)
+                    if completed:
+                        try:
+                            os.killpg(arm.pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        except PermissionError:
+                            completed = False
+                        else:
+                            try:
+                                os.killpg(arm.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            except PermissionError:
+                                completed = False
+                            kill_expires = time.monotonic() + 1
+                            while completed and time.monotonic() < kill_expires:
+                                arm.poll()
+                                try:
+                                    os.killpg(arm.pid, 0)
+                                except ProcessLookupError:
+                                    break
+                                except PermissionError:
+                                    completed = False
+                                    break
+                                time.sleep(0.05)
+                            else:
+                                if completed:
+                                    completed = False
+                    arm.poll()
                 time.monotonic()
             else:
                 proof = watcher_proof
@@ -960,6 +1093,7 @@ def owner(lock):
 
     def finish(reason):
         nonlocal acknowledged, terminal_delivered, terminal_cleanup_complete, generation_changed
+        nonlocal pending_failure_episode
         if (transport_deadline is not None and
                 time.monotonic() + terminal_reserve > transport_deadline):
             reason = budget_reason
@@ -977,11 +1111,30 @@ def owner(lock):
             return False
         if current is None:
             reason = budget_reason
+        episode = failure_episode(
+            reason, leased_registry_generation or admission_registry_generation)
+        if terminal_cleanup_complete and failure_episode_seen(episode):
+            send(active, dict(rc=0, reason='', token=token))
+            terminal_delivered = True
+            return False
+        pending_failure_episode = episode
         publish('delivering', 5)
         acknowledged = False
         send(active, dict(rc=2, reason=reason, token=token))
         terminal_delivered = True
         return True
+
+    def finish_idle():
+        nonlocal terminal_delivered, terminal_cleanup_complete
+        cleanup_deadline = (transport_deadline - identity_allowance - protocol_reserve
+                            if transport_deadline is not None else None)
+        terminal_cleanup_complete = cancel_arm(cleanup_deadline) and arm is None
+        if not terminal_cleanup_complete:
+            return finish(budget_reason)
+        clear_failure_episode()
+        send(active, dict(rc=0, reason='', token=token))
+        terminal_delivered = True
+        return False
 
     def stop_signal(_signum, _frame):
         raise InterruptedError('owner interrupted')
@@ -1051,6 +1204,9 @@ def owner(lock):
                         generation_changed = True
                         send(conn, dict(committed=False, token=token))
                         return
+                    if pending_failure_episode is not None:
+                        write_failure_episode(pending_failure_episode)
+                        pending_failure_episode = None
                     publish('handling', handling_grace)
                     send(conn, dict(committed=True, token=token))
                     acknowledged = True
@@ -1072,17 +1228,19 @@ def owner(lock):
                         acknowledged = False
                         terminal_cleanup_complete = False
                         transport_deadline = time.monotonic() + transport_timeout
-                        resume_deadline_epoch = math.floor(
-                            time.time() + transport_timeout - terminal_reserve)
+                        # One monotonic absolute lease is shared by admission,
+                        # execution, cancellation, and reap.  Re-publishing a
+                        # phase or resuming another batch never extends it.
+                        resume_deadline_ns = time.monotonic_ns() + int(
+                            (transport_timeout - terminal_reserve) * 1_000_000_000)
                         publish('preflighting', max(0, transport_deadline - time.monotonic()))
                         arm_budget_failure = False
                         if queued():
                             if not finish('durable wake pending'):
                                 return
                         elif not needed():
-                            send(conn, dict(rc=0, reason='', token=token))
-                            terminal_delivered = True
-                            return
+                            if not finish_idle():
+                                return
                         else:
                             cycle_timeout, check_batch_limit, active_cycle_limit = watcher_cycle_timeout(
                                 budget_deadline=transport_deadline,
@@ -1091,8 +1249,23 @@ def owner(lock):
                             leased_registry_generation = admission_registry_generation
                             resume_cycle_timeout = cycle_timeout
                             if cycle_timeout > active_cycle_limit:
-                                if not finish(budget_reason):
-                                    return
+                                # The admission snapshot can turn over after
+                                # the first need probe. Re-prove work before
+                                # converting that invalidated scan into a budget
+                                # refusal; probe uncertainty remains fail-closed.
+                                if queued():
+                                    if not finish('durable wake pending'):
+                                        return
+                                else:
+                                    supervision_needed = needed(
+                                        transport_deadline - terminal_reserve)
+                                    if not supervision_needed and not queued():
+                                        if not finish_idle():
+                                            return
+                                    refusal_reason = ('durable wake pending' if queued()
+                                                      else budget_reason)
+                                    if not finish(refusal_reason):
+                                        return
                             else:
                                 arm_environment = os.environ.copy()
                                 arm_environment['FM_GUARD_GRACE'] = str(cycle_limit)
@@ -1101,6 +1274,7 @@ def owner(lock):
                                 arm_environment['FM_CODEX_CHECK_BATCH_LEASE'] = token
                                 arm_environment['FM_CHECK_TIMEOUT'] = str(check_timeout)
                                 arm_environment['FM_CHECK_KILL_GRACE'] = str(check_kill_grace)
+                                arm_environment['FM_CHECK_REAP_ALLOWANCE'] = str(check_reap_allowance)
                                 arm_environment['FM_CHECK_INTERVAL'] = str(check_interval)
                                 arm_environment['FM_POLL'] = capability_number(watcher_cadence)
                                 arm_environment['FM_SIGNAL_GRACE'] = capability_number(signal_grace)
@@ -1111,6 +1285,7 @@ def owner(lock):
                                 arm_environment['FM_CODEX_ADMISSION_GUARD_GRACE'] = str(watcher_guard_grace)
                                 arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
                                 arm_environment['FM_CODEX_REGISTRY_GENERATION'] = leased_registry_generation
+                                arm_environment['FM_CODEX_LEASE_DEADLINE_NS'] = str(resume_deadline_ns)
                                 output = tempfile.TemporaryFile()
                                 arm_started_at = time.monotonic()
                                 arm = subprocess.Popen(['bash', scripts + '/fm-watch-arm.sh'], stdin=subprocess.DEVNULL,
@@ -1146,6 +1321,7 @@ def owner(lock):
                         if not probe_budget_failure:
                             return
                     elif current is False:
+                        generation_changed = True
                         return
                 if not probe_budget_failure:
                     supervision_needed = needed(
@@ -1154,6 +1330,17 @@ def owner(lock):
                 next_probe = now + 1
             if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
+                if output is not None:
+                    text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
+                    if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat')) for line in text.splitlines()):
+                        reason = 'watcher delivered an actionable wake'
+                # A completed need probe is authoritative even when it lands at
+                # the reserve boundary: there is no next cycle to admit or
+                # supervise. Probe uncertainty remains fail-closed below.
+                if (not reason and probe_due and not probe_budget_failure and
+                        not supervision_needed):
+                    if not finish_idle():
+                        return
                 if not reason and (arm_budget_failure or probe_budget_failure or
                                    now >= transport_deadline - terminal_reserve):
                     reason = budget_reason
@@ -1175,16 +1362,22 @@ def owner(lock):
                             publish('confirming', cycle_timeout, confirmation_started_at)
                         else:
                             publish(phase, max(0, deadline - time.monotonic()))
-                if output is not None:
-                    text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
-                    if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat')) for line in text.splitlines()):
-                        reason = 'watcher delivered an actionable wake'
-                if not reason and probe_due and not supervision_needed:
-                    send(active, dict(rc=0, reason='', token=token))
-                    terminal_delivered = True
-                    return
-                if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
-                    reason = 'watcher failed; inspect its startup and ownership before continuing'
+                if not reason and arm is not None:
+                    arm_status = arm.poll()
+                    if arm_status is not None:
+                        # Reap/observe a completed launcher before classifying
+                        # it. A short-lived watcher can append its durable wake,
+                        # exit, and flush the arm output between this loop's
+                        # first output read and poll().
+                        if arm_status is not None and output is not None:
+                            arm.wait(timeout=0)
+                            text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
+                            if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat'))
+                                   for line in text.splitlines()):
+                                reason = 'watcher delivered an actionable wake'
+                        if not reason:
+                            reason = ('durable wake pending' if queued() else
+                                      'watcher failed; inspect its startup and ownership before continuing')
                 if not reason and phase == 'starting' and probe_due:
                     proof = watcher_snapshot(cycle_timeout, check_batch_limit,
                                              transport_deadline - terminal_reserve)
@@ -1201,7 +1394,7 @@ def owner(lock):
                                 if not request_watcher_check_batch(
                                         proof[3], expected_batch_sequence, token,
                                         os.getpid(), owner_identity, session_pid,
-                                        session_identity, resume_deadline_epoch,
+                                        session_identity, resume_deadline_ns,
                                         resume_cycle_timeout, leased_registry_generation):
                                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                                 else:
@@ -1275,6 +1468,48 @@ def owner(lock):
                             reason = 'watcher failed; inspect its startup and ownership before continuing'
                     elif now >= deadline:
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
+                if reason == 'watcher failed; inspect its startup and ownership before continuing':
+                    # A watcher commits its queue row before releasing the
+                    # identity-bound lock. Re-check after every proof/failure
+                    # branch so a lock-disappearance observation cannot outrun
+                    # the already-committed wake seen earlier in this loop.
+                    if queued():
+                        reason = 'durable wake pending'
+                    elif output is not None:
+                        text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
+                        if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat'))
+                               for line in text.splitlines()):
+                            reason = 'watcher delivered an actionable wake'
+                if (reason == budget_reason and not arm_budget_failure and
+                        not probe_budget_failure):
+                    # A registry turnover can invalidate the admission scan
+                    # after this iteration's earlier need probe. Re-prove live
+                    # work immediately before a budget refusal, while time is
+                    # still bounded by the terminal reserve. Durable/actionable
+                    # wakes win on both sides of the probe; an unavailable probe
+                    # remains fail-closed because needed() returns True.
+                    if queued():
+                        reason = 'durable wake pending'
+                    elif output is not None:
+                        text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
+                        if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat'))
+                               for line in text.splitlines()):
+                            reason = 'watcher delivered an actionable wake'
+                    if reason == budget_reason:
+                        supervision_needed = needed(transport_deadline - terminal_reserve)
+                        now = time.monotonic()
+                        if not supervision_needed:
+                            if queued():
+                                reason = 'durable wake pending'
+                            elif output is not None:
+                                text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
+                                if any(line.startswith(
+                                        ('signal:', 'stale:', 'check:', 'heartbeat'))
+                                       for line in text.splitlines()):
+                                    reason = 'watcher delivered an actionable wake'
+                            if reason == budget_reason:
+                                if not finish_idle():
+                                    return
                 if reason and not finish(reason):
                     return
             elif now >= deadline:
@@ -1295,7 +1530,7 @@ def owner(lock):
                 transport_deadline - protocol_reserve if transport_deadline is not None else None)
             time.monotonic()
             try:
-                if final_generation is False:
+                if final_generation is False and terminal_cleanup_complete:
                     send(active, dict(rc=0, reason='', token=token))
                 else:
                     send(active, dict(rc=2, reason=budget_reason, token=token))
@@ -1340,14 +1575,13 @@ if mode == 'healthy':
 
 # Every invocation may propose an owner, but only the kernel lock winner runs.
 # Losers never mutate shared state. No PID-based stale lock reclamation exists.
-try:
-    if not launcher_current():
-        sys.exit(0)
-    child = os.fork()
-except OSError:
-    print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
-    sys.exit(2)
-if child == 0:
+def propose_owner():
+    try:
+        child = os.fork()
+    except OSError:
+        return False
+    if child != 0:
+        return True
     try:
         os.setsid()
         null = os.open(os.devnull, os.O_RDWR)
@@ -1365,9 +1599,17 @@ if child == 0:
         pass
     os._exit(0)
 
+
+if not launcher_current():
+    sys.exit(0)
+if not propose_owner():
+    print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
+    sys.exit(2)
+
 conn = None
 commit_pending = False
 specific_refusal = False
+retiring_prior_owner = False
 
 def interrupted(_signum, _frame):
     if conn is not None:
@@ -1380,16 +1622,23 @@ try:
     for attempt in range(30):
         if not launcher_current():
             sys.exit(0)
+        if retiring_prior_owner:
+            propose_owner()
         try:
             conn, record = connect()
+            if (record.get('session_pid'), record.get('session_identity')) != (
+                    session_pid, session_identity):
+                conn.close()
+                conn = None
+                retiring_prior_owner = True
+                time.sleep(0.1)
+                continue
             break
         except OSError:
             time.sleep(0.1)
     if conn is None:
         raise OSError('owner unavailable')
     with conn:
-        if (record.get('session_pid'), record.get('session_identity')) != (session_pid, session_identity):
-            raise OSError('prior session owner still active')
         send(conn, dict(op='stop', token=record['token'], session_pid=session_pid,
                         session_identity=session_identity, session_id=session_id))
         response = receive(conn, transport_timeout)

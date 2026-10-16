@@ -483,13 +483,15 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
-FM_WATCH_ARM_OWNER_PID=${BASHPID:-$$}
-FM_WATCH_ARM_OWNER_IDENTITY=$(fm_pid_identity "$FM_WATCH_ARM_OWNER_PID" 2>/dev/null || true)
-export FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
 case "${FM_CODEX_CHECK_BATCH_LEASE:-}" in
-  ''|*[!A-Za-z0-9._-]*) ;;
+  ''|*[!A-Za-z0-9._-]*)
+    unset FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
+    ;;
   *)
+    FM_WATCH_ARM_OWNER_PID=${BASHPID:-$$}
+    FM_WATCH_ARM_OWNER_IDENTITY=$(fm_pid_identity "$FM_WATCH_ARM_OWNER_PID" 2>/dev/null || true)
     [ -n "$FM_WATCH_ARM_OWNER_IDENTITY" ] || exit 1
+    export FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
     arm_owner_record="$STATE/.codex-arm-owner"
     ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
         "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \

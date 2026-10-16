@@ -17,6 +17,10 @@
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
 
+_FM_PR_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-check-lib.sh
+. "$_FM_PR_LIB_DIR/fm-check-lib.sh"
+
 FM_PR_PROVIDER=
 FM_PR_URL=
 FM_PR_HOST=
@@ -446,6 +450,9 @@ fm_pr_poll_revoke_final() {
   [ ! -e "$FM_PR_POLL_CHECK_DEST" ] && [ ! -L "$FM_PR_POLL_CHECK_DEST" ] || failed=1
   [ ! -e "$FM_PR_POLL_REG_DEST" ] && [ ! -L "$FM_PR_POLL_REG_DEST" ] || failed=1
   [ ! -e "$FM_PR_POLL_DATA_DEST" ] && [ ! -L "$FM_PR_POLL_DATA_DEST" ] || failed=1
+  if [ -n "$FM_PR_POLL_CHECK_DEST" ] && [ -n "$FM_PR_POLL_EXPECT_ID" ]; then
+    fm_check_index_remove "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID" || failed=1
+  fi
   return "$failed"
 }
 
@@ -574,6 +581,10 @@ fm_pr_poll_publish_prepared() {
   fi
   FM_PR_POLL_CHECK_TMP=
   if ! fm_pr_poll_artifacts_valid "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID" "$FM_PR_POLL_TEMPLATE"; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
+  if ! fm_check_index_register "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID"; then
     fm_pr_poll_revoke_final || true
     return 1
   fi
@@ -921,6 +932,7 @@ fm_pr_poll_retirement_recover_one() {
   fi
   fm_pr_poll_retirement_remove_exact "$receipt" "$state_device" \
     "$receipt_identity" "$receipt_hash" || return 1
+  fm_check_index_remove "$state" "$id" || return 1
   [ ! -e "$check" ] && [ ! -L "$check" ] \
     && [ ! -e "$registration" ] && [ ! -L "$registration" ] \
     && [ ! -e "$data" ] && [ ! -L "$data" ] \

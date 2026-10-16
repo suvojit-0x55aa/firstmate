@@ -14,6 +14,7 @@ When this session owns supervision and away mode is not active:
 
 `bin/fm-codex-stop.sh` owns the bounded continuation, cancellation and successor contract.
 Its local owner answers live health challenges; stale records alone cannot certify supervision.
+When a current Stop arrives while the previous session owner is retiring, it retries the ordinary kernel-lock handoff within the existing bounded publication window; it never inherits, steals, or kills the previous owner's lease.
 Its cycle admission charges bounded crew-state and worktree reads only for recorded workers that are not authoritatively dead, while still charging unseen signals, due remote reply recovery and the fixed safety reserves.
 Admission and the bounded watcher classify recorded endpoints from one backend-scope inventory per cycle, treating any unavailable bulk proof conservatively.
 Retained metadata for a worker whose verified backend reports `dead` or `missing` therefore cannot consume the deadline as if that worker could repeatedly reach the watcher's expensive downstream classification paths; an ambiguous result or a backend without a verified agent-state classifier remains fully charged.

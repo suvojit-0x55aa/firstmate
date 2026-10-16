@@ -568,7 +568,31 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  tmp="$STATE/.$id.meta.remote-launch.${BASHPID:-$$}"
+  {
+    echo "window=remote:$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$home"
+    echo "project=$root"
+    echo "harness=$harness"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "tasktmp="
+    echo "model=${model#-}"
+    echo "effort=${effort#-}"
+    echo "home=$home"
+    echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
+    echo "remote_host=$host"
+    echo "remote_root=$root"
+    echo "remote_backend=herdr"
+    echo "remote_herdr_session=fm-remote"
+    echo "remote_target=unknown"
+    echo "spawn_gen=$SPAWN_GEN"
+    [ -z "$remote_traceparent" ] || echo "traceparent=$remote_traceparent"
+  } > "$tmp" || return 1
   if ! fm_supervision_registry_reserve "$STATE" "$id" "$SPAWN_GEN"; then
+    rm -f -- "$tmp"
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -577,7 +601,8 @@ spawn_remote_secondmate() {
   fi
   SPAWN_REGISTRY_RESERVED=1
   if ! fm_supervision_registry_mark_reservation \
-      "$STATE" "$id" "$SPAWN_GEN" remote-unknown remote "remote:$id" "$host"; then
+      "$STATE" "$id" "$SPAWN_GEN" remote-unknown remote "remote:$id" "$host" "$tmp"; then
+    rm -f -- "$tmp"
     fm_supervision_registry_cancel_reservation "$STATE" "$id" "$SPAWN_GEN" || true
     SPAWN_REGISTRY_RESERVED=0
     fm_lock_release "$remote_lock" || true
@@ -586,6 +611,7 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id supervision launch phase could not be published" >&2
     return 1
   fi
+  rm -f -- "$tmp"
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -632,14 +658,6 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  if ! fm_supervision_registry_mark_reservation \
-      "$STATE" "$id" "$SPAWN_GEN" created remote-herdr "$remote_target" "$host"; then
-    fm_lock_release "$remote_lock" || true
-    fm_lock_release "$registry_lock" || true
-    fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote secondmate $id exact supervision endpoint could not be published" >&2
-    return 1
-  fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
   # guarantee that the recorded carrier is the identity the child received even
@@ -671,7 +689,23 @@ spawn_remote_secondmate() {
     echo "spawn_gen=$SPAWN_GEN"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
-  mv -f -- "$tmp" "$meta"
+  if ! fm_supervision_registry_mark_reservation \
+      "$STATE" "$id" "$SPAWN_GEN" created remote-herdr "$remote_target" "$host" "$tmp"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id exact supervision endpoint could not be published" >&2
+    return 1
+  fi
+  if ! spawn_publish_meta_file "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id metadata could not be published" >&2
+    return 1
+  fi
   fm_supervision_registry_prepare "$STATE" "$id" "$meta" || {
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -729,6 +763,26 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
+# Publish one fully validated metadata image at its exact pathname. Plain
+# `mv source target` treats an existing target directory as a container and
+# silently moves source underneath it, which can turn a deliberate metadata
+# publication failure into a later failure after endpoint cleanup authority
+# has already been released. Lifecycle locks serialize Firstmate writers; the
+# type checks make non-regular/symlink targets fail closed at this boundary.
+spawn_publish_meta_file() {  # <source> <target>
+  local source=$1 target=$2
+  if [ -d "$target" ]; then
+    echo "$target: Is a directory" >&2
+    return 1
+  fi
+  if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then
+    echo "error: refusing to replace non-regular metadata target $target" >&2
+    return 1
+  fi
+  mv -f -- "$source" "$target" || return 1
+  [ -f "$target" ] && [ ! -L "$target" ]
+}
+
 parse_orca_worktree_result() {
   local raw=$1 rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
@@ -751,7 +805,7 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ]; then
     SPAWN_REGISTRY_RESERVED=0
     if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" != "$SPAWN_GEN" ]; then
-      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" reserved || true
+      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" any || true
     fi
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -807,6 +861,7 @@ spawn_abort_cleanup() {
         if [ -d "$STATE" ]; then
           {
             echo "window=$W"
+            echo "endpoint_task_id=$ID"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
@@ -819,6 +874,7 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            echo "spawn_gen=$SPAWN_GEN"
           } > "$STATE/$ID.meta" 2>/dev/null || true
         fi
       fi
@@ -949,7 +1005,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+SPAWN_GEN=
 # Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
@@ -1007,6 +1063,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
 fi
+SPAWN_GEN=$(fm_supervision_registry_allocate_incarnation "$STATE" "$ID") || {
+  echo "error: could not allocate a unique supervision incarnation for task $ID" >&2
+  exit 1
+}
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
     exit 0
@@ -2237,12 +2297,6 @@ EOF
 esac
 fi
 if [ "$RELAUNCH" -ne 1 ]; then
-  SPAWN_RESERVATION_MARKED=1
-  if ! fm_supervision_registry_mark_reservation \
-      "$STATE" "$ID" "$SPAWN_GEN" created "$BACKEND" \
-      "$SPAWN_RESERVATION_TARGET" "$SPAWN_RESERVATION_DETAIL"; then
-    SPAWN_RESERVATION_MARKED=0
-  fi
   SPAWN_PROVISIONAL_META="$STATE/.$ID.meta.launch.${BASHPID:-$$}"
   SPAWN_PROVISIONAL_WINDOW=$T
   [ "$BACKEND" = orca ] && SPAWN_PROVISIONAL_WINDOW=$W
@@ -2281,7 +2335,16 @@ if [ "$RELAUNCH" -ne 1 ]; then
       echo "projects=$SECONDMATE_PROJECTS"
     fi
   } > "$SPAWN_PROVISIONAL_META"
-  mv -f -- "$SPAWN_PROVISIONAL_META" "$STATE/$ID.meta"
+  SPAWN_RESERVATION_MARKED=1
+  if ! fm_supervision_registry_mark_reservation \
+      "$STATE" "$ID" "$SPAWN_GEN" created "$BACKEND" \
+      "$SPAWN_RESERVATION_TARGET" "$SPAWN_RESERVATION_DETAIL" "$SPAWN_PROVISIONAL_META"; then
+    SPAWN_RESERVATION_MARKED=0
+  fi
+  if ! spawn_publish_meta_file "$SPAWN_PROVISIONAL_META" "$STATE/$ID.meta"; then
+    rm -f -- "$SPAWN_PROVISIONAL_META"
+    exit 1
+  fi
   if [ "$SPAWN_RESERVATION_MARKED" -ne 1 ]; then
     echo "error: $ID exact supervision endpoint could not be published" >&2
     exit 1
@@ -2886,7 +2949,7 @@ preserve_relaunch_meta() {
 } > "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
-  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  spawn_publish_meta_file "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
