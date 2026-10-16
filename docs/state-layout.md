@@ -92,7 +92,7 @@ state/               runtime records and signals; gitignored
   .<id>.open-decisions-cursor  per-task byte cursor and folded open-decision set bounding the OPEN DECISIONS scan's cost to new status-log appends; written only by fm-classify-lib.sh's status_open_decisions_incremental, removed by teardown, safe to delete (forces one full re-fold)
   .status-presentation-cursor .status-presentation-lock  fleet-wide per-task status identity/byte-offset manifest and serialization lock preventing already-presented status lines from being replayed as new; owned by fm-classify-lib.sh, with each task's row retired by teardown
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
-  .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
+  .watch.lock .wake-queue.lock watcher singleton and queue serialization locks; a live watcher's codex-bounded-capability child binds its current bounded Codex check limit to that lock owner
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
   .codex-stop.owner-lock  stable kernel-flock inode for the sole Codex Stop continuation owner; never remove or replace
   .codex-stop.json .codex-stop.sock  transient live-owner lease record and private local transport socket; existence alone is not health evidence, and the owner normally removes both on stand-down; never touch

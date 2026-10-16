@@ -363,8 +363,8 @@ window_key() {  # <window>
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
-inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc
+inbox_steer_check() {  # <window> <task> [target-state]
+  local w=$1 task=$2 target_state=${3:-unknown} action verb rec count tail40 reason ring_rc
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -376,14 +376,19 @@ inbox_steer_check() {  # <window> <task>
       rec=${rec% *}
       ;;
   esac
-  tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-  if window_is_busy "$w" "$tail40"; then
-    return 0
+  if [ "$target_state" != dead ]; then
+    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
+    if window_is_busy "$w" "$tail40"; then
+      return 0
+    fi
   fi
   case "$verb" in
     ring)
-      ring_rc=0
-      fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      ring_rc=dead
+      if [ "$target_state" != dead ]; then
+        ring_rc=0
+        fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
@@ -813,7 +818,7 @@ surface_nonterminal_stale() {  # <window> <hash>
 }
 
 handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <window-key>
-  local win=$1 task=$2 kind=$3 last=$4 key=$5 marker=authoritatively-dead sf
+  local win=$1 task=$2 kind=$3 last=$4 key=$5 marker=authoritatively-dead sf previous tail40 current_hash
   if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
     return 0
   fi
@@ -822,7 +827,24 @@ handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <
     return 0
   fi
   sf="$STATE/.stale-$key"
-  [ "$(cat "$sf" 2>/dev/null || true)" != "$marker" ] || return 0
+  previous=$(cat "$sf" 2>/dev/null || true)
+  [ "$previous" != "$marker" ] || return 0
+  if [ "${#previous}" -eq 32 ]; then
+    case "$previous" in
+      *[!0-9a-fA-F]*) ;;
+      *)
+        if tail40=$(fm_backend_capture "$(window_backend "$win")" "$win" 40 "$(window_label "$win")" 2>/dev/null); then
+          current_hash=$(printf '%s' "$tail40" | hash_pane)
+          if [ "$current_hash" = "$previous" ]; then
+            printf '%s' "$marker" > "$sf"
+            rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+            clear_write_tracking "$key"
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  fi
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$marker" > "$sf"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -1188,6 +1210,18 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+capability_tmp="$WATCH_LOCK/.codex-bounded-capability.$WATCHER_PID"
+if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
+  capability_value=$(printf 'fm-codex-bounded.v1\t%s\n' "$CHECKS_PER_CYCLE")
+else
+  capability_value=$(printf 'fm-watch.v1\tunbounded\n')
+fi
+if ! ( umask 077; printf '%s\n' "$capability_value" > "$capability_tmp" ) \
+  || ! mv -f "$capability_tmp" "$WATCH_LOCK/codex-bounded-capability"; then
+  rm -f "$capability_tmp" 2>/dev/null || true
+  echo "watcher: bounded capability could not be published" >&2
+  exit 1
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -1471,6 +1505,7 @@ EOF
       agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null || printf unreadable)
       case "$agent_state" in
         dead)
+          [ -z "$task" ] || inbox_steer_check "$w" "$task" dead
           handle_authoritatively_dead_target "$w" "$task" "$kind" "$last" "$key"
           continue
           ;;

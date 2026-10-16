@@ -82,6 +82,7 @@ try:
     import selectors
     import signal
     import socket
+    import stat
     import subprocess
     import tempfile
     import time
@@ -364,11 +365,34 @@ def watcher_beat():
         return 0
 
 
-def watcher_snapshot(grace):
+def bounded_watcher_capability(check_limit):
+    fd = None
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open('.watch.lock/codex-bounded-capability', flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 128:
+            return False
+        content = os.read(fd, 129).decode('ascii')
+        prefix = 'fm-codex-bounded.v1\t'
+        if not content.startswith(prefix) or not content.endswith('\n') or content.count('\n') != 1:
+            return False
+        bounded_limit = int(content[len(prefix):-1])
+        return 0 < bounded_limit <= check_limit
+    except (OSError, UnicodeError, ValueError):
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def watcher_snapshot(grace, check_limit):
     result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" "$2" "$FM_HOME" '
                    '&& printf "%s\\t%s\\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"',
                    str(grace))
     if result is None or result.returncode != 0:
+        return None
+    if not bounded_watcher_capability(check_limit):
         return None
     fields = result.stdout.rstrip('\n').split('\t')
     if len(fields) != 2 or not all(fields):
@@ -479,7 +503,7 @@ def owner(lock):
                     os.killpg(arm.pid, signal.SIGKILL)
                     arm.wait(timeout=1)
             else:
-                proof = watcher_proof or watcher_snapshot(cycle_timeout)
+                proof = watcher_proof or watcher_snapshot(cycle_timeout, check_batch_limit)
                 owned_member = False
                 if proof is not None:
                     try:
@@ -657,7 +681,7 @@ def owner(lock):
                 if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'starting' and probe_due:
-                    proof = watcher_snapshot(cycle_timeout)
+                    proof = watcher_snapshot(cycle_timeout, check_batch_limit)
                     if proof is not None:
                         watcher_proof = proof
                         watcher_last_beat = proof[2]
@@ -672,7 +696,7 @@ def owner(lock):
                         watcher_last_beat = beat
                         watcher_last_progress = now
                     if now >= next_watcher_probe:
-                        proof = watcher_snapshot(cycle_timeout)
+                        proof = watcher_snapshot(cycle_timeout, check_batch_limit)
                         if (proof is None or watcher_proof is None or
                                 proof[:2] != watcher_proof[:2] or proof[2] < watcher_last_beat):
                             reason = 'watcher failed; inspect its startup and ownership before continuing'
@@ -682,7 +706,7 @@ def owner(lock):
                     if not reason and now - watcher_last_progress >= cycle_timeout:
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'watching' and now >= deadline:
-                    proof = watcher_snapshot(cycle_timeout)
+                    proof = watcher_snapshot(cycle_timeout, check_batch_limit)
                     if ((arm is not None and identity(arm.pid) != arm_identity) or
                             proof is None or watcher_proof is None or
                             proof[:2] != watcher_proof[:2]):
@@ -693,7 +717,7 @@ def owner(lock):
                 if not reason and phase == 'confirming' and probe_due:
                     beat = watcher_beat()
                     if beat > confirmation_beat:
-                        proof = watcher_snapshot(cycle_timeout)
+                        proof = watcher_snapshot(cycle_timeout, check_batch_limit)
                         if (proof is not None and watcher_proof is not None and
                                 proof[:2] == watcher_proof[:2] and proof[2] > confirmation_beat and
                                 (arm is None or identity(arm.pid) == arm_identity)):
