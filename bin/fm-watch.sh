@@ -835,7 +835,7 @@ handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <
       *)
         if tail40=$(fm_backend_capture "$(window_backend "$win")" "$win" 40 "$(window_label "$win")" 2>/dev/null); then
           current_hash=$(printf '%s' "$tail40" | hash_pane)
-          if [ "$current_hash" = "$previous" ]; then
+          if [ "$current_hash" = "$previous" ] && [ ! -e "$STATE/.stale-since-$key" ]; then
             printf '%s' "$marker" > "$sf"
             rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
             clear_write_tracking "$key"

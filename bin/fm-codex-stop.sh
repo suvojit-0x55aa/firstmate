@@ -273,7 +273,7 @@ done
     return budget_window_cache
 
 
-def watcher_cycle_timeout(check_limit=None):
+def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None):
     names = os.listdir('.')
     try:
         check_age = int(time.time()) - int(os.path.getmtime('.last-check'))
@@ -284,10 +284,15 @@ def watcher_cycle_timeout(check_limit=None):
         due_checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
     work = cycle_work()
     if work is None:
-        return cycle_limit + 1, check_limit or 1
+        return cycle_limit + 1, check_limit or 1, 0
     budget_windows = budget_window_count()
     if budget_windows is None:
-        return cycle_limit + 1, check_limit or 1
+        return cycle_limit + 1, check_limit or 1, 0
+    if budget_deadline is not None:
+        cycle_budget = max(0, math.floor(
+            budget_deadline - time.monotonic() - startup_timeout - checkpoint - protocol_reserve))
+    elif cycle_budget is None:
+        cycle_budget = cycle_limit
     signal_tasks, remote_recoveries = work
     # The watcher attempts a cheap capture for every recorded target, but only
     # a worker not authoritatively dead can repeatedly reach the bounded
@@ -300,10 +305,10 @@ def watcher_cycle_timeout(check_limit=None):
         worktree_write_timeout * budget_windows +
         2 * remote_send_timeout * remote_recoveries + 5)
     if check_limit is None:
-        check_limit = max(1, math.floor((cycle_limit - non_check_components) / check_timeout))
+        check_limit = max(1, math.floor((cycle_budget - non_check_components) / check_timeout))
     checks_this_cycle = min(due_checks, check_limit)
     components = non_check_components + check_timeout * checks_this_cycle
-    return max(watcher_guard_grace, components), check_limit
+    return max(watcher_guard_grace, components), check_limit, cycle_budget
 
 
 def shell(body, *args, timeout=3):
@@ -471,9 +476,13 @@ def owner(lock):
     confirmation_beat = 0
     cycle_timeout = watcher_guard_grace
     check_batch_limit = 1
+    active_cycle_limit = cycle_limit
+    transport_deadline = None
 
-    def publish(next_phase, seconds):
+    def publish(next_phase, seconds, started_at=None):
         nonlocal phase, deadline, published
+        if started_at is not None:
+            seconds = max(0, seconds - (time.monotonic() - started_at))
         phase = next_phase
         deadline = time.monotonic() + seconds
         record = dict(token=token, owner=os.getpid(), owner_identity=owner_identity,
@@ -628,7 +637,8 @@ def owner(lock):
                     else:
                         active = conn
                         acknowledged = False
-                        publish('starting', startup_timeout)
+                        transport_deadline = time.monotonic() + transport_timeout
+                        publish('preflighting', max(0, transport_deadline - time.monotonic()))
                         if queued():
                             if not finish('durable wake pending'):
                                 return
@@ -637,8 +647,9 @@ def owner(lock):
                             return
                         else:
                             invalidate_budget_windows()
-                            cycle_timeout, check_batch_limit = watcher_cycle_timeout()
-                            if cycle_timeout > cycle_limit:
+                            cycle_timeout, check_batch_limit, active_cycle_limit = watcher_cycle_timeout(
+                                budget_deadline=transport_deadline)
+                            if cycle_timeout > active_cycle_limit:
                                 if not finish('watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'):
                                     return
                             else:
@@ -648,9 +659,11 @@ def owner(lock):
                                 arm_environment['FM_CHECKS_PER_CYCLE'] = str(check_batch_limit)
                                 arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
                                 output = tempfile.TemporaryFile()
+                                arm_started_at = time.monotonic()
                                 arm = subprocess.Popen(['bash', scripts + '/fm-watch-arm.sh'], stdin=subprocess.DEVNULL,
                                                        stdout=output, stderr=output, start_new_session=True,
                                                        env=arm_environment)
+                                publish('starting', startup_timeout, arm_started_at)
                                 arm_identity = identity(arm.pid)
             for conn, (_buf, expires) in list(pending.items()):
                 if conn is not active and time.monotonic() >= expires:
@@ -666,8 +679,9 @@ def owner(lock):
             if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
                 if not reason and probe_due:
-                    next_cycle_timeout, _next_check_limit = watcher_cycle_timeout(check_batch_limit)
-                    if next_cycle_timeout > cycle_limit:
+                    next_cycle_timeout, _next_check_limit, _next_cycle_limit = watcher_cycle_timeout(
+                        check_batch_limit, active_cycle_limit)
+                    if next_cycle_timeout > active_cycle_limit:
                         reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'
                     elif next_cycle_timeout > cycle_timeout:
                         cycle_timeout = next_cycle_timeout

@@ -154,6 +154,7 @@ clean_watcher() {
 trap clean_watcher EXIT
 trap 'exit 0' HUP INT TERM
 touch "$FM_HOME/state/.last-watcher-beat"
+printf '%s\n' "${FM_CHECKS_PER_CYCLE:-0}" > "$FM_HOME/controlled-check-limit"
 date +%s > "$FM_HOME/controlled-watcher-ready"
 cycles=0
 while :; do
@@ -472,6 +473,72 @@ test_late_watcher_gets_full_quiet_window() {
   pass 'quiet checkpoint starts after verified watcher readiness'
 }
 
+test_admission_time_preserves_arm_confirmation() {
+  local dir original_root=$TEST_ROOT mode id limit baseline_limit delayed_limit started elapsed
+  for mode in baseline delayed; do
+    dir=$(fixture "admission-$mode")
+    install_controlled_watcher "$dir"
+    : > "$dir/state/task.meta"
+    for id in $(seq 1 600); do
+      printf '%s\n' ':' > "$dir/state/check-$id.check.sh"
+    done
+    if [ "$mode" = delayed ]; then
+      mkdir "$dir/admission-fault"
+      cat > "$dir/admission-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+import time
+
+original_run = subprocess.run
+
+
+def delayed_run(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    marker = os.environ.get('FM_TEST_ADMISSION_MARKER', '')
+    if (marker and isinstance(command, list) and len(command) > 2 and
+            'budget-window' in command[2] and not os.path.exists(marker)):
+        with open(marker, 'x', encoding='utf-8') as stream:
+            stream.write('started\n')
+        time.sleep(float(os.environ.get('FM_TEST_ADMISSION_DELAY', '0')))
+        with open(marker + '.done', 'w', encoding='utf-8') as stream:
+            stream.write('done\n')
+    return original_run(*args, **kwargs)
+
+
+subprocess.run = delayed_run
+PY
+      started=$(date +%s)
+      PYTHONPATH="$dir/admission-fault" FM_TEST_ADMISSION_MARKER="$dir/admission-delay" \
+        FM_TEST_ADMISSION_DELAY=5 FM_TEST_ARM_DELAY=2 FM_ARM_CONFIRM_TIMEOUT=3 \
+        FM_CHECK_TIMEOUT=1 FM_SIGNAL_GRACE=0 TEST_ROOT="$dir" run_stop "$dir" 10
+    else
+      FM_TEST_ARM_DELAY=2 FM_ARM_CONFIRM_TIMEOUT=3 FM_CHECK_TIMEOUT=1 FM_SIGNAL_GRACE=0 \
+        TEST_ROOT="$dir" run_stop "$dir" 10
+    fi
+    TEST_ROOT=$original_root
+    wait_file "$dir/controlled-watcher-ready" 200
+    limit=$(cat "$dir/controlled-check-limit")
+    append_wake "$dir/state" check release "check: release $mode admission fixture"
+    wait_file "$dir/rc" 200
+    [ "$(cat "$dir/rc")" = 2 ] || fail "$mode admission run escaped Stop supervision"
+    assert_contains "$(cat "$dir/out")" 'durable wake pending' "$mode admission run lost its wake"
+    assert_not_contains "$(cat "$dir/out")" 'watcher failed' "$mode admission run shortened arm confirmation"
+    if [ "$mode" = delayed ]; then
+      delayed_limit=$limit
+      elapsed=$(( $(date +%s) - started ))
+      [ -s "$dir/admission-delay.done" ] || fail 'delayed admission did not execute'
+      [ "$elapsed" -lt 20 ] || fail 'delayed admission escaped the bounded Stop window'
+    else
+      baseline_limit=$limit
+    fi
+    assert_no_watcher "$dir"
+    finish "$dir"
+  done
+  [ "$delayed_limit" -lt "$baseline_limit" ] \
+    || fail 'admission time was not debited from the watcher cycle budget'
+  pass 'admission preserves arm confirmation and consumes cycle budget'
+}
+
 test_stalled_watcher_cannot_complete_quiet_window() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture stalled-watcher)
@@ -786,7 +853,10 @@ SH
     run_stop "$dir" 4
   wait_file "$dir/rc" 300
   [ "$(cat "$dir/rc")" = 2 ] || fail 'retained dead endpoint inventory escaped Stop supervision'
-  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'retained dead endpoint inventory lost the required dead-worker notification'
+  case "$(cat "$dir/out")" in
+    *'durable wake pending'*|*'watcher delivered an actionable wake'*) ;;
+    *) fail 'retained dead endpoint inventory lost the required dead-worker notification' ;;
+  esac
   assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'retained dead endpoints reached unbudgeted watcher work'
   assert_not_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'retained dead endpoints recreated the admission refusal'
   grep -F "$(printf '\tstale\tfleet:dead-25\tstale: fleet:dead-25')" "$dir/state/.wake-queue" >/dev/null \
@@ -875,6 +945,40 @@ test_dead_endpoint_migrates_matching_stale_marker() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'matching historical death markers migrate without duplicate wakes'
+}
+
+test_absorbed_dead_endpoint_emits_new_death_notification() {
+  local dir pane_hash
+  dir=$(fixture absorbed-dead-endpoint)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:absorbed-dead' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    > "$dir/state/absorbed-dead.meta"
+  printf '%s\n' 'working: previously absorbed worker' > "$dir/state/absorbed-dead.status"
+  prime_status_seen "$dir/state" "$dir/state/absorbed-dead.status"
+  pane_hash=$(hash_text 'absorbed dead pane')
+  printf '%s' "$pane_hash" > "$dir/state/.stale-fleet_absorbed-dead"
+  date +%s > "$dir/state/.stale-since-fleet_absorbed-dead"
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:absorbed-dead' \
+    FM_TEST_CAPTURE='absorbed dead pane' FM_TEST_CAPTURE_LOG="$dir/capture-calls" \
+    FM_SIGNAL_GRACE=0 run_stop "$dir" 2
+  wait_file "$dir/rc" 250
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'absorbed dead endpoint escaped Stop supervision'
+  case "$(cat "$dir/out")" in
+    *'durable wake pending'*|*'watcher delivered an actionable wake'*) ;;
+    *) fail 'absorbed dead endpoint lost its new death wake' ;;
+  esac
+  grep -F "$(printf '\tstale\tfleet:absorbed-dead\tstale: fleet:absorbed-dead')" \
+    "$dir/state/.wake-queue" >/dev/null \
+    || fail 'absorbed dead endpoint did not retain its death notification'
+  [ "$(cat "$dir/state/.stale-fleet_absorbed-dead")" = authoritatively-dead ] \
+    || fail 'absorbed dead endpoint did not migrate its marker'
+  [ ! -e "$dir/state/.stale-since-fleet_absorbed-dead" ] \
+    || fail 'absorbed dead endpoint retained its obsolete timer'
+  [ "$(wc -l < "$dir/capture-calls")" -eq 1 ] \
+    || fail 'absorbed dead endpoint did not remain on the cheap capture path'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'absorbed dead endpoints emit one new death notification'
 }
 
 test_due_custom_and_pr_checks_remain_bounded() {
@@ -1620,6 +1724,7 @@ test_public_stop_dispatches_pending_queue
 test_quiet_renewal
 test_wedged_arm_cannot_report_quiet_renewal
 test_late_watcher_gets_full_quiet_window
+test_admission_time_preserves_arm_confirmation
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
@@ -1636,6 +1741,7 @@ test_many_dead_endpoints_take_cheap_watcher_path
 test_dead_endpoint_preserves_inbox_escalation
 test_missing_endpoint_preserves_inbox_escalation
 test_dead_endpoint_migrates_matching_stale_marker
+test_absorbed_dead_endpoint_emits_new_death_notification
 test_due_custom_and_pr_checks_remain_bounded
 test_actionable_checks_resume_bounded_sweep
 test_due_remote_recovery_fits_cycle_budget
