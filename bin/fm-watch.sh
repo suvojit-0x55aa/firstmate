@@ -440,6 +440,24 @@ recorded_windows() {
   recorded_window_inventory | cut -f1
 }
 
+recorded_window_inventory_with_agent_state() {
+  if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+    if ! recorded_window_inventory \
+      | while IFS="$(printf '\t')" read -r w task backend kind spawn_gen; do
+          printf '%s\t%s\t%s\t%s\t%s\n' "$backend" "$w" "$task" "$kind" "$spawn_gen"
+        done \
+      | fm_backend_agent_state_batch; then
+      printf '__FM_AGENT_STATE_ERROR__\t-\tunreadable\t-\t-\t-\n'
+    fi
+  else
+    recorded_window_inventory \
+      | while IFS="$(printf '\t')" read -r w task backend kind spawn_gen; do
+          printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$backend" "$w" unverified "$task" "$kind" "$spawn_gen"
+        done
+  fi
+}
+
 # Print the oldest structurally valid row in a local secondmate's foreign queue.
 # This is a read-only observation: the receiving home owns acknowledgement and
 # this parent never changes the row or the foreign queue.
@@ -1610,7 +1628,8 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
-  while IFS=$(printf '\t') read -r w task backend kind spawn_gen; do
+  while IFS=$(printf '\t') read -r backend w agent_state task kind spawn_gen; do
+    [ "$backend" != __FM_AGENT_STATE_ERROR__ ] || exit 1
     key=$(window_key "$w")
     death_owner=$(death_owner_id "$w" "$task" "$backend")
     incarnation=$(death_incarnation "$spawn_gen" "$death_owner")
@@ -1620,7 +1639,6 @@ EOF
       clear_pause_tracking "$key"
     fi
     if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
-      agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || printf unreadable)
       case "$agent_state" in
         dead|missing)
           [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable
@@ -1811,7 +1829,7 @@ EOF
         clear_pause_tracking "$key"
       fi
     fi
-  done < <(recorded_window_inventory)
+  done < <(recorded_window_inventory_with_agent_state)
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

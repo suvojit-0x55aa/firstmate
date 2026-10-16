@@ -262,8 +262,33 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+fm_backend_tmux_agent_inventory_snapshot() {
+  local session=$1 snapshot_dir=$2 windows inventory_status name membership_key
+  mkdir -p "$snapshot_dir/windows" || return 1
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+    inventory_status=ok
+  else
+    case "$windows" in
+      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        inventory_status=missing
+        ;;
+      *) inventory_status=unreadable ;;
+    esac
+  fi
+  printf '%s\n' "$inventory_status" > "$snapshot_dir/status" || return 1
+  [ "$inventory_status" = ok ] || return 0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    membership_key=$(fm_backend_agent_state_cache_key "$name") || return 1
+    : > "$snapshot_dir/windows/$membership_key" || return 1
+  done <<EOF
+$windows
+EOF
+}
+
+fm_backend_tmux_agent_state() {  # <target> [inventory-status] [inventory-directory]
+  local target=$1 snapshot_status=${2:-} snapshot_dir=${3:-}
+  local comm session window windows inventory_status membership_key
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
@@ -272,25 +297,42 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-        printf 'missing'
-        ;;
-      *)
-        printf 'unreadable'
-        ;;
+  if [ -n "$snapshot_status" ]; then
+    case "$snapshot_status" in
+      missing) printf 'missing'; return 0 ;;
+      unreadable) printf 'unreadable'; return 0 ;;
+      ok) ;;
+      *) printf 'unreadable'; return 0 ;;
     esac
-    return 0
-  fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
+    membership_key=$(fm_backend_agent_state_cache_key "$window") || {
+      printf 'unreadable'
+      return 0
+    }
+    if [ ! -e "$snapshot_dir/$membership_key" ]; then
+      printf 'missing'
+      return 0
+    fi
+  else
+    if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+    if [ "$inventory_status" -ne 0 ]; then
+      case "$windows" in
+        *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+          printf 'missing'
+          ;;
+        *)
+          printf 'unreadable'
+          ;;
+      esac
+      return 0
+    fi
+    if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+      printf 'missing'
+      return 0
+    fi
   fi
 
   foreground=$(fm_backend_tmux_foreground_comms "$target")

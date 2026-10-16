@@ -468,7 +468,7 @@ The current continuation procedure is owned by [`../supervision-protocols/codex.
 
 On 2026-10-16, macOS Bash `3.2.57(1)-release` and Python `3.14.7` passed the portable admission regression against the shared backend agent-state dispatcher.
 The motivating primary-home inventory was measured read-only: 92 distinct recorded targets classified as 3 budgeted workers, 79 existing endpoints with no agent, and 10 absent endpoints; the combined existence and agent-state scan completed in 2.529 seconds.
-The current 54-case Codex Stop driver covers 100 historical endpoints, including both absent targets and existing agent-free panes, beside three live endpoints; it also covers linear metadata resolution with duplicate endpoints, collision-free durable spawn-bound death receipts without backend capture, relaunch death before alive observation, ambiguous-attribution busy recovery, exact attached-watcher runtime capability matching including the admission guard, a deliberately oversized two-endpoint live inventory, due authenticated custom and PR checks, unseen signals, due remote reply recovery, watcher ownership and cancellation.
+The current 55-case Codex Stop driver covers 100 historical endpoints, including both absent targets and existing agent-free panes, beside three live endpoints; it also covers one backend inventory per scope and cycle, linear metadata resolution with duplicate endpoints, collision-free durable spawn-bound death receipts without backend capture, relaunch death before alive observation, ambiguous-attribution busy recovery, timed-probe descendant cleanup, exact attached-watcher runtime capability matching including the admission guard, a deliberately oversized two-endpoint live inventory, due authenticated custom and PR checks, unseen signals, due remote reply recovery, watcher ownership and cancellation.
 The unchanged Claude boundary and generated harness instructions also passed their focused suites.
 
 ```sh
@@ -484,6 +484,8 @@ Exact relevant output:
 ```text
 ok - large stale endpoint history does not consume the live cycle budget
 ok - small live endpoint inventories remain conservatively bounded
+ok - admission timeout terminates its probe process group
+ok - retained dead endpoints stay cheap and preserve notification
 ok - exact-dead inventory is linear and explicit receipts suppress duplicates
 ok - absorbed dead endpoints emit one new death notification
 ok - resumed work retires death receipt and wakes once

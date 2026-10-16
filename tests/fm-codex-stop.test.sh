@@ -231,6 +231,7 @@ if [ "${1:-}" = list-windows ]; then
     fi
     shift
   done
+  [ -z "${FM_TEST_INVENTORY_LOG:-}" ] || printf '%s\n' "$session" >> "$FM_TEST_INVENTORY_LOG"
   for target in ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}}; do
     [ "${target%%:*}" = "$session" ] && printf '%s\n' "${target#*:}"
   done
@@ -901,8 +902,47 @@ test_failed_existence_probe_is_conservatively_budgeted() {
   pass 'failed existence probes remain conservatively budgeted'
 }
 
+test_admission_timeout_reaps_probe_descendants() {
+  local dir pid alive attempt
+  dir=$(fixture admission-timeout-descendant)
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-windows ]; then
+  bash -c '
+    trap "" TERM
+    printf "%s\n" "$$" > "$FM_HOME/probe-descendant.pid"
+    while :; do sleep 1; done
+  ' &
+  wait
+fi
+exit 1
+SH
+  chmod +x "$dir/fakebin/tmux"
+  printf '%s\n' 'window=fleet:hanging-probe' 'backend=tmux' > "$dir/state/hanging.meta"
+  PATH="$dir/fakebin:$PATH" FM_SIGNAL_GRACE=0 run_stop "$dir" 4
+  wait_file "$dir/rc" 250
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'timed-out admission probe escaped Stop supervision'
+  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+    'timed-out admission probe did not fail conservatively'
+  wait_file "$dir/probe-descendant.pid" 50
+  pid=$(cat "$dir/probe-descendant.pid")
+  alive=1
+  for attempt in $(seq 1 50); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      alive=0
+      break
+    fi
+    sleep 0.1
+  done
+  [ "$alive" -eq 0 ] || fail "timed-out admission probe left descendant $pid alive"
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'admission timeout terminates its probe process group'
+}
+
 test_many_dead_endpoints_take_cheap_watcher_path() {
-  local dir id existing= key pane_hash
+  local dir id existing= key pane_hash inventory_calls
   dir=$(fixture retained-dead-endpoints)
   install_endpoint_inventory_tmux "$dir"
   cat > "$dir/slow-crew-state.sh" <<'SH'
@@ -929,6 +969,7 @@ SH
   done
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
     FM_TEST_CAPTURE='retained dead pane' FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" \
+    FM_TEST_INVENTORY_LOG="$dir/inventory-calls" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
     run_stop "$dir" 4
   wait_file "$dir/rc" 300
@@ -942,6 +983,9 @@ SH
   grep -F "$(printf '\tstale\tfleet:dead-25\tstale: fleet:dead-25')" "$dir/state/.wake-queue" >/dev/null \
     || fail 'authoritatively dead worker did not retain its stale notification'
   [ ! -e "$dir/crew-state-calls" ] || fail 'authoritatively dead targets reached expensive crew-state classification'
+  inventory_calls=$(wc -l < "$dir/inventory-calls")
+  [ "$inventory_calls" -eq 2 ] \
+    || fail "admission and watcher used $inventory_calls tmux inventories for one shared session"
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'retained dead endpoints stay cheap and preserve notification'
@@ -2054,6 +2098,7 @@ test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_small_live_endpoint_inventory_remains_bounded
 test_failed_existence_probe_is_conservatively_budgeted
+test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
 test_dead_endpoint_preserves_inbox_escalation
 test_missing_endpoint_preserves_inbox_escalation

@@ -895,6 +895,70 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+fm_backend_agent_state_cache_key() {
+  printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'
+}
+
+fm_backend_agent_state_batch() {  # stdin: <backend><tab><target>[<tab><payload>]
+  local cache_dir backend target payload state session scope_key scope_dir snapshot_status
+  local batch_status=0 tmux_cache_failed=0
+  cache_dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-agent-state.XXXXXX") || return 1
+  while IFS="$(printf '\t')" read -r backend target payload; do
+    [ -n "$backend" ] && [ -n "$target" ] || continue
+    case "$backend" in
+      tmux)
+        if [ "$tmux_cache_failed" -eq 1 ] || ! fm_backend_source tmux; then
+          state=unverified
+        else
+          case "$target" in
+            *:*:*|'':*|*:'') state=unreadable ;;
+            *:*)
+              session=${target%%:*}
+              if ! scope_key=$(fm_backend_agent_state_cache_key "$session"); then
+                state=unreadable
+              else
+                scope_dir="$cache_dir/$scope_key"
+                if [ ! -e "$scope_dir/status" ] \
+                  && ! fm_backend_tmux_agent_inventory_snapshot "$session" "$scope_dir"; then
+                  tmux_cache_failed=1
+                  state=unreadable
+                else
+                  snapshot_status=$(cat "$scope_dir/status" 2>/dev/null || true)
+                  case "$snapshot_status" in
+                    ok|missing|unreadable)
+                      state=$(fm_backend_tmux_agent_state "$target" "$snapshot_status" "$scope_dir/windows")
+                      ;;
+                    *)
+                      tmux_cache_failed=1
+                      state=unreadable
+                      ;;
+                  esac
+                fi
+              fi
+              ;;
+            *) state=unreadable ;;
+          esac
+        fi
+        ;;
+      *) state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable) ;;
+    esac
+    printf '%s\t%s\t%s' "$backend" "$target" "$state" || {
+      batch_status=1
+      break
+    }
+    [ -z "$payload" ] || printf '\t%s' "$payload" || {
+      batch_status=1
+      break
+    }
+    printf '\n' || {
+      batch_status=1
+      break
+    }
+  done
+  find "$cache_dir" -depth -delete 2>/dev/null || batch_status=1
+  return "$batch_status"
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

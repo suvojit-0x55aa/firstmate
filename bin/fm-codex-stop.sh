@@ -245,6 +245,7 @@ def budget_window_count():
         return budget_window_cache
     result = shell(r'''
 . "$1/fm-backend.sh" || exit 1
+set -o pipefail
 {
   for meta in "$FM_STATE_OVERRIDE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -255,7 +256,9 @@ def budget_window_count():
   done
 } | awk -F '\t' '!seen[$1]++' |
 while IFS="$(printf '\t')" read -r target backend; do
-  agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
+  printf '%s\t%s\n' "$backend" "$target"
+done | fm_backend_agent_state_batch |
+while IFS="$(printf '\t')" read -r backend target agent_state; do
   case "$agent_state" in
     dead|missing) ;;
     *) printf 'budget-window\t%s\n' "$target" ;;
@@ -312,12 +315,44 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
     return max(watcher_guard_grace, components), check_limit, cycle_budget
 
 
-def shell(body, *args, timeout=3):
+def terminate_probe_group(process):
     try:
-        return subprocess.run(['bash', '-c', '. "$1/fm-wake-lib.sh"; ' + body,
-                               'codex-stop-probe', scripts, *args],
-                              capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    time.sleep(0.1)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def shell(body, *args, timeout=3):
+    process = None
+    try:
+        command = ['bash', '-c', '. "$1/fm-wake-lib.sh"; ' + body,
+                   'codex-stop-probe', scripts, *args]
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        terminate_probe_group(process)
+        return None
+    except OSError:
+        if process is not None:
+            terminate_probe_group(process)
         return None
 
 
