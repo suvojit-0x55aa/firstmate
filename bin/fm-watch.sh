@@ -419,7 +419,7 @@ inbox_steer_check() {  # <window> <task> [target-state]
 }
 
 recorded_window_inventory() {
-  local meta w task backend kind spawn_gen
+  local meta w task backend kind spawn_gen remote_host record_home route
   {
     for meta in "$STATE"/*.meta; do
       [ -e "$meta" ] || continue
@@ -428,10 +428,17 @@ recorded_window_inventory() {
       task=$(basename "$meta")
       task=${task%.meta}
       backend=$(fm_backend_of_meta "$meta")
+      remote_host=$(fm_meta_get "$meta" remote_host)
+      record_home=$(fm_meta_get "$meta" home)
+      route=local
+      case "$w" in remote:*) route=remote ;; esac
+      [ -z "$remote_host" ] || route=remote
+      [ -n "$record_home" ] || record_home=-
       kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
       spawn_gen=$(grep '^spawn_gen=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
       [ -n "$kind" ] || kind=ship
-      printf '%s\t%s\t%s\t%s\t%s\n' "$w" "$task" "$backend" "$kind" "$spawn_gen"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$w" "$task" "$backend" "$kind" "$route" "$record_home" "$spawn_gen"
     done
   } | awk -F '\t' '!seen[$1]++'
 }
@@ -443,17 +450,18 @@ recorded_windows() {
 recorded_window_inventory_with_agent_state() {
   if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
     if ! recorded_window_inventory \
-      | while IFS="$(printf '\t')" read -r w task backend kind spawn_gen; do
-          printf '%s\t%s\t%s\t%s\t%s\n' "$backend" "$w" "$task" "$kind" "$spawn_gen"
+      | while IFS="$(printf '\t')" read -r w task backend kind route record_home spawn_gen; do
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$backend" "$w" "$route" "$record_home" "$task" "$kind" "$spawn_gen"
         done \
       | fm_backend_agent_state_batch; then
-      printf '__FM_AGENT_STATE_ERROR__\t-\tunreadable\t-\t-\t-\n'
+      printf '__FM_AGENT_STATE_ERROR__\t-\tunreadable\t-\t-\t-\t-\t-\n'
     fi
   else
     recorded_window_inventory \
-      | while IFS="$(printf '\t')" read -r w task backend kind spawn_gen; do
-          printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$backend" "$w" unverified "$task" "$kind" "$spawn_gen"
+      | while IFS="$(printf '\t')" read -r w task backend kind route record_home spawn_gen; do
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$backend" "$w" unverified "$route" "$record_home" "$task" "$kind" "$spawn_gen"
         done
   fi
 }
@@ -1629,7 +1637,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
-  while IFS=$(printf '\t') read -r backend w agent_state task kind spawn_gen; do
+  while IFS=$(printf '\t') read -r backend w agent_state route record_home task kind spawn_gen; do
     [ "$backend" != __FM_AGENT_STATE_ERROR__ ] || exit 1
     key=$(window_key "$w")
     death_owner=$(death_owner_id "$w" "$task" "$backend")

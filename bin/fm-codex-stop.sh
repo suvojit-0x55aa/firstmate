@@ -252,13 +252,19 @@ set -o pipefail
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || continue
     backend=$(fm_backend_of_meta "$meta")
-    printf '%s\t%s\n' "$target" "$backend"
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    record_home=$(fm_meta_get "$meta" home)
+    route=local
+    case "$target" in remote:*) route=remote ;; esac
+    [ -z "$remote_host" ] || route=remote
+    [ -n "$record_home" ] || record_home=-
+    printf '%s\t%s\t%s\t%s\n' "$target" "$backend" "$route" "$record_home"
   done
 } | awk -F '\t' '!seen[$1]++' |
-while IFS="$(printf '\t')" read -r target backend; do
-  printf '%s\t%s\n' "$backend" "$target"
+while IFS="$(printf '\t')" read -r target backend route record_home; do
+  printf '%s\t%s\t%s\t%s\n' "$backend" "$target" "$route" "$record_home"
 done | fm_backend_agent_state_batch |
-while IFS="$(printf '\t')" read -r backend target agent_state; do
+while IFS="$(printf '\t')" read -r backend target agent_state route record_home; do
   case "$agent_state" in
     dead|missing) ;;
     *) printf 'budget-window\t%s\n' "$target" ;;

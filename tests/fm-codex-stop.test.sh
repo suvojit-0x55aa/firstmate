@@ -295,6 +295,39 @@ SH
   chmod +x "$dir/fakebin/tmux" "$dir/fakebin/ps"
 }
 
+install_endpoint_inventory_herdr() {
+  local dir=$1
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -z "${FM_TEST_HERDR_PROBE_LOG:-}" ] || printf 'herdr\t%s\t%s\n' "${1:-}" "${2:-}" >> "$FM_TEST_HERDR_PROBE_LOG"
+if [ "${1:-}" = pane ] && [ "${2:-}" = list ]; then
+  session=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --session ]; then
+      session=${2:-}
+      break
+    fi
+    shift
+  done
+  printf '{"result":{"panes":['
+  separator=
+  for target in ${FM_TEST_HERDR_EXISTING_TARGETS:-}; do
+    if [ "${target%%:*}" = "$session" ]; then
+      pane=${target#*:}
+      printf '%s{"pane_id":"%s","tab_id":"tab-%s"}' "$separator" "$pane" "$pane"
+      separator=,
+    fi
+  done
+  printf ']}}\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$dir/fakebin/herdr"
+}
+
 install_attached_watcher() {
   local dir=$1
   cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh,fm-backend.sh} "$dir/bin/"
@@ -913,6 +946,55 @@ test_failed_existence_probe_is_conservatively_budgeted() {
   [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'uncertain endpoint inventory started an under-budgeted watcher'
   finish "$dir"
   pass 'failed existence probes remain conservatively budgeted'
+}
+
+test_remote_endpoints_avoid_local_backend_probes() {
+  local dir
+  dir=$(fixture remote-endpoint-isolation)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=remote:mate' 'kind=secondmate' \
+    'remote_host=remote.invalid' 'home=/remote/firstmate' > "$dir/state/mate.meta"
+  printf '%s\n' 'window=fleet:dead' 'kind=ship' 'backend=tmux' > "$dir/state/z-dead.meta"
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='remote:mate fleet:dead' \
+    FM_TEST_INVENTORY_LOG="$dir/inventories" FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probes" \
+    FM_TEST_CAPTURE_LOG="$dir/captures" FM_SIGNAL_GRACE=0 run_stop "$dir" 180
+  wait_file "$dir/rc" 200
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'remote endpoint escaped Codex Stop supervision'
+  assert_contains "$(cat "$dir/out")" 'Run bin/fm-wake-drain.sh' 'local death did not complete the remote isolation cycle'
+  grep -R -qF "$(printf '\ttmux\tfleet:dead')" "$dir/state/.death-notified-v3" \
+    || fail 'local death did not persist its exact notification receipt'
+  ! grep -R -qF 'remote:mate' "$dir/state/.death-notified-v3" \
+    || fail 'remote collision produced a false local death receipt'
+  [ "$(grep -c '^fleet$' "$dir/inventories")" = 2 ] \
+    || fail 'admission and watcher did not each inventory the local tmux scope once'
+  ! grep -qF 'remote' "$dir/inventories" || fail 'remote endpoint was probed through a local backend'
+  [ ! -e "$dir/captures" ] || fail 'remote endpoint was captured through a local backend'
+  finish "$dir"
+  pass 'remote endpoints stay isolated from colliding local backend state'
+}
+
+test_herdr_endpoints_use_one_snapshot_per_cycle() {
+  local dir id calls
+  dir=$(fixture herdr-endpoint-inventory)
+  install_endpoint_inventory_herdr "$dir"
+  install_endpoint_inventory_tmux "$dir"
+  for id in $(seq 1 40); do
+    printf 'window=fleet:w%s:p1\nbackend=herdr\n' "$id" > "$dir/state/dead-$id.meta"
+  done
+  printf '%s\n' 'window=local:dead' 'backend=tmux' > "$dir/state/z-local-dead.meta"
+  PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_PROBE_LOG="$dir/herdr-probes" \
+    FM_TEST_EXISTING_TARGETS='local:dead' FM_SIGNAL_GRACE=0 run_stop "$dir" 10
+  wait_file "$dir/rc" 200
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'Herdr endpoint inventory escaped Codex Stop supervision'
+  grep -R -qF "$(printf '\ttmux\tlocal:dead')" "$dir/state/.death-notified-v3" \
+    || fail 'Herdr watcher phase did not finish before the local terminal wake'
+  calls=$(wc -l < "$dir/herdr-probes" | tr -d '[:space:]')
+  [ "$calls" = 3 ] \
+    || fail "Herdr admission and watcher used $calls backend probes instead of three bounded snapshots"
+  [ "$(awk -F '\t' '$2 == "pane" && $3 == "list" { count++ } END { print count + 0 }' "$dir/herdr-probes")" = 3 ] \
+    || fail 'Herdr batch classification issued a non-inventory endpoint probe'
+  finish "$dir"
+  pass 'Herdr histories use bounded bulk snapshots without endpoint probes'
 }
 
 test_admission_timeout_reaps_probe_descendants() {
@@ -2156,6 +2238,8 @@ test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_small_live_endpoint_inventory_remains_bounded
 test_failed_existence_probe_is_conservatively_budgeted
+test_remote_endpoints_avoid_local_backend_probes
+test_herdr_endpoints_use_one_snapshot_per_cycle
 test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
 test_paused_and_captain_held_deaths_notify_once

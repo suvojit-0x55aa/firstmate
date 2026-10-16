@@ -899,14 +899,17 @@ fm_backend_agent_state_cache_key() {
   printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'
 }
 
-fm_backend_agent_state_batch() {  # stdin: <backend><tab><target>[<tab><payload>]
-  local cache_dir backend target payload state session scope_key scope_dir snapshot_status
-  local batch_status=0 tmux_cache_failed=0
+fm_backend_agent_state_batch() {  # stdin: <backend><tab><target><tab><route><tab><home>[<tab><payload>]
+  local cache_dir backend target route owner_home payload state session scope_key scope_dir snapshot_status
+  local batch_status=0 tmux_cache_failed=0 herdr_cache_failed=0
   cache_dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-agent-state.XXXXXX") || return 1
-  while IFS="$(printf '\t')" read -r backend target payload; do
+  while IFS="$(printf '\t')" read -r backend target route owner_home payload; do
     [ -n "$backend" ] && [ -n "$target" ] || continue
-    case "$backend" in
-      tmux)
+    if [ "$route" = remote ]; then
+      state=unverified
+    else
+      case "$backend" in
+        tmux)
         if [ "$tmux_cache_failed" -eq 1 ] || ! fm_backend_source tmux; then
           state=unverified
         else
@@ -917,7 +920,7 @@ fm_backend_agent_state_batch() {  # stdin: <backend><tab><target>[<tab><payload>
               if ! scope_key=$(fm_backend_agent_state_cache_key "$session"); then
                 state=unreadable
               else
-                scope_dir="$cache_dir/$scope_key"
+                scope_dir="$cache_dir/tmux-$scope_key"
                 if [ ! -e "$scope_dir/status" ] \
                   && ! fm_backend_tmux_agent_inventory_snapshot "$session" "$scope_dir"; then
                   tmux_cache_failed=1
@@ -939,10 +942,41 @@ fm_backend_agent_state_batch() {  # stdin: <backend><tab><target>[<tab><payload>
             *) state=unreadable ;;
           esac
         fi
-        ;;
-      *) state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable) ;;
-    esac
-    printf '%s\t%s\t%s' "$backend" "$target" "$state" || {
+          ;;
+        herdr)
+        if [ "$herdr_cache_failed" -eq 1 ] || ! fm_backend_source herdr; then
+          state=unverified
+        elif ! fm_backend_herdr_parse_target "$target"; then
+          state=unreadable
+        else
+          session=$FM_BACKEND_HERDR_SESSION
+          if ! scope_key=$(fm_backend_agent_state_cache_key "$session"); then
+            state=unreadable
+          else
+            scope_dir="$cache_dir/herdr-$scope_key"
+            if [ ! -e "$scope_dir/status" ] \
+              && ! fm_backend_herdr_agent_inventory_snapshot "$session" "$scope_dir"; then
+              herdr_cache_failed=1
+              state=unverified
+            else
+              snapshot_status=$(cat "$scope_dir/status" 2>/dev/null || true)
+              case "$snapshot_status" in
+                ok|unverified)
+                  state=$(fm_backend_herdr_agent_state_from_snapshot "$target" "$snapshot_status" "$scope_dir")
+                  ;;
+                *)
+                  herdr_cache_failed=1
+                  state=unverified
+                  ;;
+              esac
+            fi
+          fi
+        fi
+          ;;
+        *) state=unverified ;;
+      esac
+    fi
+    printf '%s\t%s\t%s\t%s\t%s' "$backend" "$target" "$state" "$route" "$owner_home" || {
       batch_status=1
       break
     }
