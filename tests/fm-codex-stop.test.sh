@@ -1218,6 +1218,75 @@ test_paused_and_captain_held_deaths_notify_once() {
   pass 'paused and captain-held deaths notify once before long cadence'
 }
 
+test_local_secondmate_death_notifies_once() {
+  local dir rc stale_rows
+  dir=$(fixture local-secondmate-death)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:local-mate' 'kind=secondmate' 'harness=grok' 'backend=tmux' \
+    'spawn_gen=mate-a' > "$dir/state/local-mate.meta"
+  printf '%s\n' 'working: waiting quietly for routed work' > "$dir/state/local-mate.status"
+  prime_status_seen "$dir/state" "$dir/state/local-mate.status"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:local-mate' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/first-death.out" 2> "$dir/first-death.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "local secondmate death did not surface: rc=$rc $(cat "$dir/first-death.err")"
+  [ "$(death_receipt_count "$dir")" -eq 1 ] \
+    || fail 'local secondmate death did not persist its exact receipt'
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:local-mate' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/repeat-death.out" 2> "$dir/repeat-death.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "duplicate local secondmate death was not suppressed: rc=$rc"
+  stale_rows=$(grep -Fc "$(printf '\tstale\tfleet:local-mate\tstale: fleet:local-mate')" \
+    "$dir/state/.wake-queue" || true)
+  [ "$stale_rows" -eq 1 ] || fail "local secondmate death queued $stale_rows notifications"
+
+  dir=$(fixture healthy-local-secondmate)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:idle-mate' 'kind=secondmate' 'harness=grok' 'backend=tmux' \
+    'spawn_gen=mate-alive' > "$dir/state/idle-mate.meta"
+  printf '%s\n' 'working: waiting quietly for routed work' > "$dir/state/idle-mate.status"
+  prime_status_seen "$dir/state" "$dir/state/idle-mate.status"
+  set +e
+  FM_TEST_EXISTING_TARGETS='fleet:idle-mate' FM_TEST_LIVE_TARGETS='fleet:idle-mate' \
+    FM_TEST_CAPTURE_LOG="$dir/captures" run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/healthy.out" 2> "$dir/healthy.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "healthy idle local secondmate was not quiet: rc=$rc"
+  [ "$(death_receipt_count "$dir")" -eq 0 ] \
+    || fail 'healthy idle local secondmate created a death receipt'
+  [ ! -e "$dir/captures" ] || fail 'healthy idle local secondmate entered stale capture handling'
+
+  dir=$(fixture remote-secondmate-death-isolation)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=remote:mate' 'kind=secondmate' 'remote_host=remote.invalid' \
+    'home=/remote/firstmate' 'spawn_gen=mate-remote' > "$dir/state/remote-mate.meta"
+  printf '%s\n' 'working: remote owner remains authoritative' > "$dir/state/remote-mate.status"
+  prime_status_seen "$dir/state" "$dir/state/remote-mate.status"
+  set +e
+  FM_TEST_EXISTING_TARGETS='remote:mate' FM_TEST_CAPTURE_LOG="$dir/captures" \
+    FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probes" \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/remote.out" 2> "$dir/remote.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "remote secondmate entered local death handling: rc=$rc"
+  [ "$(death_receipt_count "$dir")" -eq 0 ] \
+    || fail 'remote secondmate created a local death receipt'
+  [ ! -e "$dir/captures" ] || fail 'remote secondmate entered local stale capture handling'
+  [ ! -e "$dir/backend-probes" ] \
+    || fail 'remote secondmate was probed through a local backend'
+  pass 'local secondmate deaths notify once while healthy and remote mates stay quiet'
+}
+
 test_dead_endpoint_preserves_inbox_escalation() {
   local dir rec
   dir=$(fixture dead-endpoint-inbox)
@@ -2332,6 +2401,7 @@ test_herdr_endpoints_use_one_snapshot_per_cycle
 test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
 test_paused_and_captain_held_deaths_notify_once
+test_local_secondmate_death_notifies_once
 test_dead_endpoint_preserves_inbox_escalation
 test_missing_endpoint_preserves_inbox_escalation
 test_dead_endpoint_honors_explicit_notification_receipt

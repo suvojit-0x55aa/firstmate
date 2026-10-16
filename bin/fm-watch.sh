@@ -967,11 +967,8 @@ retire_death_notification() {  # <window-key> <spawn-generation> <owner-id>
   fi
 }
 
-handle_authoritatively_dead_target() {  # <window> <task> <backend> <incarnation> <owner-id> <kind> <last-status> <window-key>
-  local win=$1 task=$2 backend=$3 incarnation=$4 owner_id=$5 kind=$6 last=$7 key=$8 marker=authoritatively-dead sf
-  if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
-    return 0
-  fi
+handle_authoritatively_dead_target() {  # <window> <task> <backend> <incarnation> <owner-id> <last-status> <window-key>
+  local win=$1 task=$2 backend=$3 incarnation=$4 owner_id=$5 last=$6 key=$7 marker=authoritatively-dead sf
   sf="$STATE/.stale-$key"
   if death_receipt_matches "$win" "$task" "$backend" "$incarnation" "$owner_id"; then
     if status_is_paused_or_captain_held "$last"; then
@@ -1653,7 +1650,7 @@ EOF
         dead|missing)
           [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable
           [ "$agent_state" != dead ] \
-            || handle_authoritatively_dead_target "$w" "$task" "$backend" "$incarnation" "$death_owner" "$kind" "$last" "$key"
+            || handle_authoritatively_dead_target "$w" "$task" "$backend" "$incarnation" "$death_owner" "$last" "$key"
           continue
           ;;
         alive)
