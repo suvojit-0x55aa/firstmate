@@ -131,6 +131,8 @@ mkdir -p "$STATE"
 # gate and the wake emission (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-supervision-registry-lib.sh
+. "$SCRIPT_DIR/fm-supervision-registry-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -461,10 +463,41 @@ recorded_windows() {
   recorded_window_inventory | cut -f1 | awk '!seen[$0]++'
 }
 
+supervision_task_active() {
+  local task=$1 dir
+  [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] || return 0
+  dir=$(fm_supervision_registry_dir "$STATE")
+  [ -f "$dir/$task" ] && [ ! -L "$dir/$task" ]
+}
+
+active_window_inventory() {
+  local meta w task backend kind spawn_gen remote_host record_home route metas
+  metas=$(fm_supervision_registry_inventory "$STATE" "${FM_CODEX_REGISTRY_GENERATION:-}") || return $?
+  while IFS= read -r meta; do
+    [ -n "$meta" ] || continue
+    w=$(fm_backend_target_of_meta "$meta")
+    [ -n "$w" ] || continue
+    task=${meta##*/}; task=${task%.meta}
+    backend=$(fm_backend_of_meta "$meta")
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    record_home=$(fm_meta_get "$meta" home)
+    route=local
+    case "$w" in remote:*) route=remote ;; esac
+    [ -z "$remote_host" ] || route=remote
+    [ -n "$record_home" ] || record_home=-
+    kind=$(fm_meta_get "$meta" kind); [ -n "$kind" ] || kind=ship
+    spawn_gen=$(fm_meta_get "$meta" spawn_gen)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$w" "$task" "$backend" "$kind" "$route" "$record_home" "$spawn_gen"
+  done <<EOF
+$metas
+EOF
+}
+
 recorded_window_inventory_with_agent_state() {
   local owners endpoint_states
-  owners=$(recorded_window_inventory) || return 1
   if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+    owners=$(active_window_inventory) || return 1
     if ! endpoint_states=$(printf '%s\n' "$owners" \
       | awk -F '\t' 'BEGIN { OFS="\t" } !seen[$3 SUBSEP $5 SUBSEP $1]++ { print $3, $1, $5, $6 }' \
       | fm_backend_agent_state_batch); then
@@ -486,6 +519,7 @@ recorded_window_inventory_with_agent_state() {
       }
     '
   else
+    owners=$(recorded_window_inventory) || return 1
     printf '%s\n' "$owners" \
       | while IFS="$(printf '\t')" read -r w task backend kind route record_home spawn_gen; do
           printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -530,6 +564,7 @@ secondmate_wake_stall_tick() {
     task=${meta##*/}
     task=${task%.meta}
     case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    supervision_task_active "$task" || continue
     home=$(fm_meta_get "$meta" home)
     [ -n "$home" ] || continue
     [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || continue
@@ -861,13 +896,13 @@ pause_state_class() {  # <window> <task>
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last
+  local win=$1 h=$2 task=${3:-} key last
   key=$(window_key "$win")
   fm_wake_append stale "$win" "stale: $win" || exit 1
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key"
   clear_write_tracking "$key"
-  task=$(window_to_task "$win" "$STATE")
+  [ -n "$task" ] || task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   if status_is_paused_or_captain_held "$last"; then
     : > "$STATE/.paused-$key"
@@ -1033,9 +1068,11 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # surfaced or intentionally absorbed, so a watcher killed mid-cycle never
 # swallows a signal.
 scan_signals() {
-  local f sig sf
+  local f sig sf task
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
     [ -e "$f" ] || continue
+    task=${f##*/}; task=${task%.status}; task=${task%.turn-ended}
+    supervision_task_active "$task" || continue
     sig=$(fm_wake_signal_sig "$f") || continue
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
@@ -1186,6 +1223,7 @@ mark_all_captain_relevant_surfaced() {
   local f task last
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    supervision_task_active "$task" || continue
     printf '%s' "$last" > "$(_hb_surfaced_path "$task")"
   done < <(scan_captain_relevant_statuses "$STATE")
 }
@@ -1202,6 +1240,7 @@ heartbeat_scan_finds_actionable() {
   local f task last surfaced
   while IFS=$(printf '\t') read -r f task last; do
     [ -n "$f" ] || continue
+    supervision_task_active "$task" || continue
     surfaced=$(cat "$(_hb_surfaced_path "$task")" 2>/dev/null || true)
     [ "$surfaced" = "$last" ] && continue
     return 0
@@ -1399,6 +1438,14 @@ trap 'exit 1' HUP INT TERM
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
 CODEX_CHECK_BATCH_SEQUENCE=1
+if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+  fm_supervision_registry_recover "$STATE" || exit 1
+  if [ -z "${FM_CODEX_REGISTRY_GENERATION:-}" ]; then
+    FM_CODEX_REGISTRY_GENERATION=$(fm_supervision_registry_generation "$STATE") || exit 1
+  else
+    [ "$(fm_supervision_registry_generation "$STATE")" = "$FM_CODEX_REGISTRY_GENERATION" ] || exit 1
+  fi
+fi
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   && [ -z "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
   FM_CODEX_CHECK_BATCH_LEASE="watcher-$WATCHER_PID"
@@ -1427,7 +1474,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v6\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-cycle-v3\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v7\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v1\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -1453,23 +1500,23 @@ publish_codex_check_batch_boundary() {
 
 codex_check_batch_request_valid() {
   local request_file=$1 next_sequence=$2 protocol lease sequence owner_token owner_pid owner_identity
-  local generation_pid generation_identity authorization_deadline authorization_cycle_timeout
+  local generation_pid generation_identity authorization_deadline authorization_cycle_timeout registry_generation
   local record_values record_token record_owner record_owner_identity record_generation_pid
-  local record_generation_identity record_deadline record_cycle_timeout record_phase now
+  local record_generation_identity record_deadline record_cycle_timeout record_registry_generation record_phase now
   IFS="$(printf '\t')" read -r protocol lease sequence owner_token owner_pid owner_identity \
-    generation_pid generation_identity authorization_deadline authorization_cycle_timeout \
+    generation_pid generation_identity authorization_deadline authorization_cycle_timeout registry_generation \
     < "$request_file" || return 1
-  [ "$protocol" = fm-codex-check-batch.v3 ] \
+  [ "$protocol" = fm-codex-check-batch.v4 ] \
     && [ "$lease" = "$FM_CODEX_CHECK_BATCH_LEASE" ] \
     && [ "$sequence" = "$next_sequence" ] || return 1
   case "$owner_pid:$generation_pid:$authorization_deadline:$authorization_cycle_timeout" in
     *[!0-9:]*|:*|*::*|*:) return 1 ;;
   esac
   [ "$authorization_cycle_timeout" -gt 0 ] || return 1
-  record_values=$(jq -jer '[.token, (.owner|tostring), .owner_identity, (.session_pid|tostring), .session_identity, (.resume_deadline|tostring), (.resume_cycle_timeout|tostring), .phase] | join("\u001f")' \
+  record_values=$(jq -jer '[.token, (.owner|tostring), .owner_identity, (.session_pid|tostring), .session_identity, (.resume_deadline|tostring), (.resume_cycle_timeout|tostring), .registry_generation, .phase] | join("\u001f")' \
     "$STATE/.codex-stop.json" 2>/dev/null) || return 1
   IFS="$(printf '\037')" read -r record_token record_owner record_owner_identity \
-    record_generation_pid record_generation_identity record_deadline record_cycle_timeout \
+    record_generation_pid record_generation_identity record_deadline record_cycle_timeout record_registry_generation \
     record_phase <<EOF
 $record_values
 EOF
@@ -1479,12 +1526,15 @@ EOF
     && [ "$record_generation_pid" = "$generation_pid" ] \
     && [ "$record_generation_identity" = "$generation_identity" ] \
     && [ "$record_deadline" = "$authorization_deadline" ] \
-    && [ "$record_cycle_timeout" = "$authorization_cycle_timeout" ] || return 1
+    && [ "$record_cycle_timeout" = "$authorization_cycle_timeout" ] \
+    && [ "$record_registry_generation" = "$registry_generation" ] \
+    && [ "$(fm_supervision_registry_generation "$STATE")" = "$registry_generation" ] || return 1
   case "$record_phase" in starting|watching|confirming) ;; *) return 1 ;; esac
   [ "$(fm_pid_identity "$owner_pid" 2>/dev/null || true)" = "$owner_identity" ] || return 1
   [ "$(fm_pid_identity "$generation_pid" 2>/dev/null || true)" = "$generation_identity" ] || return 1
   now=$(date +%s)
-  [ $((now + authorization_cycle_timeout)) -le "$authorization_deadline" ]
+  [ $((now + authorization_cycle_timeout)) -le "$authorization_deadline" ] || return 1
+  FM_CODEX_REGISTRY_GENERATION=$registry_generation
 }
 
 park_at_codex_check_batch_boundary() {
@@ -1584,6 +1634,31 @@ while :; do
   esac
   agent_state_inventory=$(printf '%s\n' "$agent_state_inventory" \
     | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k4,4 -k2,2 -k6,6)
+  if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+    agent_state_inventory=$(printf '%s\n' "$agent_state_inventory" | awk -F '\t' '
+      BEGIN { OFS="\t" }
+      {
+        row[NR]=$0
+        group[NR]=$1 SUBSEP $4 SUBSEP $2
+        if (!(group[NR] in first)) {
+          first[group[NR]]=$6
+          first_kind[group[NR]]=$7
+        }
+        if ($7 != "secondmate" && !(group[NR] in ordinary)) {
+          ordinary[group[NR]]=$6
+          ordinary_kind[group[NR]]=$7
+        }
+      }
+      END {
+        for (i=1; i<=NR; i++) {
+          key=group[i]
+          task=(key in ordinary ? ordinary[key] : first[key])
+          kind=(key in ordinary_kind ? ordinary_kind[key] : first_kind[key])
+          print row[i], task, kind
+        }
+      }
+    ')
+  fi
   fm_pending_reply_tick "$STATE" "$agent_state_inventory" || true
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
@@ -1800,9 +1875,11 @@ EOF
   FM_ENDPOINT_TAIL40=
   FM_ENDPOINT_OBSERVATION_AVAILABLE=0
   endpoint_stale_done=0
-  while IFS=$(printf '\t') read -r backend w agent_state route record_home task kind spawn_gen; do
+  while IFS=$(printf '\t') read -r backend w agent_state route record_home task kind spawn_gen policy_task policy_kind; do
     [ "$backend" != __FM_AGENT_STATE_ERROR__ ] || exit 1
     [ "$route" != remote ] || continue
+    [ -n "$policy_task" ] || policy_task=$task
+    [ -n "$policy_kind" ] || policy_kind=$kind
     endpoint=$(printf '%s\t%s\t%s' "$backend" "$route" "$w")
     if [ "$endpoint" != "$last_endpoint" ]; then
       last_endpoint=$endpoint
@@ -1838,6 +1915,9 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task" unknown "$backend"
     [ "$endpoint_stale_done" -eq 0 ] || continue
     endpoint_stale_done=1
+    task=$policy_task
+    kind=$policy_kind
+    last=$(last_status_line "$STATE/$task.status")
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
     # the same declarations pause_state_class reconciles below, which is why this
@@ -1887,7 +1967,7 @@ EOF
             printf '%s' "$h" > "$sf"
             wake "stale: $w"
           fi
-        elif stale_is_terminal "$w" "$STATE"; then
+        elif [ -n "$last" ] && status_is_captain_relevant "$last"; then
           # The log's last line is captain-relevant - but that alone is not
           # proof the crew is actually done: a crew's own status log gets no
           # new entry once firstmate hands it to a no-mistakes validation
@@ -1903,7 +1983,7 @@ EOF
           # authoritative source fm-crew-state.sh itself already prioritizes
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+            if crew_is_provably_working "$task"; then
               printf '%s' "$h" > "$sf"
               date +%s > "$ssf"
               clear_write_tracking "$key"
@@ -1913,7 +1993,7 @@ EOF
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              mark_surfaced "$STATE/$(window_to_task "$w" "$STATE").status"
+              mark_surfaced "$STATE/$task.status"
               wake "stale: $w"
             fi
           elif [ -e "$ssf" ]; then
@@ -1942,7 +2022,6 @@ EOF
           #     waiting on a decision, or wedged) instead of leaving the finish to
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
-            task=$(window_to_task "$w" "$STATE")
             case "$(pause_state_class "$w" "$task")" in
               working)
                 clear_pause_tracking "$key"
@@ -1954,11 +2033,10 @@ EOF
                 handle_paused_stale "$w" "$task" "$h"
                 ;;
               *)
-                surface_nonterminal_stale "$w" "$h"
+                surface_nonterminal_stale "$w" "$h" "$task"
                 ;;
             esac
           else
-            task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
               case "$(pause_state_class "$w" "$task")" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
@@ -1989,7 +2067,7 @@ EOF
         # is cleared - but not in the same poll the declared-pause cadence just
         # recorded it, or the re-surface throttle it depends on would be erased and
         # the pause would re-surface every poll instead of once per long cadence.
-        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        if [ "$paused_bound" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; }; then
           clear_pause_tracking "$key"
         fi
       fi
@@ -2003,7 +2081,6 @@ EOF
         rm -f "$ssf" "$ewf"
         clear_write_tracking "$key"
       fi
-      task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;

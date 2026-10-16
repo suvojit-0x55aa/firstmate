@@ -195,43 +195,86 @@ cycle_limit = transport_timeout - startup_phase_allowance - checkpoint - termina
 budget_reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'
 
 
-def cycle_work(probe_deadline=None):
+admission_registry_generation = None
+
+
+def admission_cycle_work(probe_deadline=None):
     result = shell(r'''
+. "$1/fm-backend.sh" || exit 1
+. "$1/fm-supervision-registry-lib.sh" || exit 1
+. "$1/fm-pending-reply-lib.sh" || exit 1
+set -o pipefail
+fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+registry_dir=$(fm_supervision_registry_dir "$FM_STATE_OVERRIDE")
+printf 'generation\t%s\n' "$generation"
+inventory=$(fm_supervision_registry_inventory "$FM_STATE_OVERRIDE" "$generation") || exit 1
+{
+  while IFS= read -r meta; do
+    [ -n "$meta" ] || continue
+    target=$(fm_backend_target_of_meta "$meta")
+    [ -n "$target" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    route=local
+    case "$target" in remote:*) route=remote ;; esac
+    [ -z "$(fm_meta_get "$meta" remote_host)" ] || route=remote
+    record_home=$(fm_meta_get "$meta" home); [ -n "$record_home" ] || record_home=-
+    printf '%s\t%s\t%s\t%s\n' "$backend" "$target" "$route" "$record_home"
+  done <<EOF
+$inventory
+EOF
+} | awk -F '\t' '!seen[$1 SUBSEP $3 SUBSEP $2]++' | fm_backend_agent_state_batch |
+while IFS="$(printf '\t')" read -r backend target agent_state route record_home; do
+  case "$agent_state" in
+    dead|missing) ;;
+    *) printf 'budget-window\t%s\t%s\t%s\n' "$backend" "$route" "$target" ;;
+  esac
+done
 for file in "$FM_STATE_OVERRIDE"/*.status "$FM_STATE_OVERRIDE"/*.turn-ended; do
   [ -f "$file" ] || continue
+  task=$(basename "$file")
+  task=${task%.status}; task=${task%.turn-ended}
+  [ -f "$registry_dir/$task" ] && [ ! -L "$registry_dir/$task" ] || continue
   if ! fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file"; then
     printf 'signal\t%s\n' "$(basename "$file")"
   fi
 done
 dir=${FM_PENDING_REPLY_DIR_OVERRIDE:-$FM_STATE_OVERRIDE/pending-replies}
-[ -d "$dir" ] || exit 0
-. "$1/fm-pending-reply-lib.sh" || exit 1
-now=$(fm_pending_reply_now)
-for rec in "$dir"/*; do
-  [ -f "$rec" ] || continue
-  case "$(basename "$rec")" in .*) continue ;; esac
-  [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || continue
-  [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
-  delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-  grace=$(fm_pending_reply_get "$rec" grace_secs)
-  case "$delivered:$grace:$now" in
-    *[!0-9:]*|:*|*::*|*:) continue ;;
-  esac
-  [ "$((now - delivered))" -ge "$grace" ] || continue
-  task_id=$(fm_pending_reply_get "$rec" task_id)
-  fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id" || continue
-  printf 'remote-recovery\t%s\n' "$(basename "$rec")"
-done
-''', deadline=probe_deadline)
+if [ -d "$dir" ]; then
+  now=$(fm_pending_reply_now)
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || continue
+    [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
+    delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+    grace=$(fm_pending_reply_get "$rec" grace_secs)
+    case "$delivered:$grace:$now" in
+      *[!0-9:]*|:*|*::*|*:) continue ;;
+    esac
+    [ "$((now - delivered))" -ge "$grace" ] || continue
+    task_id=$(fm_pending_reply_get "$rec" task_id)
+    [ -f "$registry_dir/$task_id" ] && [ ! -L "$registry_dir/$task_id" ] || continue
+    fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id" || continue
+    printf 'remote-recovery\t%s\n' "$(basename "$rec")"
+  done
+fi
+after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+[ "$after" = "$generation" ] || exit 1
+''', timeout=8, deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
+    generation = None
     signal_tasks = set()
     remote_recoveries = set()
+    windows = set()
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
         if not separator or not value:
             continue
-        if kind == 'signal':
+        if kind == 'generation':
+            generation = value
+        elif kind == 'signal':
             if value.endswith('.status'):
                 value = value[:-len('.status')]
             elif value.endswith('.turn-ended'):
@@ -239,61 +282,11 @@ done
             signal_tasks.add(value)
         elif kind == 'remote-recovery':
             remote_recoveries.add(value)
-    return signal_tasks, len(remote_recoveries)
-
-
-budget_window_cache = None
-budget_window_cache_until = 0
-
-
-def invalidate_budget_windows():
-    global budget_window_cache_until
-    budget_window_cache_until = 0
-
-
-def budget_window_count(probe_deadline=None):
-    global budget_window_cache, budget_window_cache_until
-    now = time.monotonic()
-    if budget_window_cache is not None and now < budget_window_cache_until:
-        return budget_window_cache
-    result = shell(r'''
-. "$1/fm-backend.sh" || exit 1
-set -o pipefail
-{
-  for meta in "$FM_STATE_OVERRIDE"/*.meta; do
-    [ -f "$meta" ] || continue
-    target=$(fm_backend_target_of_meta "$meta")
-    [ -n "$target" ] || continue
-    backend=$(fm_backend_of_meta "$meta")
-    remote_host=$(fm_meta_get "$meta" remote_host)
-    record_home=$(fm_meta_get "$meta" home)
-    route=local
-    case "$target" in remote:*) route=remote ;; esac
-    [ -z "$remote_host" ] || route=remote
-    [ -n "$record_home" ] || record_home=-
-    printf '%s\t%s\t%s\t%s\n' "$target" "$backend" "$route" "$record_home"
-  done
-} | awk -F '\t' '!seen[$2 SUBSEP $3 SUBSEP $1]++' |
-while IFS="$(printf '\t')" read -r target backend route record_home; do
-  printf '%s\t%s\t%s\t%s\n' "$backend" "$target" "$route" "$record_home"
-done | fm_backend_agent_state_batch |
-while IFS="$(printf '\t')" read -r backend target agent_state route record_home; do
-  case "$agent_state" in
-    dead|missing) ;;
-    *) printf 'budget-window\t%s\t%s\t%s\n' "$backend" "$route" "$target" ;;
-  esac
-done
-''', timeout=8, deadline=probe_deadline)
-    if result is None or result.returncode != 0:
-        return None
-    windows = set()
-    for line in result.stdout.splitlines():
-        kind, separator, value = line.partition('\t')
         if kind == 'budget-window' and separator and value:
             windows.add(value)
-    budget_window_cache = len(windows)
-    budget_window_cache_until = now + max(5, watcher_cadence)
-    return budget_window_cache
+    if not generation:
+        return None
+    return generation, signal_tasks, len(remote_recoveries), len(windows)
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
@@ -306,19 +299,17 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
     due_checks = 0
     if check_age >= check_interval:
         due_checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
-    work = cycle_work(probe_deadline)
+    global admission_registry_generation
+    work = admission_cycle_work(probe_deadline)
     if work is None:
         return cycle_limit + 1, check_limit or 1, 0
-    budget_windows = budget_window_count(probe_deadline)
-    if budget_windows is None:
-        return cycle_limit + 1, check_limit or 1, 0
+    admission_registry_generation, signal_tasks, remote_recoveries, budget_windows = work
     if budget_deadline is not None:
         cycle_budget = max(0, math.floor(
             budget_deadline - time.monotonic() - startup_phase_allowance - checkpoint -
             terminal_reserve))
     elif cycle_budget is None:
         cycle_budget = cycle_limit
-    signal_tasks, remote_recoveries = work
     # The watcher attempts a cheap capture for every recorded target, but only
     # a worker not authoritatively dead can repeatedly reach the bounded
     # crew-state and worktree-write paths charged here. Backends without a
@@ -441,9 +432,10 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('check-batch-handoff', 'resume-owner-cycle-v3'),
+        ('inventory', 'active-registry-v1'),
+        ('check-batch-handoff', 'resume-owner-cycle-v4'),
     )
-    return 'fm-codex-bounded.v6\t' + '\t'.join(
+    return 'fm-codex-bounded.v7\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
@@ -494,10 +486,11 @@ def watcher_check_batch_boundary(batch_lease):
 
 def request_watcher_check_batch(batch_lease, sequence, token, owner_pid,
                                 owner_identity, session_pid, session_identity,
-                                resume_deadline, resume_cycle_timeout):
-    value = (f'fm-codex-check-batch.v3\t{batch_lease}\t{sequence}\t{token}\t'
+                                resume_deadline, resume_cycle_timeout,
+                                registry_generation):
+    value = (f'fm-codex-check-batch.v4\t{batch_lease}\t{sequence}\t{token}\t'
              f'{owner_pid}\t{owner_identity}\t{session_pid}\t{session_identity}\t'
-             f'{resume_deadline}\t{resume_cycle_timeout}\n').encode('ascii')
+             f'{resume_deadline}\t{resume_cycle_timeout}\t{registry_generation}\n').encode('ascii')
     path = '.watch.lock/codex-check-batch-resume'
     tmp = '.watch.lock/codex-check-batch-resume.tmp'
     fd = None
@@ -533,7 +526,7 @@ def check_batch_authorization(path, batch_lease, token):
         if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
             return False
         fields = os.read(fd, 1025).decode('ascii').rstrip('\n').split('\t')
-        return (len(fields) == 10 and fields[0] == 'fm-codex-check-batch.v3' and
+        return (len(fields) == 11 and fields[0] == 'fm-codex-check-batch.v4' and
                 fields[1] == batch_lease and fields[3] == token)
     except FileNotFoundError:
         return None
@@ -737,6 +730,7 @@ def owner(lock):
     transport_deadline = None
     resume_deadline_epoch = None
     resume_cycle_timeout = None
+    leased_registry_generation = None
     arm_budget_failure = False
     terminal_delivered = False
     terminal_cleanup_complete = False
@@ -768,6 +762,8 @@ def owner(lock):
             record['resume_deadline'] = resume_deadline_epoch
         if resume_cycle_timeout is not None:
             record['resume_cycle_timeout'] = resume_cycle_timeout
+        if leased_registry_generation is not None:
+            record['registry_generation'] = leased_registry_generation
         published = record
         fd, tmp = tempfile.mkstemp(prefix='.codex-stop-record.')
         try:
@@ -1056,11 +1052,11 @@ def owner(lock):
                             terminal_delivered = True
                             return
                         else:
-                            invalidate_budget_windows()
                             cycle_timeout, check_batch_limit, active_cycle_limit = watcher_cycle_timeout(
                                 budget_deadline=transport_deadline,
                                 probe_deadline=(transport_deadline - startup_phase_allowance - checkpoint -
                                                 terminal_reserve))
+                            leased_registry_generation = admission_registry_generation
                             resume_cycle_timeout = cycle_timeout
                             if cycle_timeout > active_cycle_limit:
                                 if not finish(budget_reason):
@@ -1081,6 +1077,7 @@ def owner(lock):
                                 arm_environment['FM_INACTIVE_RECONCILE_BUDGET_SECS'] = str(inactive_reconcile_budget)
                                 arm_environment['FM_CODEX_ADMISSION_GUARD_GRACE'] = str(watcher_guard_grace)
                                 arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
+                                arm_environment['FM_CODEX_REGISTRY_GENERATION'] = leased_registry_generation
                                 output = tempfile.TemporaryFile()
                                 arm_started_at = time.monotonic()
                                 arm = subprocess.Popen(['bash', scripts + '/fm-watch-arm.sh'], stdin=subprocess.DEVNULL,
@@ -1133,7 +1130,9 @@ def owner(lock):
                         probe_deadline=transport_deadline - terminal_reserve)
                     now = time.monotonic()
                     next_cycle_limit = remaining_cycle_limit(now)
-                    if (now >= transport_deadline - terminal_reserve or
+                    if admission_registry_generation != leased_registry_generation:
+                        reason = budget_reason
+                    elif (now >= transport_deadline - terminal_reserve or
                             next_cycle_timeout > next_cycle_limit):
                         reason = budget_reason
                     elif next_cycle_timeout > cycle_timeout:
@@ -1170,7 +1169,7 @@ def owner(lock):
                                         proof[3], expected_batch_sequence, token,
                                         os.getpid(), owner_identity, session_pid,
                                         session_identity, resume_deadline_epoch,
-                                        resume_cycle_timeout):
+                                        resume_cycle_timeout, leased_registry_generation):
                                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                                 else:
                                     resume_authorization = (proof[3], token)

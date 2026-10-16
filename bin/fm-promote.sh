@@ -30,6 +30,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-supervision-registry-lib.sh
+. "$SCRIPT_DIR/fm-supervision-registry-lib.sh"
 
 MODE=
 YOLO=
@@ -123,6 +125,7 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=
+fm_supervision_registry_register "$STATE" "$ID" "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
