@@ -3,21 +3,49 @@
 fm_supervision_registry_dir() { printf '%s/.active-supervision-v1\n' "$1"; }
 fm_supervision_registry_generation_path() { printf '%s/.active-supervision-generation\n' "$1"; }
 fm_supervision_registry_lock_path() { printf '%s/.active-supervision.lock\n' "$1"; }
+fm_supervision_registry_sequence_path() { printf '%s/.active-supervision-sequence\n' "$1"; }
 
 fm_supervision_registry_task_valid() {
   case "$1" in ''|.*|*/*|*[$'\t\r\n']*) return 1 ;; esac
 }
 
 fm_supervision_registry_snapshot_header() {
-  printf 'fm-active-supervision.v4\t%s.%s.%s\n' "$(date +%s)" "${BASHPID:-$$}" "$RANDOM"
+  local state=$1 sequence_path path current=0 snapshot_generation snapshot_sequence tmp
+  sequence_path=$(fm_supervision_registry_sequence_path "$state")
+  if [ -f "$sequence_path" ] && [ ! -L "$sequence_path" ]; then
+    current=$(cat "$sequence_path" 2>/dev/null || true)
+    case "$current" in ''|*[!0-9]*) return 1 ;; esac
+  elif [ -e "$sequence_path" ] || [ -L "$sequence_path" ]; then
+    return 1
+  fi
+  path=$(fm_supervision_registry_generation_path "$state")
+  if [ -f "$path" ] && [ ! -L "$path" ]; then
+    IFS="$(printf '\t')" read -r _protocol snapshot_generation < "$path" || return 1
+    case "$snapshot_generation" in
+      g*)
+        snapshot_sequence=${snapshot_generation#g}
+        case "$snapshot_sequence" in ''|*[!0-9]*) snapshot_sequence=0 ;; esac
+        [ "$snapshot_sequence" -le "$current" ] || current=$snapshot_sequence
+        ;;
+    esac
+  fi
+  current=$((current + 1))
+  tmp=$(umask 077; mktemp "$state/.active-supervision-sequence.XXXXXX") || return 1
+  printf '%s\n' "$current" > "$tmp" && mv -f -- "$tmp" "$sequence_path" \
+    || { rm -f -- "$tmp"; return 1; }
+  printf 'fm-active-supervision.v5\tg%s\n' "$current"
 }
 
 fm_supervision_registry_snapshot_valid() {
-  local path=$1 protocol generation kind task field3 field4 field5 field6 field7 field8 field9
+  local path=$1 protocol generation generation_sequence kind task field3 field4 field5 field6 field7 field8 field9
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   IFS="$(printf '\t')" read -r protocol generation < "$path" || return 1
-  case "$protocol" in fm-active-supervision.v2|fm-active-supervision.v3|fm-active-supervision.v4) ;; *) return 1 ;; esac
+  case "$protocol" in fm-active-supervision.v2|fm-active-supervision.v3|fm-active-supervision.v4|fm-active-supervision.v5) ;; *) return 1 ;; esac
   [ -n "$generation" ] || return 1
+  if [ "$protocol" = fm-active-supervision.v5 ]; then
+    case "$generation" in g*) generation_sequence=${generation#g} ;; *) return 1 ;; esac
+    case "$generation_sequence" in ''|*[!0-9]*) return 1 ;; esac
+  fi
   while IFS="$(printf '\t')" read -r kind task field3 field4 field5 field6 field7 field8 field9; do
     [ -n "$kind" ] || continue
     fm_supervision_registry_task_valid "$task" || return 1
@@ -47,8 +75,46 @@ fm_supervision_registry_snapshot_valid() {
   done < <(sed '1d' "$path")
 }
 
+fm_supervision_registry_recover_reservation_meta_locked() {
+  local state=$1 task=$2 spawn_gen=$3 phase=$4 backend=$5 target=$6 detail=$7
+  local meta tmp old kind
+  meta="$state/$task.meta"
+  tmp=$(umask 077; mktemp "$state/.$task.meta.recovery.XXXXXX") || return 1
+  old=
+  [ -f "$meta" ] && [ ! -L "$meta" ] && old=$meta
+  if [ "$backend" = remote ] || [ "$backend" = remote-herdr ]; then
+    {
+      printf 'window=remote:%s\n' "$task"
+      printf 'endpoint_task_id=%s\n' "$task"
+      printf 'kind=secondmate\nmode=secondmate\nyolo=off\n'
+      printf 'remote_host=%s\nremote_backend=herdr\n' "$detail"
+      [ "$backend" != remote-herdr ] || printf 'remote_target=%s\n' "$target"
+      printf 'spawn_gen=%s\n' "$spawn_gen"
+    } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  else
+    kind=$(fm_meta_get "$old" kind); [ -n "$kind" ] || kind=ship
+    {
+      if [ "$backend" = orca ]; then
+        printf 'window=fm-%s\nterminal=%s\n' "$task" "$target"
+        [ "$detail" = - ] || printf 'orca_worktree_id=%s\n' "$detail"
+      else
+        printf 'window=%s\n' "$target"
+      fi
+      printf 'endpoint_task_id=%s\nkind=%s\nspawn_gen=%s\n' "$task" "$kind" "$spawn_gen"
+      [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend"
+    } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fi
+  if [ -n "$old" ]; then
+    awk -F= '
+      BEGIN { split("worktree project harness tasktmp model effort home projects", keys, " "); for (i in keys) keep[keys[i]]=1 }
+      $1 in keep && !seen[$1]++ { print }
+    ' "$old" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fi
+  mv -f -- "$tmp" "$meta"
+}
+
 fm_supervision_registry_reconcile_locked() {
-  local state=$1 path kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail meta current identity
+  local state=$1 path kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail meta current identity verdict
   path=$(fm_supervision_registry_generation_path "$state")
   fm_supervision_registry_snapshot_valid "$path" || return 1
   while IFS="$(printf '\t')" read -r kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail; do
@@ -66,7 +132,29 @@ fm_supervision_registry_reconcile_locked() {
       fm_supervision_registry_write_locked "$state" "$task" "$meta" pending set || return 1
       continue
     fi
-    case "$reservation_phase" in created|remote-unknown) continue ;; esac
+    case "$reservation_phase" in
+      created|remote-unknown)
+        verdict=unverified
+        case "$backend:$target" in
+          remote:*|remote-herdr:*) ;;
+          tmux:@*) ;;
+          *)
+            verdict=$(printf '%s\t%s\tlocal\t-\n' "$backend" "$target" \
+              | fm_backend_agent_state_batch 2>/dev/null \
+              | awk -F '\t' 'NR == 1 { print $3 }') || verdict=unreadable
+            [ -n "$verdict" ] || verdict=unreadable
+            ;;
+        esac
+        if [ "$verdict" = missing ]; then
+          fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || return 1
+          continue
+        fi
+        fm_supervision_registry_recover_reservation_meta_locked \
+          "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+        fm_supervision_registry_write_locked "$state" "$task" "$state/$task.meta" pending set || return 1
+        continue
+        ;;
+    esac
     fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || return 1
   done < <(sed '1d' "$path")
 }
@@ -94,7 +182,7 @@ fm_supervision_registry_write_locked() {
   path=$(fm_supervision_registry_generation_path "$state")
   tmp=$(umask 077; mktemp "$state/.active-supervision-generation.XXXXXX") || return 1
   ordered="$tmp.ordered"
-  fm_supervision_registry_snapshot_header > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fm_supervision_registry_snapshot_header "$state" > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if [ -f "$path" ]; then
     fm_supervision_registry_snapshot_valid "$path" || { rm -f -- "$tmp"; return 1; }
     while IFS="$(printf '\t')" read -r kind existing_task field3 field4 field5 field6 field7 field8 field9; do
@@ -316,7 +404,7 @@ fm_supervision_registry_recover() {
   ' > "$states" || { rm -f -- "$candidates" "$states" "$endpoints"; fm_lock_release "$lock"; return 1; }
   tmp=$(umask 077; mktemp "$state/.active-supervision-generation.XXXXXX") \
     || { rm -f -- "$candidates" "$states" "$endpoints"; fm_lock_release "$lock"; return 1; }
-  fm_supervision_registry_snapshot_header > "$tmp" || { rm -f -- "$candidates" "$states" "$endpoints" "$tmp"; fm_lock_release "$lock"; return 1; }
+  fm_supervision_registry_snapshot_header "$state" > "$tmp" || { rm -f -- "$candidates" "$states" "$endpoints" "$tmp"; fm_lock_release "$lock"; return 1; }
   while IFS="$(printf '\t')" read -r backend target verdict route home task; do
     meta="$state/$task.meta"
     case "$verdict" in dead|missing) fm_supervision_registry_death_surfaced "$state" "$task" "$meta" && continue ;; esac
@@ -352,6 +440,48 @@ fm_supervision_registry_inventory() {
   [ "$rc" -ne 0 ] || { [ -z "$out" ] || printf '%s\n' "$out"; }
   fm_lock_release "$lock" || rc=1
   return "$rc"
+}
+
+fm_supervision_registry_task_key() {
+  printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'
+}
+
+fm_supervision_registry_snapshot_index() {
+  local state=$1 expected=$2 index=$3 path protocol generation kind task spawn_gen phase meta current lock rc=0 key
+  [ -d "$index" ] && [ ! -L "$index" ] || return 1
+  mkdir "$index/tasks" || return 1
+  lock=$(fm_supervision_registry_lock_path "$state")
+  fm_lock_acquire_wait "$lock" || return 1
+  path=$(fm_supervision_registry_generation_path "$state")
+  fm_supervision_registry_reconcile_locked "$state" || rc=1
+  fm_supervision_registry_snapshot_valid "$path" || rc=1
+  if [ "$rc" -eq 0 ]; then IFS="$(printf '\t')" read -r protocol generation < "$path" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$expected" ] && [ "$generation" != "$expected" ]; then rc=2; fi
+  : > "$index/inventory" || rc=1
+  while IFS="$(printf '\t')" read -r kind task spawn_gen phase; do
+    [ "$rc" -eq 0 ] || break
+    [ "$kind" = entry ] || { rc=2; break; }
+    meta="$state/$task.meta"
+    [ -f "$meta" ] && [ ! -L "$meta" ] || { rc=1; break; }
+    current=$(fm_meta_get "$meta" spawn_gen); [ -n "$current" ] || current=-
+    [ "$current" = "$spawn_gen" ] || { rc=2; break; }
+    key=$(fm_supervision_registry_task_key "$task") || { rc=1; break; }
+    printf '%s\n' "$task" > "$index/tasks/$key" || { rc=1; break; }
+    printf '%s\n' "$meta" >> "$index/inventory" || { rc=1; break; }
+  done < <(sed '1d' "$path")
+  [ "$rc" -ne 0 ] || printf '%s\n' "$generation" > "$index/generation" || rc=1
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
+}
+
+fm_supervision_registry_index_contains() {
+  local index=$1 task=$2 key path
+  fm_supervision_registry_task_valid "$task" || return 1
+  [ -d "$index" ] && [ ! -L "$index" ] || return 2
+  key=$(fm_supervision_registry_task_key "$task") || return 2
+  path="$index/tasks/$key"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  [ "$(cat "$path" 2>/dev/null || true)" = "$task" ] || return 2
 }
 
 fm_supervision_registry_contains() {

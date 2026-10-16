@@ -175,13 +175,35 @@ case "$CHECK_KILL_GRACE" in ''|*[!0-9]*|0) CHECK_KILL_GRACE=1 ;; esac
 CHECKS_PER_CYCLE=${FM_CHECKS_PER_CYCLE:-0}
 case "$CHECKS_PER_CYCLE" in ''|*[!0-9]*) CHECKS_PER_CYCLE=0 ;; esac
 CHECK_SWEEP_CURSOR="$STATE/.check-sweep-cursor"
+CHECK_SWEEP_HIGH_WATER="$STATE/.check-sweep-high-water"
+
+check_sweep_high_water_now() {
+  local pending_check
+  for pending_check in "$STATE"/*.check.sh; do
+    [ -e "$pending_check" ] || continue
+    basename "$pending_check"
+  done | LC_ALL=C sort | tail -1
+}
+
+write_check_sweep_state() {
+  local cursor=$1 high_water=$2 cursor_tmp high_water_tmp
+  cursor_tmp="$CHECK_SWEEP_CURSOR.tmp.${BASHPID:-$$}"
+  high_water_tmp="$CHECK_SWEEP_HIGH_WATER.tmp.${BASHPID:-$$}"
+  ( umask 077; printf '%s\n' "$cursor" > "$cursor_tmp" ) \
+    && ( umask 077; printf '%s\n' "$high_water" > "$high_water_tmp" ) \
+    && mv -f -- "$high_water_tmp" "$CHECK_SWEEP_HIGH_WATER" \
+    && mv -f -- "$cursor_tmp" "$CHECK_SWEEP_CURSOR" \
+    || { rm -f -- "$cursor_tmp" "$high_water_tmp"; return 1; }
+}
 
 check_sweep_has_remaining() {
   local pending_check pending_name
   for pending_check in "$STATE"/*.check.sh; do
     [ -e "$pending_check" ] || continue
     pending_name=$(basename "$pending_check")
-    [[ "$pending_name" > "$last_check_name" ]] && return 0
+    [[ "$pending_name" > "$last_check_name" ]] \
+      && [[ "$pending_name" < "$check_sweep_high_water" || "$pending_name" = "$check_sweep_high_water" ]] \
+      && return 0
   done
   return 1
 }
@@ -189,10 +211,10 @@ check_sweep_has_remaining() {
 checkpoint_check_sweep() {
   if [ "$CHECKS_PER_CYCLE" -gt 0 ] && check_sweep_has_remaining; then
     [ -n "$last_check_name" ] || return 1
-    ( umask 077; printf '%s\n' "$last_check_name" > "$CHECK_SWEEP_CURSOR" ) || return 1
+    write_check_sweep_state "$last_check_name" "$check_sweep_high_water" || return 1
     rm -f "$STATE/.last-check"
   else
-    rm -f "$CHECK_SWEEP_CURSOR"
+    rm -f "$CHECK_SWEEP_CURSOR" "$CHECK_SWEEP_HIGH_WATER"
     touch "$STATE/.last-check"
   fi
 }
@@ -472,7 +494,7 @@ recorded_windows() {
 supervision_task_active() {
   local task=$1 rc
   [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] || return 0
-  fm_supervision_registry_contains "$STATE" "$task" "${FM_CODEX_REGISTRY_GENERATION:-}"
+  fm_supervision_registry_index_contains "$FM_CODEX_REGISTRY_INDEX" "$task"
   rc=$?
   [ "$rc" -ne 2 ] || exit 1
   return "$rc"
@@ -480,7 +502,7 @@ supervision_task_active() {
 
 active_window_inventory() {
   local meta w task backend kind spawn_gen remote_host record_home route metas
-  metas=$(fm_supervision_registry_inventory "$STATE" "${FM_CODEX_REGISTRY_GENERATION:-}") || return $?
+  metas=$(cat "$FM_CODEX_REGISTRY_INDEX/inventory") || return $?
   while IFS= read -r meta; do
     [ -n "$meta" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
@@ -1389,6 +1411,7 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   exit 0
 fi
 WATCHER_RECOVERY_PENDING=0
+FM_CODEX_REGISTRY_INDEX=
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -1419,6 +1442,10 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
+  if [ -n "${FM_CODEX_REGISTRY_INDEX:-}" ] \
+    && [ -d "$FM_CODEX_REGISTRY_INDEX" ] && [ ! -L "$FM_CODEX_REGISTRY_INDEX" ]; then
+    find "$FM_CODEX_REGISTRY_INDEX" -depth -delete || cleanup_status=1
+  fi
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
@@ -1440,6 +1467,9 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
   else
     [ "$(fm_supervision_registry_generation "$STATE")" = "$FM_CODEX_REGISTRY_GENERATION" ] || exit 1
   fi
+  FM_CODEX_REGISTRY_INDEX=$(umask 077; mktemp -d "$STATE/.active-supervision-index.XXXXXX") || exit 1
+  fm_supervision_registry_snapshot_index \
+    "$STATE" "$FM_CODEX_REGISTRY_GENERATION" "$FM_CODEX_REGISTRY_INDEX" || exit 1
 fi
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   && [ -z "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
@@ -1469,7 +1499,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v4\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v5\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_KILL_GRACE" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -1725,27 +1755,36 @@ EOF
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     check_cursor=
+    check_sweep_high_water=
     checks_run=0
-    checks_remaining=0
     last_check_name=
     if [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
       check_cursor=$(cat "$CHECK_SWEEP_CURSOR" 2>/dev/null || true)
       case "$check_cursor" in
         ''|.*|*[!A-Za-z0-9._-]*|*/*) check_cursor= ;;
       esac
+      check_sweep_high_water=$(cat "$CHECK_SWEEP_HIGH_WATER" 2>/dev/null || true)
+      case "$check_sweep_high_water" in
+        ''|.*|*[!A-Za-z0-9._-]*|*/*) check_sweep_high_water= ;;
+      esac
+      if [ -z "$check_sweep_high_water" ] \
+        || { [ -n "$check_cursor" ] && [[ "$check_cursor" > "$check_sweep_high_water" ]]; }; then
+        check_cursor=
+        check_sweep_high_water=$(check_sweep_high_water_now)
+        if [ -n "$check_sweep_high_water" ]; then
+          write_check_sweep_state "" "$check_sweep_high_water" || exit 1
+        fi
+      fi
     fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       check_name=$(basename "$c")
-      if [ -n "$check_cursor" ]; then
-        if [[ "$check_name" > "$check_cursor" ]]; then
-          check_cursor=
-        else
-          continue
-        fi
+      [ -z "$check_cursor" ] || [[ "$check_name" > "$check_cursor" ]] || continue
+      if [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
+        [[ "$check_name" < "$check_sweep_high_water" || "$check_name" = "$check_sweep_high_water" ]] \
+          || continue
       fi
       if [ "$CHECKS_PER_CYCLE" -gt 0 ] && [ "$checks_run" -ge "$CHECKS_PER_CYCLE" ]; then
-        checks_remaining=1
         break
       fi
       checks_run=$((checks_run + 1))
@@ -1815,14 +1854,7 @@ EOF
       checkpoint_check_sweep || exit 1
       wake "$reason"
     fi
-    if [ "$CHECKS_PER_CYCLE" -gt 0 ] && [ "$checks_remaining" -eq 1 ]; then
-      [ -n "$last_check_name" ] || exit 1
-      ( umask 077; printf '%s\n' "$last_check_name" > "$CHECK_SWEEP_CURSOR" ) || exit 1
-      rm -f "$STATE/.last-check"
-    else
-      rm -f "$CHECK_SWEEP_CURSOR"
-      touch "$STATE/.last-check"
-    fi
+    checkpoint_check_sweep || exit 1
   fi
 
   # On the first changed signal, linger one grace period and re-scan before

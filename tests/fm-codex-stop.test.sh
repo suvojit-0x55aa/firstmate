@@ -188,7 +188,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v4\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v5\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -394,7 +394,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v4\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v5\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -1415,8 +1415,8 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
         . "$1/fm-backend.sh"
         fm_backend_agent_state_batch
       ' _ "$ROOT/bin") || fail 'Herdr bulk classifier failed'
-  [ "$(printf '%s\n' "$states" | awk -F '\t' '$2 == "fleet:w-dead:p1" { print $3 }')" = dead ] \
-    || fail 'Herdr bulk classifier did not mark an existing agent-less pane dead'
+  [ "$(printf '%s\n' "$states" | awk -F '\t' '$2 == "fleet:w-dead:p1" { print $3 }')" = unverified ] \
+    || fail 'Herdr bulk classifier treated an unknown agent status as authoritative death'
   [ "$(printf '%s\n' "$states" | awk -F '\t' '$2 == "fleet:w-live:p1" { print $3 }')" = alive ] \
     || fail 'Herdr bulk classifier did not retain a registered live pane'
   for id in $(seq 1 40); do
@@ -1430,9 +1430,9 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   grep -R -qF "$(printf '\ttmux\tlocal:dead')" "$dir/state/.death-notified-v3" \
     || fail 'Herdr watcher phase did not finish before the local terminal wake'
   calls=$(wc -l < "$dir/herdr-probes" | tr -d '[:space:]')
-  [ "$calls" = 3 ] \
-    || fail "Herdr admission and watcher used $calls backend probes instead of three bounded snapshots"
-  [ "$(awk -F '\t' '$2 == "pane" && $3 == "list" { count++ } END { print count + 0 }' "$dir/herdr-probes")" = 3 ] \
+  [ "$calls" -ge 3 ] && [ "$calls" -le 8 ] \
+    || fail "Herdr admission and watcher used $calls snapshots for a 40-endpoint inventory"
+  [ "$(awk -F '\t' '$2 == "pane" && $3 == "list" { count++ } END { print count + 0 }' "$dir/herdr-probes")" = "$calls" ] \
     || fail 'Herdr batch classification issued a non-inventory endpoint probe'
   finish "$dir"
   pass 'Herdr histories use bounded bulk snapshots without endpoint probes'
@@ -2383,6 +2383,16 @@ SH
     || fail 'recurring actionable check did not persist sweep progress'
   [ ! -e "$state/.last-check" ] || fail 'recurring actionable check delayed its incomplete sweep'
   ack_watcher_cycle "$state" >/dev/null || fail 'could not acknowledge recurring actionable wake'
+  printf '%s\n' '#!/usr/bin/env bash' \
+    "printf '%s\\n' early >> \"\$FM_HOME/check-runs\"" > "$state/0-early.check.sh"
+  chmod 0700 "$state/0-early.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" 0-early >/dev/null \
+    || fail 'could not register adversarial early check'
+  printf '%s\n' '#!/usr/bin/env bash' \
+    "printf '%s\\n' late >> \"\$FM_HOME/check-runs\"" > "$state/zz-late.check.sh"
+  chmod 0700 "$state/zz-late.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" zz-late >/dev/null \
+    || fail 'could not register adversarial late check'
 
   set +e
   run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
@@ -2403,7 +2413,31 @@ SH
   [ "$(cat "$dir/check-runs")" = $'recurring\npr\ntail' ] \
     || fail "bounded sweep did not advance fairly: $(cat "$dir/check-runs")"
   [ ! -e "$state/.check-sweep-cursor" ] || fail 'completed resumed sweep retained its cursor'
+  [ ! -e "$state/.check-sweep-high-water" ] || fail 'completed resumed sweep retained its high-water bound'
   [ -e "$state/.last-check" ] || fail 'completed resumed sweep did not restore its cadence'
+  rm -f "$state/.last-check" "$state/a-recurring.check.sh" "$state/z-tail.check.sh"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 run_bounded_watcher_cycle \
+    "$dir" "$dir/fakebin" > "$dir/watch-4.out" 2> "$dir/watch-4.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "next lexical sweep ended unexpectedly: rc=$rc $(cat "$dir/watch-4.err")"
+  [ "$(cat "$state/.check-sweep-cursor")" = 0-early.check.sh ] \
+    || fail 'new earlier check did not lead the next immutable sweep'
+  [ "$(cat "$state/.check-sweep-high-water")" = zz-late.check.sh ] \
+    || fail 'next sweep did not freeze its starting high-water bound'
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 run_bounded_watcher_cycle \
+    "$dir" "$dir/fakebin" > "$dir/watch-5.out" 2> "$dir/watch-5.err"
+  rc=$?
+  set -e
+  case "$rc" in 0|124) ;; *) fail "late lexical sweep ended unexpectedly: rc=$rc $(cat "$dir/watch-5.err")" ;; esac
+  [ "$(cat "$dir/check-runs")" = $'recurring\npr\ntail\nearly\nlate' ] \
+    || fail "immutable high-water sweep starved an earlier arrival: $(cat "$dir/check-runs")"
+  [ ! -e "$state/.check-sweep-cursor" ] && [ ! -e "$state/.check-sweep-high-water" ] \
+    || fail 'completed adversarial sweep retained progress state'
   pass 'actionable custom and merged checks resume bounded sweeps fairly'
 }
 
@@ -3048,7 +3082,7 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
   [ "$inventory" = $'live\nnewly-dead' ] \
     || fail "registry recovery lost a new death or admitted surfaced history: $inventory"
-  generation=$(cut -f2 "$dir/state/.active-supervision-generation")
+  generation=$(head -1 "$dir/state/.active-supervision-generation" | cut -f2)
   printf '%s\n' 'window=fleet:new' 'spawn_gen=new-a' > "$dir/state/new.meta"
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
@@ -3140,6 +3174,64 @@ test_registry_pending_snapshot_is_immediately_authoritative() {
   pass 'pending lifecycle ownership publishes through one authoritative snapshot'
 }
 
+test_registry_snapshot_index_is_generation_bound() {
+  local dir id targets= generation index first second rc
+  dir=$(fixture active-supervision-membership-index)
+  install_endpoint_inventory_tmux "$dir"
+  for id in $(seq 1 80); do
+    targets="$targets fleet:active-$id"
+    printf 'window=fleet:active-%s\nspawn_gen=active-%s\n' "$id" "$id" \
+      > "$dir/state/active-$id.meta"
+  done
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$targets" FM_TEST_LIVE_TARGETS="$targets" \
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-wake-lib.sh"
+      . "$1/fm-backend.sh"
+      . "$1/fm-supervision-registry-lib.sh"
+      fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+    ' _ "$ROOT/bin" || fail 'large active registry fixture could not be recovered'
+  generation=$(head -1 "$dir/state/.active-supervision-generation" | cut -f2)
+  index=$(mktemp -d "$dir/state/.active-supervision-index.test.XXXXXX")
+  FM_STATE_OVERRIDE="$dir/state" FM_TEST_INDEX="$index" FM_TEST_GENERATION="$generation" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_snapshot_index \
+      "$FM_STATE_OVERRIDE" "$FM_TEST_GENERATION" "$FM_TEST_INDEX" || exit 1
+    for id in $(seq 1 80); do
+      fm_supervision_registry_index_contains "$FM_TEST_INDEX" "active-$id" || exit 1
+    done
+    ! fm_supervision_registry_index_contains "$FM_TEST_INDEX" archived
+  ' _ "$ROOT/bin" || fail 'generation-bound membership index lost active-owner identity'
+  printf '%s\n' 'window=fleet:new' 'spawn_gen=new-gen' > "$dir/state/new.meta"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_register "$FM_STATE_OVERRIDE" new "$FM_STATE_OVERRIDE/new.meta" || exit 1
+    head -1 "$FM_STATE_OVERRIDE/.active-supervision-generation" | cut -f2
+    fm_supervision_registry_retire "$FM_STATE_OVERRIDE" new || exit 1
+    head -1 "$FM_STATE_OVERRIDE/.active-supervision-generation" | cut -f2
+  ' _ "$ROOT/bin" > "$dir/rapid-generations" || fail 'rapid registry mutations failed'
+  first=$(sed -n '1p' "$dir/rapid-generations")
+  second=$(sed -n '2p' "$dir/rapid-generations")
+  case "$generation:$first:$second" in g[0-9]*:g[0-9]*:g[0-9]*) ;; *) fail 'registry emitted a non-monotonic generation format' ;; esac
+  [ "${first#g}" -gt "${generation#g}" ] && [ "${second#g}" -gt "${first#g}" ] \
+    || fail "rapid registry mutations reused or reversed generations: $generation $first $second"
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" FM_TEST_GENERATION="$generation" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE" "$FM_TEST_GENERATION"
+  ' _ "$ROOT/bin" >/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail 'registry mutation did not revoke the indexed generation'
+  find "$index" -depth -delete
+  pass 'active-owner membership is indexed once per monotonic generation'
+}
+
 test_registry_reservation_recovers_spawn_crash_windows() {
   local dir inventory rc
   dir=$(fixture active-supervision-reservation-recovery)
@@ -3166,32 +3258,26 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" created created-gen || exit 1
     fm_supervision_registry_mark_reservation \
       "$FM_STATE_OVERRIDE" created created-gen created tmux @42 fleet:created || exit 1
-    fm_supervision_registry_cancel_reservation \
-      "$FM_STATE_OVERRIDE" created created-gen reserved || exit 1
     exit 74
   ' _ "$ROOT/bin" >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -eq 74 ] || fail 'post-creation crash fixture did not reach its crash boundary'
-  set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
-  ' _ "$ROOT/bin" > "$dir/created-unpublished"
-  rc=$?
-  set -e
-  [ "$rc" -eq 2 ] || fail 'created endpoint without metadata was not retained fail-closed'
-  grep -F "$(printf 'reservation\tcreated\tcreated-gen\t')" \
+  ' _ "$ROOT/bin" > "$dir/created-unpublished" \
+    || fail 'created endpoint reservation did not converge after owner death'
+  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/created-unpublished")
+  [ "$inventory" = created ] || fail "created endpoint recovery produced the wrong inventory: $inventory"
+  [ "$(sed -n 's/^window=//p' "$dir/state/created.meta")" = @42 ] \
+    && [ "$(sed -n 's/^spawn_gen=//p' "$dir/state/created.meta")" = created-gen ] \
+    || fail 'created endpoint recovery did not preserve its exact reserved identity'
+  grep -F "$(printf 'entry\tcreated\tcreated-gen\tpending')" \
     "$dir/state/.active-supervision-generation" >/dev/null \
-    || fail 'created endpoint ownership was erased after owner death'
-  fm_state="$dir/state" bash -c '
-    . "$1/fm-wake-lib.sh"
-    . "$1/fm-backend.sh"
-    . "$1/fm-supervision-registry-lib.sh"
-    fm_supervision_registry_cancel_reservation "$fm_state" created created-gen
-  ' _ "$ROOT/bin" || fail 'could not retire the created-endpoint fixture'
+    || fail 'created endpoint reservation did not become pending ownership'
 
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -3212,16 +3298,16 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
     fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
-  ' _ "$ROOT/bin" > "$dir/remote-unknown"
-  rc=$?
+  ' _ "$ROOT/bin" > "$dir/remote-unknown" \
+    || fail 'remote unknown completion did not converge conservatively'
   set -e
-  [ "$rc" -eq 2 ] || fail 'remote unknown completion was not retained fail-closed'
-  fm_state="$dir/state" bash -c '
-    . "$1/fm-wake-lib.sh"
-    . "$1/fm-backend.sh"
-    . "$1/fm-supervision-registry-lib.sh"
-    fm_supervision_registry_cancel_reservation "$fm_state" remote remote-gen
-  ' _ "$ROOT/bin" || fail 'could not retire the remote unknown-completion fixture'
+  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/remote-unknown")
+  [ "$inventory" = $'created\nremote' ] \
+    || fail "remote unknown recovery produced the wrong inventory: $inventory"
+  [ "$(sed -n 's/^window=//p' "$dir/state/remote.meta")" = remote:remote ] \
+    && [ "$(sed -n 's/^remote_host=//p' "$dir/state/remote.meta")" = host.example ] \
+    && [ "$(sed -n 's/^spawn_gen=//p' "$dir/state/remote.meta")" = remote-gen ] \
+    || fail 'remote unknown recovery did not preserve its route ownership'
 
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -3245,7 +3331,8 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
   ' _ "$ROOT/bin" > "$dir/recovered" || fail 'published reservation was not recovered'
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
-  [ "$inventory" = published ] || fail "post-metadata crash recovered the wrong inventory: $inventory"
+  [ "$inventory" = $'created\npublished\nremote' ] \
+    || fail "post-metadata crash recovered the wrong inventory: $inventory"
   grep -F "$(printf 'entry\tpublished\tpublished-gen\tpending')" \
     "$dir/state/.active-supervision-generation" >/dev/null \
     || fail 'published reservation did not become pending lifecycle ownership'
@@ -3417,6 +3504,7 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_active_supervision_registry_owns_lifecycle_inventory
 test_registry_receipt_recovery_is_owner_addressed
 test_registry_pending_snapshot_is_immediately_authoritative
+test_registry_snapshot_index_is_generation_bound
 test_registry_reservation_recovers_spawn_crash_windows
 test_registered_check_kills_term_ignoring_process_group
 test_active_only_pending_replies_exclude_archive

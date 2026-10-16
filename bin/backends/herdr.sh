@@ -1963,7 +1963,7 @@ fm_backend_herdr_agent_inventory_snapshot() {  # <session> <snapshot-dir>
     [ -n "$pane_id" ] || continue
     key=$(fm_backend_agent_state_cache_key "$pane_id") || return 1
     case "$agent_status" in
-      unknown) state=dead ;;
+      unknown) state=unverified ;;
       working|idle|done|blocked) state=alive ;;
       *) return 1 ;;
     esac

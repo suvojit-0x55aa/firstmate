@@ -210,7 +210,11 @@ set -o pipefail
 fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
 generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 printf 'generation\t%s\n' "$generation"
-inventory=$(fm_supervision_registry_inventory "$FM_STATE_OVERRIDE" "$generation") || exit 1
+registry_index=$(umask 077; mktemp -d "$FM_STATE_OVERRIDE/.active-supervision-index.XXXXXX") || exit 1
+cleanup_registry_index() { find "$registry_index" -depth -delete; }
+trap cleanup_registry_index EXIT
+fm_supervision_registry_snapshot_index "$FM_STATE_OVERRIDE" "$generation" "$registry_index" || exit 1
+inventory=$(cat "$registry_index/inventory") || exit 1
 owners=
 while IFS= read -r meta; do
   [ -n "$meta" ] || continue
@@ -251,7 +255,7 @@ for file in "$FM_STATE_OVERRIDE"/*.status "$FM_STATE_OVERRIDE"/*.turn-ended; do
   [ -f "$file" ] || continue
   task=$(basename "$file")
   task=${task%.status}; task=${task%.turn-ended}
-  fm_supervision_registry_contains "$FM_STATE_OVERRIDE" "$task" "$generation" || continue
+  fm_supervision_registry_index_contains "$registry_index" "$task" || continue
   if ! fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file"; then
     printf 'signal\t%s\n' "$(basename "$file")"
   fi
@@ -271,7 +275,7 @@ if [ -d "$dir" ]; then
     esac
     [ "$((now - delivered))" -ge "$grace" ] || continue
     task_id=$(fm_pending_reply_get "$rec" task_id)
-    fm_supervision_registry_contains "$FM_STATE_OVERRIDE" "$task_id" "$generation" || continue
+    fm_supervision_registry_index_contains "$registry_index" "$task_id" || continue
     printf 'owner-fanout\tpending:%s\n' "$(basename "$rec")"
     if fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id"; then
       printf 'remote-recovery\t%s\n' "$(basename "$rec")"
@@ -460,7 +464,7 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('inventory', 'active-registry-v4'),
+        ('inventory', 'active-registry-v5'),
         ('check-batch-handoff', 'resume-owner-cycle-v4'),
     )
     return 'fm-codex-bounded.v9\t' + '\t'.join(
