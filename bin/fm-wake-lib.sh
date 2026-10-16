@@ -322,6 +322,8 @@ fm_lock_clean_known_files() {
     "$lockdir/watcher-path" \
     "$lockdir/codex-bounded-capability" \
     "$lockdir/codex-bounded-capability.tmp" \
+    "$lockdir/codex-check-batch-boundary" \
+    "$lockdir/codex-check-batch-boundary.tmp" \
     2>/dev/null || true
 }
 

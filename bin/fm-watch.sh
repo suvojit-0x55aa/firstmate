@@ -440,25 +440,39 @@ recorded_window_inventory() {
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$w" "$task" "$backend" "$kind" "$route" "$record_home" "$spawn_gen"
     done
-  } | awk -F '\t' '!seen[$1]++'
+  }
 }
 
 recorded_windows() {
-  recorded_window_inventory | cut -f1
+  recorded_window_inventory | cut -f1 | awk '!seen[$0]++'
 }
 
 recorded_window_inventory_with_agent_state() {
+  local owners endpoint_states
+  owners=$(recorded_window_inventory) || return 1
   if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
-    if ! recorded_window_inventory \
-      | while IFS="$(printf '\t')" read -r w task backend kind route record_home spawn_gen; do
-          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$backend" "$w" "$route" "$record_home" "$task" "$kind" "$spawn_gen"
-        done \
-      | fm_backend_agent_state_batch; then
+    if ! endpoint_states=$(printf '%s\n' "$owners" \
+      | awk -F '\t' 'BEGIN { OFS="\t" } !seen[$3 SUBSEP $5 SUBSEP $1]++ { print $3, $1, $5, $6 }' \
+      | fm_backend_agent_state_batch); then
       printf '__FM_AGENT_STATE_ERROR__\t-\tunreadable\t-\t-\t-\t-\t-\n'
+      return 0
     fi
+    {
+      printf '%s\n' "$endpoint_states"
+      printf '__FM_WINDOW_OWNERS__\n'
+      printf '%s\n' "$owners"
+    } | awk -F '\t' '
+      BEGIN { OFS="\t" }
+      $0 == "__FM_WINDOW_OWNERS__" { owners=1; next }
+      !owners { state[$1 SUBSEP $4 SUBSEP $2]=$3; next }
+      NF >= 7 {
+        key=$3 SUBSEP $5 SUBSEP $1
+        verdict=(key in state ? state[key] : "unverified")
+        print $3, $1, verdict, $5, $6, $2, $4, $7
+      }
+    '
   else
-    recorded_window_inventory \
+    printf '%s\n' "$owners" \
       | while IFS="$(printf '\t')" read -r w task backend kind route record_home spawn_gen; do
           printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$backend" "$w" unverified "$route" "$record_home" "$task" "$kind" "$spawn_gen"
@@ -1336,6 +1350,10 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
+if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
+  && [ -z "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
+  FM_CODEX_CHECK_BATCH_LEASE="watcher-$WATCHER_PID"
+fi
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
@@ -1343,20 +1361,39 @@ FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 capability_tmp="$WATCH_LOCK/codex-bounded-capability.tmp"
-if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
+if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
+  && [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
   if [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ]; then
     remote_observation=deferred
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v3\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=park-v1\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
-    "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation")
+    "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" \
+    "$FM_CODEX_CHECK_BATCH_LEASE")
 else
   capability_value=$(printf 'fm-watch.v1\tunbounded\n')
 fi
+
+publish_codex_check_batch_boundary() {
+  local boundary_tmp="$WATCH_LOCK/codex-check-batch-boundary.tmp"
+  [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] || return 1
+  [ "$CHECKS_PER_CYCLE" -gt 0 ] || return 1
+  [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ] || return 1
+  ( umask 077; printf '%s\n' "$FM_CODEX_CHECK_BATCH_LEASE" > "$boundary_tmp" ) \
+    && mv -f "$boundary_tmp" "$WATCH_LOCK/codex-check-batch-boundary"
+}
+
+park_at_codex_check_batch_boundary() {
+  publish_codex_check_batch_boundary || return 1
+  while [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]; do
+    touch "$STATE/.last-watcher-beat"
+    sleep "$POLL"
+  done
+}
 if ! ( umask 077; printf '%s\n' "$capability_value" > "$capability_tmp" ) \
   || ! mv -f "$capability_tmp" "$WATCH_LOCK/codex-bounded-capability"; then
   rm -f "$capability_tmp" 2>/dev/null || true
@@ -1877,7 +1914,12 @@ EOF
     fi
   fi
 
-  # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
-  # else the blind poll sleep. See event_wait_or_sleep.
-  event_wait_or_sleep
+  if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+    park_at_codex_check_batch_boundary || exit 1
+    exit 0
+  else
+    # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
+    # else the blind poll sleep. See event_wait_or_sleep.
+    event_wait_or_sleep
+  fi
 done

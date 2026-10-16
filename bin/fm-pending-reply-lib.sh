@@ -1292,8 +1292,8 @@ fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory]
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local batch_inventory=${2-} inventory_backend inventory_target inventory_state inventory_route
   local inventory_home inventory_task inventory_kind inventory_spawn_gen
-  local observation observation_task found i
-  local -a observation_tasks=() observation_values=()
+  local observation observation_key observation_route found i
+  local -a observation_keys=() observation_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -1370,12 +1370,17 @@ fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory]
       fi
       if [ -n "$target" ]; then
         label="fm-$task_id"
+        observation_route=local
+        case "$target" in remote:*) observation_route=remote ;; esac
+        [ -z "$remote_host" ] || observation_route=remote
         observation=
         found=0
         if [ -n "$batch_inventory" ]; then
           while IFS="$(printf '\t')" read -r inventory_backend inventory_target inventory_state \
             inventory_route inventory_home inventory_task inventory_kind inventory_spawn_gen; do
-            [ "$inventory_task" = "$task_id" ] || continue
+            [ "$inventory_backend" = "$backend" ] || continue
+            [ "$inventory_target" = "$target" ] || continue
+            [ "$inventory_route" = "$observation_route" ] || continue
             [ "$inventory_route" = local ] || continue
             case "$inventory_state" in
               dead|missing)
@@ -1388,16 +1393,16 @@ fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory]
 $batch_inventory
 EOF
         fi
-        for ((i = 0; i < ${#observation_tasks[@]}; i++)); do
+        observation_key="$backend:$observation_route:$target"
+        for ((i = 0; i < ${#observation_keys[@]}; i++)); do
           [ "$found" = 0 ] || break
-          observation_task=${observation_tasks[$i]}
-          [ "$observation_task" = "$task_id" ] || continue
+          [ "${observation_keys[$i]}" = "$observation_key" ] || continue
           observation=${observation_values[$i]}
           found=1
           break
         done
         if [ "$found" = 0 ]; then
-          if [ -n "$remote_host" ]; then
+          if [ "$observation_route" = remote ]; then
             if [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ]; then
               observation=unknown
             else
@@ -1408,7 +1413,7 @@ EOF
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
-          observation_tasks+=("$task_id")
+          observation_keys+=("$observation_key")
           observation_values+=("$observation")
         fi
         busy=$(fm_pending_reply_busy_state_from_observation "$rec" "$observation")

@@ -165,12 +165,13 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
   1:*)
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
-    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\n' \
+    batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
+    printf 'fm-codex-bounded.v3\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=park-v1\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
       "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
-      "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" \
+      "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" "$batch_lease" \
       > "$lock/codex-bounded-capability"
     ;;
   *) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
@@ -211,7 +212,13 @@ while :; do
       fi
       touch "$FM_HOME/state/.last-watcher-beat"
       ;;
-    *) touch "$FM_HOME/state/.last-watcher-beat" ;;
+    heartbeat-only)
+      touch "$FM_HOME/state/.last-watcher-beat"
+      ;;
+    *)
+      touch "$FM_HOME/state/.last-watcher-beat"
+      [ -z "${batch_lease:-}" ] || printf '%s\n' "$batch_lease" > "$lock/codex-check-batch-boundary"
+      ;;
   esac
 done
 WATCH
@@ -349,12 +356,13 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
   1:*)
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
-    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\n' \
+    batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
+    printf 'fm-codex-bounded.v3\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=park-v1\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
       "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
-      "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" \
+      "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" "$batch_lease" \
       > "$lock/codex-bounded-capability"
     ;;
   *) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
@@ -367,6 +375,9 @@ trap 'exit 0' HUP INT TERM
 touch "$FM_HOME/state/.last-watcher-beat"
 printf '%s\n' "$$" > "$FM_HOME/attached-watcher-ready"
 sleep "${FM_SIGNAL_GRACE:-30}"
+if [ -n "${batch_lease:-}" ]; then
+  printf '%s\n' "$batch_lease" > "$lock/codex-check-batch-boundary"
+fi
 while :; do
   touch "$FM_HOME/state/.last-watcher-beat"
   sleep 1
@@ -1487,6 +1498,92 @@ SH
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'pending replies reuse dead inventory while uncertainty remains observable'
+}
+
+test_duplicate_endpoint_pending_replies_share_classification() {
+  local dir mode target rc
+  for mode in dead missing; do
+    dir=$(fixture "duplicate-endpoint-$mode-pending")
+    install_endpoint_inventory_tmux "$dir"
+    target="fleet:shared-$mode"
+    printf 'window=%s\nkind=secondmate\nharness=grok\nbackend=tmux\n' "$target" \
+      > "$dir/state/a-owner.meta"
+    printf 'window=%s\nkind=secondmate\nharness=grok\nbackend=tmux\n' "$target" \
+      > "$dir/state/b-pending.meta"
+    printf '%s\n' 'working: awaiting a correlated report' > "$dir/state/b-pending.status"
+    prime_status_seen "$dir/state" "$dir/state/b-pending.status"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 bash -c '
+      . "$1/fm-pending-reply-lib.sh"
+      corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" b-pending "report status") || exit 1
+      fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 1000
+    ' _ "$ROOT/bin" || fail "could not create duplicate-endpoint $mode pending reply"
+    set +e
+    if [ "$mode" = dead ]; then
+      FM_PENDING_REPLY_NOW=1000 FM_TEST_EXISTING_TARGETS="$target" \
+        FM_TEST_CAPTURE_LOG="$dir/captures" \
+        run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/out" 2> "$dir/err"
+    else
+      FM_PENDING_REPLY_NOW=1000 FM_TEST_CAPTURE_LOG="$dir/captures" \
+        run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/out" 2> "$dir/err"
+    fi
+    rc=$?
+    set -e
+    case "$mode:$rc" in
+      dead:0|dead:124|missing:124) : ;;
+      *) fail "duplicate-endpoint $mode cycle ended unexpectedly: rc=$rc $(cat "$dir/err")" ;;
+    esac
+    if [ "$mode" = dead ]; then
+      grep -qF "$(printf '\tstale\t%s\tstale: %s' "$target" "$target")" "$dir/state/.wake-queue" \
+        || fail 'duplicate-endpoint dead fixture was not authoritatively classified'
+    fi
+    [ ! -e "$dir/captures" ] \
+      || fail "duplicate-endpoint $mode pending reply captured an authoritative unavailable pane"
+  done
+  pass 'duplicate endpoint owners share exact unavailable classification'
+}
+
+test_bounded_check_batch_parks_at_safe_boundary() {
+  local dir watcher rc original_root=$TEST_ROOT
+  dir=$(fixture bounded-check-batch-boundary)
+  for name in a-first b-second; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "printf '%s\\n' '$name-start' >> \"\$FM_HOME/check-runs\"" \
+      'sleep 0.2' \
+      "printf '%s\\n' '$name-finish' >> \"\$FM_HOME/check-runs\"" \
+      > "$dir/state/$name.check.sh"
+    chmod 0700 "$dir/state/$name.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null \
+      || fail "could not register $name boundary fixture"
+  done
+  env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=2 \
+    FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 FM_CODEX_CHECK_BATCH_LEASE=test-lease \
+    FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 FM_POLL=0.02 FM_HEARTBEAT=999999 \
+    FM_SIGNAL_GRACE=0 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher=$!
+  wait_file "$dir/state/.watch.lock/codex-check-batch-boundary" 100
+  sleep 0.3
+  [ "$(cat "$dir/check-runs")" = $'a-first-start\na-first-finish' ] \
+    || fail "bounded watcher crossed its safe boundary: $(cat "$dir/check-runs")"
+  kill -0 "$watcher" 2>/dev/null || fail 'bounded watcher exited instead of parking at its boundary'
+  kill -TERM "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  [ "$(cat "$dir/state/.check-sweep-cursor")" = a-first.check.sh ] \
+    || fail 'bounded watcher did not persist progress before parking'
+
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  FM_TEST_WATCH_MODE=heartbeat-only FM_SIGNAL_GRACE=0 FM_CHECK_TIMEOUT=1 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc" 250
+  rc=$(cat "$dir/rc")
+  [ "$rc" = 2 ] || fail 'heartbeat-only watcher allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'watcher failed' \
+    'heartbeat-only watcher was not refused without a safe boundary'
+  assert_not_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' \
+    'heartbeat was treated as batch completion'
+  finish "$dir"
+  pass 'bounded checks park and heartbeat cannot impersonate completion'
 }
 
 test_paused_and_captain_held_deaths_notify_once() {
@@ -2681,6 +2778,17 @@ test_record_mutation_interruption_clears_ownership() {
   pass 'owner death revokes health without an orphan record writer; kernel releases successor exclusion'
 }
 
+if [ -n "${FM_CODEX_STOP_FOCUSED_CASES:-}" ]; then
+  for focused_case in $FM_CODEX_STOP_FOCUSED_CASES; do
+    case "$focused_case" in
+      test_*) declare -F "$focused_case" >/dev/null || fail "unknown focused case: $focused_case" ;;
+      *) fail "invalid focused case: $focused_case" ;;
+    esac
+    "$focused_case"
+  done
+  exit 0
+fi
+
 test_initial_fork_failure_blocks_stop
 test_python_bootstrap_failure_fails_closed
 test_python_launch_failure_fails_closed
@@ -2711,6 +2819,8 @@ test_remote_inbox_stays_owned_by_remote_delivery
 test_herdr_endpoints_use_one_snapshot_per_cycle
 test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
+test_duplicate_endpoint_pending_replies_share_classification
+test_bounded_check_batch_parks_at_safe_boundary
 test_paused_and_captain_held_deaths_notify_once
 test_local_secondmate_death_notifies_once
 test_dead_endpoint_preserves_inbox_escalation

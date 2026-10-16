@@ -273,14 +273,14 @@ set -o pipefail
     [ -n "$record_home" ] || record_home=-
     printf '%s\t%s\t%s\t%s\n' "$target" "$backend" "$route" "$record_home"
   done
-} | awk -F '\t' '!seen[$1]++' |
+} | awk -F '\t' '!seen[$2 SUBSEP $3 SUBSEP $1]++' |
 while IFS="$(printf '\t')" read -r target backend route record_home; do
   printf '%s\t%s\t%s\t%s\n' "$backend" "$target" "$route" "$record_home"
 done | fm_backend_agent_state_batch |
 while IFS="$(printf '\t')" read -r backend target agent_state route record_home; do
   case "$agent_state" in
     dead|missing) ;;
-    *) printf 'budget-window\t%s\n' "$target" ;;
+    *) printf 'budget-window\t%s\t%s\t%s\n' "$backend" "$route" "$target" ;;
   esac
 done
 ''', timeout=8, deadline=probe_deadline)
@@ -441,8 +441,9 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
+        ('check-batch-handoff', 'park-v1'),
     )
-    return 'fm-codex-bounded.v2\t' + '\t'.join(
+    return 'fm-codex-bounded.v3\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
@@ -453,9 +454,31 @@ def bounded_watcher_capability(check_limit):
         fd = os.open('.watch.lock/codex-bounded-capability', flags)
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_size > 512:
-            return False
+            return None
         content = os.read(fd, 513).decode('ascii')
-        return content == bounded_watcher_capability_content(check_limit)
+        prefix = bounded_watcher_capability_content(check_limit).rstrip('\n') + '\tcheck-batch-lease='
+        if not content.startswith(prefix) or not content.endswith('\n'):
+            return None
+        lease = content[len(prefix):-1]
+        if not lease or len(lease) > 96 or any(char not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-' for char in lease):
+            return None
+        return lease
+    except (OSError, UnicodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def watcher_check_batch_boundary(batch_lease):
+    fd = None
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open('.watch.lock/codex-check-batch-boundary', flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 128:
+            return False
+        return os.read(fd, 129).decode('ascii') == batch_lease + '\n'
     except (OSError, UnicodeError):
         return False
     finally:
@@ -469,7 +492,8 @@ def watcher_snapshot(grace, check_limit, probe_deadline=None):
                    str(grace), deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
-    if not bounded_watcher_capability(check_limit):
+    batch_lease = bounded_watcher_capability(check_limit)
+    if batch_lease is None:
         return None
     fields = result.stdout.rstrip('\n').split('\t')
     if len(fields) != 2 or not all(fields):
@@ -478,7 +502,7 @@ def watcher_snapshot(grace, check_limit, probe_deadline=None):
         beat = os.stat('.last-watcher-beat').st_mtime_ns
     except OSError:
         return None
-    return fields[0], fields[1], beat
+    return fields[0], fields[1], beat, batch_lease
 
 
 def read_record():
@@ -545,7 +569,6 @@ def owner(lock):
     watcher_last_beat = 0
     watcher_last_progress = 0
     next_watcher_probe = 0
-    confirmation_beat = 0
     confirmation_started_at = 0
     cycle_timeout = watcher_guard_grace
     check_batch_limit = 1
@@ -799,6 +822,7 @@ def owner(lock):
                                 arm_environment['FM_GUARD_GRACE'] = str(cycle_limit)
                                 arm_environment['FM_CODEX_BOUNDED_WATCH'] = '1'
                                 arm_environment['FM_CHECKS_PER_CYCLE'] = str(check_batch_limit)
+                                arm_environment['FM_CODEX_CHECK_BATCH_LEASE'] = token
                                 arm_environment['FM_CHECK_TIMEOUT'] = str(check_timeout)
                                 arm_environment['FM_CHECK_INTERVAL'] = str(check_interval)
                                 arm_environment['FM_POLL'] = capability_number(watcher_cadence)
@@ -930,12 +954,10 @@ def owner(lock):
                             transport_deadline - now - terminal_reserve)):
                         reason = budget_reason
                     else:
-                        confirmation_beat = proof[2]
                         confirmation_started_at = now
                         publish('confirming', cycle_timeout, confirmation_started_at)
                 if not reason and phase == 'confirming' and probe_due:
-                    beat = watcher_beat()
-                    if beat > confirmation_beat:
+                    if watcher_proof is not None and watcher_check_batch_boundary(watcher_proof[3]):
                         proof = watcher_snapshot(cycle_timeout, check_batch_limit,
                                                  transport_deadline - terminal_reserve)
                         now = time.monotonic()
@@ -946,7 +968,7 @@ def owner(lock):
                         if current_arm_identity is None or now >= transport_deadline - terminal_reserve:
                             reason = budget_reason
                         elif (proof is not None and watcher_proof is not None and
-                                proof[:2] == watcher_proof[:2] and proof[2] > confirmation_beat and
+                                proof[:2] == watcher_proof[:2] and proof[3] == watcher_proof[3] and
                                 (arm is None or current_arm_identity == arm_identity)):
                             reason = 'quiet checkpoint elapsed; supervision is still needed'
                         else:
