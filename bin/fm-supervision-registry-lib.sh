@@ -99,9 +99,28 @@ fm_supervision_registry_remote_meta_valid() { # <meta> <task> <spawn> <phase> <b
 }
 
 fm_supervision_registry_staged_meta_valid() { # <meta> <task> <spawn> <phase> <backend> <target> <detail>
-  local meta=$1 task=$2 spawn_gen=$3 phase=$4 backend=$5 target=$6 detail=$7 validated_target
+  local meta=$1 task=$2 spawn_gen=$3 phase=$4 backend=$5 target=$6 detail=$7 validated_target endpoint_state
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(fm_meta_get "$meta" spawn_gen)" = "$spawn_gen" ] || return 1
+  endpoint_state=$(fm_meta_get "$meta" endpoint_state)
+  if [ "$phase" = planned ]; then
+    [ "$endpoint_state" = planned ] || return 1
+    [ "$(fm_backend_meta_exact_value "$meta" endpoint_task_id 2>/dev/null || true)" = "$task" ] || return 1
+    [ "$(fm_backend_meta_exact_value "$meta" backend 2>/dev/null || true)" = "$backend" ] || return 1
+    [ "$(fm_backend_meta_exact_value "$meta" window 2>/dev/null || true)" = "$target" ] || return 1
+    [ -n "$(fm_backend_meta_exact_value "$meta" worktree 2>/dev/null || true)" ] || return 1
+    [ -n "$(fm_backend_meta_exact_value "$meta" project 2>/dev/null || true)" ] || return 1
+    [ "$(fm_backend_meta_exact_value "$meta" recovery_detail 2>/dev/null || true)" = "$detail" ] || return 1
+    return 0
+  fi
+  if [ "$phase" = worktree-only ]; then
+    [ "$backend" = orca ] && [ "$endpoint_state" = worktree-only ] || return 1
+    fm_backend_validate_task_endpoint "$meta" "$task" >/dev/null 2>&1 || return 1
+    [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ] || return 1
+    [ "$(fm_backend_meta_exact_value "$meta" window 2>/dev/null || true)" = "$target" ] || return 1
+    [ "$(fm_backend_meta_exact_value "$meta" orca_worktree_id 2>/dev/null || true)" = "$detail" ] || return 1
+    return 0
+  fi
   case "$backend" in
     remote|remote-herdr)
       fm_supervision_registry_remote_meta_valid \
@@ -235,7 +254,7 @@ fm_supervision_registry_snapshot_valid() {
             [ -z "$field6$field7$field8$field9" ] || return 1
             ;;
           *)
-            case "$field6" in reserved|created|remote-unknown) ;; *) return 1 ;; esac
+            case "$field6" in reserved|planned|worktree-only|created|remote-unknown) ;; *) return 1 ;; esac
             case "$field7$field8$field9" in *[$'\t\r\n']*) return 1 ;; esac
             [ -n "$field7" ] && [ -n "$field8" ] && [ -n "$field9" ] || return 1
             ;;
@@ -354,6 +373,22 @@ fm_supervision_registry_reconcile_locked() {
       continue
     fi
     case "$reservation_phase" in
+      planned)
+        transaction_meta=$(fm_supervision_registry_transaction_meta_locked \
+          "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" 2>/dev/null || true)
+        [ -n "$transaction_meta" ] || return 1
+        continue
+        ;;
+      worktree-only)
+        transaction_meta=$(fm_supervision_registry_transaction_meta_locked \
+          "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" 2>/dev/null || true)
+        [ -n "$transaction_meta" ] || return 1
+        cp -p -- "$transaction_meta" "$meta" || return 1
+        fm_supervision_registry_staged_meta_valid \
+          "$meta" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+        fm_supervision_registry_write_locked "$state" "$task" "$meta" pending set || return 1
+        continue
+        ;;
       created|remote-unknown)
         verdict=unverified
         recovery_state=unverified
@@ -544,7 +579,7 @@ fm_supervision_registry_reserve() {
 fm_supervision_registry_mark_reservation() {
   local state=$1 task=$2 spawn_gen=$3 phase=$4 backend=$5 target=$6 detail=${7:--} staged_meta=${8:-}
   local lock path protocol generation kind entry_task entry_spawn owner_pid owner_identity rc=1
-  case "$phase" in created|remote-unknown) ;; *) return 1 ;; esac
+  case "$phase" in planned|worktree-only|created|remote-unknown) ;; *) return 1 ;; esac
   case "$backend$target$detail" in *[$'\t\r\n']*) return 1 ;; esac
   [ -n "$backend" ] && [ -n "$target" ] && [ -n "$detail" ] || return 1
   lock=$(fm_supervision_registry_lock_path "$state")
@@ -568,6 +603,10 @@ fm_supervision_registry_mark_reservation() {
   fi
   fm_lock_release "$lock" || rc=1
   return "$rc"
+}
+
+fm_supervision_registry_plan_reservation() {
+  fm_supervision_registry_mark_reservation "$1" "$2" "$3" planned "$4" "$5" "$6" "$7"
 }
 
 fm_supervision_registry_cancel_reservation() {

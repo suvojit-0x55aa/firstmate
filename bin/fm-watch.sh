@@ -1333,15 +1333,14 @@ fm_check_output_cleanup() {
 fm_active_check_stop() {
   local pid=${FM_ACTIVE_CHECK_PID:-} pgid=${FM_ACTIVE_CHECK_PGID:-}
   [ -n "$pid" ] || [ -n "$pgid" ] || return 0
-  # A live leader may still be unwinding its check and receives the configured
-  # TERM grace. Once the leader has already returned, any remaining group
-  # members are orphan descendants: kill them immediately so their cleanup
-  # cannot consume an active-check grace that the admission budget no longer
-  # associates with a running check.
-  if [ -n "$pid" ]; then
-    [ -z "$pgid" ] || kill -TERM -- "-$pgid" 2>/dev/null || true
+  if [ -n "$pgid" ]; then
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+    if kill -0 -- "-$pgid" 2>/dev/null; then
+      sleep "$CHECK_KILL_GRACE"
+    fi
+  elif [ -n "$pid" ]; then
     kill -TERM "$pid" 2>/dev/null || true
-    if [ -n "$pgid" ] && kill -0 -- "-$pgid" 2>/dev/null; then
+    if kill -0 "$pid" 2>/dev/null; then
       sleep "$CHECK_KILL_GRACE"
     fi
   fi
@@ -1402,7 +1401,6 @@ run_check_capture() {
     sleep "${FM_CODEX_OBSERVER_POLL:-0.2}"
   done
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
-  FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1
   FM_CHECK_RESULT=$(cat "$FM_CHECK_OUTPUT" 2>/dev/null || true)
   fm_check_output_cleanup

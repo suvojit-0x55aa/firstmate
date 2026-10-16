@@ -42,6 +42,7 @@ worktree=<absolute Orca worktree path>
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+If terminal creation fails and worktree cleanup cannot complete, `endpoint_state=worktree-only` explicitly authorizes path-validated teardown of the recorded worktree without inventing a terminal handle.
 
 ## Current lifecycle and safety
 
@@ -61,7 +62,7 @@ A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
-After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
+After those checks, Firstmate closes the exact terminal when one exists and releases the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
 
 ## Active limits

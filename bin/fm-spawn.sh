@@ -800,6 +800,52 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_plan_endpoint() {
+  local backend=$1 target=$2 detail=$3 plan
+  plan="$STATE/.$ID.meta.plan.${BASHPID:-$$}"
+  {
+    printf 'window=%s\n' "$target"
+    printf 'endpoint_task_id=%s\n' "$ID"
+    printf 'endpoint_state=planned\n'
+    printf 'worktree=%s\n' "${WT:-$PROJ_ABS}"
+    printf 'project=%s\n' "$PROJ_ABS"
+    printf 'harness=%s\nkind=%s\n' "$HARNESS" "$KIND"
+    printf 'backend=%s\nrecovery_detail=%s\nspawn_gen=%s\n' \
+      "$backend" "$detail" "$SPAWN_GEN"
+  } > "$plan" || { rm -f -- "$plan"; return 1; }
+  if ! fm_supervision_registry_plan_reservation \
+      "$STATE" "$ID" "$SPAWN_GEN" "$backend" "$target" "$detail" "$plan"; then
+    rm -f -- "$plan"
+    return 1
+  fi
+  rm -f -- "$plan"
+}
+
+spawn_mark_orca_worktree_only() {
+  local staged
+  staged="$STATE/.$ID.meta.worktree.${BASHPID:-$$}"
+  {
+    printf 'window=%s\n' "$W"
+    printf 'endpoint_task_id=%s\n' "$ID"
+    printf 'endpoint_state=worktree-only\n'
+    printf 'worktree=%s\nproject=%s\n' "$WT" "$PROJ_ABS"
+    printf 'harness=%s\nkind=%s\n' "$HARNESS" "$KIND"
+    [ -z "${MODE:-}" ] || printf 'mode=%s\n' "$MODE"
+    [ -z "${YOLO:-}" ] || printf 'yolo=%s\n' "$YOLO"
+    printf 'tasktmp=%s\nmodel=%s\neffort=%s\n' \
+      "${TASK_TMP:-}" "${MODEL:-default}" "${EFFORT:-default}"
+    printf 'backend=orca\norca_worktree_id=%s\nspawn_gen=%s\n' \
+      "$ORCA_WORKTREE_ID" "$SPAWN_GEN"
+  } > "$staged" || { rm -f -- "$staged"; return 1; }
+  if ! fm_supervision_registry_mark_reservation \
+      "$STATE" "$ID" "$SPAWN_GEN" worktree-only orca "$W" \
+      "$ORCA_WORKTREE_ID" "$staged"; then
+    rm -f -- "$staged"
+    return 1
+  fi
+  rm -f -- "$staged"
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
@@ -867,7 +913,11 @@ spawn_abort_cleanup() {
             echo "effort=${EFFORT:-default}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            if [ -n "${ORCA_TERMINAL:-}" ]; then
+              echo "terminal=$ORCA_TERMINAL"
+            else
+              echo "endpoint_state=worktree-only"
+            fi
             echo "spawn_gen=$SPAWN_GEN"
           } > "$STATE/$ID.meta" 2>/dev/null \
             && fm_supervision_registry_prepare "$STATE" "$ID" "$STATE/$ID.meta"; then
@@ -2039,13 +2089,13 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+W="fm-$ID"
 if ! fm_supervision_registry_reserve "$STATE" "$ID" "$SPAWN_GEN"; then
   echo "error: $ID supervision ownership could not be reserved before endpoint creation" >&2
   exit 1
 fi
 SPAWN_REGISTRY_RESERVED=1
 
-W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -2068,6 +2118,7 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
+    spawn_plan_endpoint tmux "$T" "$T" || exit 1
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
     SPAWN_RESERVATION_TARGET=$WID
@@ -2175,6 +2226,7 @@ case "$BACKEND" in
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            spawn_plan_endpoint herdr "$HERDR_SES:$W" "$HERDR_PRESENTATION_JOURNAL" || exit 1
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
@@ -2229,6 +2281,7 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
+      spawn_plan_endpoint herdr "$HERDR_SES:$W" "$HERDR_WORKSPACE_ID" || exit 1
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
@@ -2244,6 +2297,7 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
+    spawn_plan_endpoint zellij "$ZELLIJ_SES:$W" "$ZELLIJ_SES" || exit 1
     ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
@@ -2258,6 +2312,7 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
+    spawn_plan_endpoint cmux "$W" "$(fm_backend_cmux_scoped_title "$W")" || exit 1
     CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
@@ -2271,6 +2326,7 @@ EOF
     SPAWN_RESERVATION_DETAIL=$CMUX_WORKSPACE_ID
     ;;
   orca)
+    spawn_plan_endpoint orca "$W" "$PROJ_ABS" || exit 1
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
     ORCA_WT_STATUS=$?
@@ -2290,6 +2346,7 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    spawn_mark_orca_worktree_only || exit 1
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi

@@ -385,7 +385,7 @@ fm_backend_endpoint_atom_valid() {  # <value>
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local session pane recorded_session workspace tab terminal worktree_id surface endpoint_state_count endpoint_state
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -493,16 +493,36 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
       worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
-      [ -n "$terminal" ] || {
-        echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
-        return 1
-      }
+      endpoint_state_count=$(grep -c '^endpoint_state=' "$meta" 2>/dev/null || true)
+      case "$endpoint_state_count" in
+        0) endpoint_state=complete ;;
+        1) endpoint_state=$(fm_backend_meta_exact_value "$meta" endpoint_state) || endpoint_state= ;;
+        *) endpoint_state= ;;
+      esac
       [ -n "$worktree_id" ] || {
         echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
         return 1
       }
+      case "$endpoint_state" in
+        complete)
+          [ -n "$terminal" ] || {
+            echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
+            return 1
+          }
+          ;;
+        worktree-only)
+          [ -z "$terminal" ] || {
+            echo "REFUSED: worktree-only Orca metadata unexpectedly names a terminal; preserving task state." >&2
+            return 1
+          }
+          ;;
+        *)
+          echo "REFUSED: Orca endpoint metadata for task $id has an invalid endpoint state; preserving task state." >&2
+          return 1
+          ;;
+      esac
       if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
+        || { [ -n "$terminal" ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
         || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1

@@ -4587,6 +4587,64 @@ SH
   pass 'transaction journals preserve backend metadata and converge remote unknown completion'
 }
 
+test_planned_reservations_survive_backend_creation_crashes() {
+  local dir rc backend task target detail
+  dir=$(fixture planned-reservation-crashes)
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+    while IFS="|" read -r backend task target detail; do
+      staged="$FM_STATE_OVERRIDE/.$task.plan"
+      printf "%s\n" "window=$target" "endpoint_task_id=$task" \
+        "endpoint_state=planned" "worktree=/planned/$task" \
+        "project=/project/$task" "harness=codex" "kind=ship" \
+        "backend=$backend" "recovery_detail=$detail" "spawn_gen=$task-gen" \
+        > "$staged" || exit 1
+      fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" "$task" "$task-gen" || exit 1
+      fm_supervision_registry_plan_reservation "$FM_STATE_OVERRIDE" "$task" "$task-gen" \
+        "$backend" "$target" "$detail" "$staged" || exit 1
+    done <<EOF
+tmux|planned-tmux|fleet:fm-planned-tmux|fleet:fm-planned-tmux
+herdr|planned-herdr|default:fm-planned-herdr|workspace-planned
+zellij|planned-zellij|zellij-main:fm-planned-zellij|zellij-main
+cmux|planned-cmux|fm-planned-cmux|fm-home-planned-cmux
+orca|planned-orca|fm-planned-orca|/project/planned-orca
+EOF
+    exit 79
+  ' _ "$ROOT/bin" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 79 ] || fail 'planned reservations did not reach the simulated creation crash'
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_generation "$FM_STATE_OVERRIDE" >/dev/null
+  ' _ "$ROOT/bin" || fail 'planned reservation reconciliation failed'
+  for backend in tmux herdr zellij cmux orca; do
+    task="planned-$backend"
+    grep -F "$(printf 'reservation\t%s\t%s-gen\t' "$task" "$task")" \
+      "$dir/state/.active-supervision-generation" | grep -F "$(printf '\tplanned\t%s\t' "$backend")" >/dev/null \
+      || fail "$backend creation plan was discarded after its owner died"
+    [ -f "$dir/state/.active-supervision-transactions-v1/$(printf '%s' "$task" | od -An -v -tx1 | tr -d ' \n')/meta" ] \
+      || fail "$backend creation plan lost its durable recovery envelope"
+  done
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'unresolved creation plans were hidden from supervision admission'
+  pass 'backend creation plans retain recovery identity and fail closed after crashes'
+}
+
 test_registered_check_kills_term_ignoring_process_group() {
   local dir started elapsed child rc
   dir=$(fixture registered-check-hard-timeout)
@@ -4611,6 +4669,65 @@ SH
   [ -n "$child" ] || fail 'TERM-ignoring check never started'
   ! kill -0 "$child" 2>/dev/null || fail 'TERM-ignoring check survived the hard timeout'
   pass 'registered checks receive TERM then bounded KILL and reap'
+}
+
+test_registered_check_preserves_grace_for_orphan_descendant() {
+  local dir started elapsed child rc
+  dir=$(fixture registered-check-orphan-grace)
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/timeout" <<'SH'
+#!/usr/bin/env perl
+use strict;
+use warnings;
+my ($flag, $grace, $bound, @command) = @ARGV;
+exit 98 unless defined $flag && $flag eq '-k';
+my $pid = fork;
+exit 97 unless defined $pid;
+if (!$pid) {
+  my $grandchild = fork;
+  exit 96 unless defined $grandchild;
+  if (!$grandchild) {
+    $SIG{TERM} = 'IGNORE';
+    open my $marker, '>', "$ENV{FM_HOME}/orphan-child-pid" or exit 95;
+    print {$marker} "$$\n";
+    close $marker;
+    while (1) { sleep 1; }
+  }
+  waitpid $grandchild, 0;
+  exit 0;
+}
+local $SIG{ALRM} = sub {
+  local $SIG{TERM} = 'IGNORE';
+  kill 'TERM', -getpgrp(0);
+  waitpid $pid, 0;
+  exit 124;
+};
+alarm $bound;
+waitpid $pid, 0;
+exit($? >> 8);
+SH
+  chmod 0700 "$dir/fakebin/timeout"
+  cat > "$dir/state/orphan.check.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod 0700 "$dir/state/orphan.check.sh"
+  started=$(monotonic_seconds)
+  set +e
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CHECK_TIMEOUT=2 FM_CHECK_KILL_GRACE=2 FM_CHECK_REAP_ALLOWANCE=1 \
+    bash -c '. "$1/fm-watch.sh"; run_check_capture "$2"' \
+      _ "$ROOT/bin" "$dir/state/orphan.check.sh"
+  rc=$?
+  set -e
+  elapsed=$(( $(monotonic_seconds) - started ))
+  [ "$rc" -eq 0 ] || fail "orphan-grace check runner failed: rc=$rc"
+  [ "$elapsed" -ge 4 ] && [ "$elapsed" -le 7 ] \
+    || fail "orphan descendant did not receive the configured grace: ${elapsed}s"
+  child=$(cat "$dir/orphan-child-pid" 2>/dev/null || true)
+  [ -n "$child" ] || fail 'orphan-descendant check never started'
+  ! kill -0 "$child" 2>/dev/null || fail 'orphan descendant survived bounded group cleanup'
+  pass 'registered check descendants retain grace after their leader exits'
 }
 
 test_bounded_check_starts_without_observer_endpoint() {
@@ -4998,7 +5115,9 @@ test_incarnation_allocator_is_durable_unique_and_nonreusable
 test_registry_reservation_recovers_spawn_crash_windows
 test_remote_recovery_protocol_reports_exact_endpoint
 test_transaction_journals_recover_every_backend
+test_planned_reservations_survive_backend_creation_crashes
 test_registered_check_kills_term_ignoring_process_group
+test_registered_check_preserves_grace_for_orphan_descendant
 test_bounded_check_starts_without_observer_endpoint
 test_bounded_observer_remains_live_during_check
 test_bounded_observer_remains_live_after_check_boundary
