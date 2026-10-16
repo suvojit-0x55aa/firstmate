@@ -183,7 +183,13 @@ try:
 except ValueError:
     transport_timeout = 590
 protocol_reserve = 10
-cycle_limit = transport_timeout - startup_timeout - checkpoint - protocol_reserve
+probe_timeout = 3
+probe_cleanup_allowance = 3
+identity_allowance = probe_timeout + probe_cleanup_allowance
+arm_cleanup_allowance = 2 * identity_allowance + 3
+terminal_reserve = protocol_reserve + arm_cleanup_allowance + identity_allowance
+startup_phase_allowance = max(startup_timeout, identity_allowance)
+cycle_limit = transport_timeout - startup_phase_allowance - checkpoint - terminal_reserve
 budget_reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'
 
 
@@ -306,7 +312,8 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
         return cycle_limit + 1, check_limit or 1, 0
     if budget_deadline is not None:
         cycle_budget = max(0, math.floor(
-            budget_deadline - time.monotonic() - startup_timeout - checkpoint - protocol_reserve))
+            budget_deadline - time.monotonic() - startup_phase_allowance - checkpoint -
+            terminal_reserve))
     elif cycle_budget is None:
         cycle_budget = cycle_limit
     signal_tasks, remote_recoveries = work
@@ -350,13 +357,11 @@ def terminate_probe_group(process):
             pass
 
 
-def shell(body, *args, timeout=3, deadline=None):
+def shell(body, *args, timeout=probe_timeout, deadline=None):
     process = None
     try:
-        if deadline is not None:
-            timeout = min(timeout, deadline - time.monotonic())
-            if timeout <= 0:
-                return None
+        if deadline is not None and time.monotonic() + timeout + probe_cleanup_allowance > deadline:
+            return None
         command = ['bash', '-c', '. "$1/fm-wake-lib.sh"; ' + body,
                    'codex-stop-probe', scripts, *args]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -372,30 +377,24 @@ def shell(body, *args, timeout=3, deadline=None):
         return None
 
 
-def identity(pid):
-    result = shell('fm_pid_identity "$2"', str(pid))
-    return result.stdout.rstrip('\n') if result and result.returncode == 0 else ''
+def identity(pid, deadline=None):
+    result = shell('fm_pid_identity "$2"', str(pid), deadline=deadline)
+    if result is None:
+        return None
+    return result.stdout.rstrip('\n') if result.returncode == 0 else ''
 
 
-def identity_in_group(pid, recorded, group):
-    if identity(pid) != recorded:
-        return False
+def generation_current(deadline=None):
     try:
-        if os.getpgid(pid) != group:
+        if (os.path.islink('.lock') or open('.lock').read().strip() != session_pid or
+                not session_identity or os.path.exists('.afk')):
             return False
     except OSError:
         return False
-    return identity(pid) == recorded
-
-
-def generation_current():
-    try:
-        return (not os.path.islink('.lock') and
-                open('.lock').read().strip() == session_pid and
-                bool(session_identity) and identity(session_pid) == session_identity and
-                not os.path.exists('.afk'))
-    except OSError:
-        return False
+    current = identity(session_pid, deadline)
+    if current is None:
+        return None
+    return current == session_identity
 
 
 def needed(probe_deadline=None):
@@ -550,6 +549,7 @@ def owner(lock):
     check_batch_limit = 1
     active_cycle_limit = cycle_limit
     transport_deadline = None
+    arm_budget_failure = False
 
     def remaining_cycle_limit(now):
         if phase == 'starting':
@@ -560,7 +560,7 @@ def owner(lock):
             cycle_starts = confirmation_started_at
         else:
             return 0
-        return max(0, math.floor(transport_deadline - cycle_starts - protocol_reserve))
+        return max(0, math.floor(transport_deadline - cycle_starts - terminal_reserve))
 
     def publish(next_phase, seconds, started_at=None):
         nonlocal phase, deadline, published
@@ -581,27 +581,42 @@ def owner(lock):
             if os.path.exists(tmp):
                 os.unlink(tmp)
 
-    def cancel_arm():
+    def cancel_arm(cleanup_deadline=None):
         nonlocal arm, arm_identity, output
+        completed = True
         if arm is not None:
-            # Let the arm's TERM trap retire its watcher and finish lock cleanup
-            # in order. If that bounded cleanup stalls, kill only its owned group;
-            # attached foreign watchers are never members of that group.
-            if arm.poll() is None:
+            if (cleanup_deadline is not None and
+                    time.monotonic() + arm_cleanup_allowance > cleanup_deadline):
+                completed = False
+            elif arm.poll() is None:
                 arm.terminate()
                 try:
                     arm.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    os.killpg(arm.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(arm.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     arm.wait(timeout=1)
+                time.monotonic()
             else:
-                proof = watcher_proof or watcher_snapshot(cycle_timeout, check_batch_limit)
+                proof = watcher_proof
                 owned_member = False
                 if proof is not None:
                     try:
                         member_pid = int(proof[0])
-                        owned_member = identity_in_group(member_pid, proof[1], arm.pid)
+                        owned_member = os.getpgid(member_pid) == arm.pid
                     except ValueError:
+                        owned_member = False
+                    except OSError:
+                        owned_member = False
+                if owned_member:
+                    current = identity(member_pid, cleanup_deadline)
+                    time.monotonic()
+                    if current is None:
+                        completed = False
+                        owned_member = False
+                    elif current != proof[1]:
                         owned_member = False
                 if owned_member:
                     try:
@@ -610,20 +625,29 @@ def owner(lock):
                         pass
                     expires = time.monotonic() + 3
                     while time.monotonic() < expires:
-                        if not identity_in_group(member_pid, proof[1], arm.pid):
+                        try:
+                            if os.getpgid(member_pid) != arm.pid:
+                                break
+                        except OSError:
                             break
                         time.sleep(0.05)
                     else:
-                        if identity_in_group(member_pid, proof[1], arm.pid):
+                        current = identity(member_pid, cleanup_deadline)
+                        time.monotonic()
+                        if current is None:
+                            completed = False
+                        elif current == proof[1]:
                             try:
                                 os.killpg(arm.pid, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
-            arm = None
-            arm_identity = ''
+            if completed:
+                arm = None
+                arm_identity = ''
         if output is not None:
             output.close()
             output = None
+        return completed
 
     def close(conn):
         pending.pop(conn, None)
@@ -635,8 +659,18 @@ def owner(lock):
 
     def finish(reason):
         nonlocal acknowledged
-        cancel_arm()
-        if not generation_current():
+        if (transport_deadline is not None and
+                time.monotonic() + terminal_reserve > transport_deadline):
+            reason = budget_reason
+        cleanup_deadline = (transport_deadline - identity_allowance - protocol_reserve
+                            if transport_deadline is not None else None)
+        if not cancel_arm(cleanup_deadline):
+            reason = budget_reason
+        generation_deadline = (transport_deadline - protocol_reserve
+                               if transport_deadline is not None else None)
+        current = generation_current(generation_deadline)
+        time.monotonic()
+        if current is not True:
             return False
         publish('delivering', 5)
         acknowledged = False
@@ -690,15 +724,20 @@ def owner(lock):
                     close(conn)
                     continue
                 if request.get('op') == 'healthy':
+                    health_deadline = (transport_deadline - terminal_reserve
+                                       if active is not None else None)
                     send(conn, dict(token=token, healthy=request.get('record') == published and
                                     phase in ('watching', 'confirming', 'handling') and
                                     time.monotonic() < deadline and
-                                    generation_current()))
+                                    generation_current(health_deadline) is True))
+                    time.monotonic()
                     close(conn)
                 elif conn is active and request.get('op') == 'accepted' and phase == 'delivering':
                     send(conn, dict(accepted=True, token=token))
                 elif conn is active and request.get('op') == 'commit' and phase == 'delivering':
-                    if not generation_current():
+                    commit_deadline = (transport_deadline
+                                       if transport_deadline is not None else None)
+                    if generation_current(commit_deadline) is not True:
                         send(conn, dict(committed=False, token=token))
                         return
                     publish('handling', handling_grace)
@@ -722,6 +761,7 @@ def owner(lock):
                         acknowledged = False
                         transport_deadline = time.monotonic() + transport_timeout
                         publish('preflighting', max(0, transport_deadline - time.monotonic()))
+                        arm_budget_failure = False
                         if queued():
                             if not finish('durable wake pending'):
                                 return
@@ -732,8 +772,8 @@ def owner(lock):
                             invalidate_budget_windows()
                             cycle_timeout, check_batch_limit, active_cycle_limit = watcher_cycle_timeout(
                                 budget_deadline=transport_deadline,
-                                probe_deadline=(transport_deadline - startup_timeout - checkpoint -
-                                                protocol_reserve))
+                                probe_deadline=(transport_deadline - startup_phase_allowance - checkpoint -
+                                                terminal_reserve))
                             if cycle_timeout > active_cycle_limit:
                                 if not finish(budget_reason):
                                     return
@@ -758,31 +798,53 @@ def owner(lock):
                                                        stdout=output, stderr=output, start_new_session=True,
                                                        env=arm_environment)
                                 publish('starting', startup_timeout, arm_started_at)
-                                arm_identity = identity(arm.pid)
+                                arm_identity_result = identity(
+                                    arm.pid, transport_deadline - terminal_reserve)
+                                time.monotonic()
+                                if arm_identity_result is None:
+                                    arm_identity = ''
+                                    arm_budget_failure = True
+                                else:
+                                    arm_identity = arm_identity_result
             for conn, (_buf, expires) in list(pending.items()):
                 if conn is not active and time.monotonic() >= expires:
                     close(conn)
             now = time.monotonic()
             probe_due = now >= next_probe or (
                 phase in ('starting', 'watching', 'confirming') and now >= deadline)
+            probe_budget_failure = False
             if probe_due:
-                if not generation_current():
-                    return
-                supervision_needed = needed(
-                    transport_deadline - protocol_reserve if active is not None else None)
+                generation_deadline = None
+                if active is not None:
+                    generation_deadline = transport_deadline - terminal_reserve
+                    if time.monotonic() + identity_allowance > generation_deadline:
+                        probe_budget_failure = True
+                if not probe_budget_failure:
+                    current = generation_current(generation_deadline)
+                    now = time.monotonic()
+                    if current is None:
+                        probe_budget_failure = active is not None
+                        if not probe_budget_failure:
+                            return
+                    elif not current:
+                        return
+                if not probe_budget_failure:
+                    supervision_needed = needed(
+                        transport_deadline - terminal_reserve if active is not None else None)
                 now = time.monotonic()
                 next_probe = now + 1
             if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
-                if not reason and now >= transport_deadline - protocol_reserve:
+                if not reason and (arm_budget_failure or probe_budget_failure or
+                                   now >= transport_deadline - terminal_reserve):
                     reason = budget_reason
                 if not reason and probe_due:
                     next_cycle_timeout, _next_check_limit, _next_cycle_limit = watcher_cycle_timeout(
                         check_batch_limit, active_cycle_limit,
-                        probe_deadline=transport_deadline - protocol_reserve)
+                        probe_deadline=transport_deadline - terminal_reserve)
                     now = time.monotonic()
                     next_cycle_limit = remaining_cycle_limit(now)
-                    if (now >= transport_deadline - protocol_reserve or
+                    if (now >= transport_deadline - terminal_reserve or
                             next_cycle_timeout > next_cycle_limit):
                         reason = budget_reason
                     elif next_cycle_timeout > cycle_timeout:
@@ -800,11 +862,11 @@ def owner(lock):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'starting' and probe_due:
                     proof = watcher_snapshot(cycle_timeout, check_batch_limit,
-                                             transport_deadline - protocol_reserve)
+                                             transport_deadline - terminal_reserve)
                     now = time.monotonic()
                     if proof is not None:
                         if cycle_timeout > max(0, math.floor(
-                                transport_deadline - now - checkpoint - protocol_reserve)):
+                                transport_deadline - now - checkpoint - terminal_reserve)):
                             reason = budget_reason
                         else:
                             watcher_proof = proof
@@ -812,7 +874,7 @@ def owner(lock):
                             watcher_last_progress = now
                             next_watcher_probe = now + watcher_cadence
                             publish('watching', checkpoint)
-                    elif now >= transport_deadline - protocol_reserve:
+                    elif now >= transport_deadline - terminal_reserve:
                         reason = budget_reason
                     elif now >= deadline:
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
@@ -823,7 +885,7 @@ def owner(lock):
                         watcher_last_progress = now
                     if now >= next_watcher_probe:
                         proof = watcher_snapshot(cycle_timeout, check_batch_limit,
-                                                 transport_deadline - protocol_reserve)
+                                                 transport_deadline - terminal_reserve)
                         now = time.monotonic()
                         if (proof is None or watcher_proof is None or
                                 proof[:2] != watcher_proof[:2] or proof[2] < watcher_last_beat):
@@ -835,14 +897,19 @@ def owner(lock):
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'watching' and now >= deadline:
                     proof = watcher_snapshot(cycle_timeout, check_batch_limit,
-                                             transport_deadline - protocol_reserve)
+                                             transport_deadline - terminal_reserve)
                     now = time.monotonic()
-                    if ((arm is not None and identity(arm.pid) != arm_identity) or
+                    current_arm_identity = (identity(arm.pid, transport_deadline - terminal_reserve)
+                                            if arm is not None else arm_identity)
+                    now = time.monotonic()
+                    if current_arm_identity is None:
+                        reason = budget_reason
+                    elif ((arm is not None and current_arm_identity != arm_identity) or
                             proof is None or watcher_proof is None or
                             proof[:2] != watcher_proof[:2]):
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                     elif cycle_timeout > max(0, math.floor(
-                            transport_deadline - now - protocol_reserve)):
+                            transport_deadline - now - terminal_reserve)):
                         reason = budget_reason
                     else:
                         confirmation_beat = proof[2]
@@ -852,13 +919,17 @@ def owner(lock):
                     beat = watcher_beat()
                     if beat > confirmation_beat:
                         proof = watcher_snapshot(cycle_timeout, check_batch_limit,
-                                                 transport_deadline - protocol_reserve)
+                                                 transport_deadline - terminal_reserve)
                         now = time.monotonic()
-                        if now >= transport_deadline - protocol_reserve:
+                        current_arm_identity = (identity(
+                            arm.pid, transport_deadline - terminal_reserve)
+                            if arm is not None else arm_identity)
+                        now = time.monotonic()
+                        if current_arm_identity is None or now >= transport_deadline - terminal_reserve:
                             reason = budget_reason
                         elif (proof is not None and watcher_proof is not None and
                                 proof[:2] == watcher_proof[:2] and proof[2] > confirmation_beat and
-                                (arm is None or identity(arm.pid) == arm_identity)):
+                                (arm is None or current_arm_identity == arm_identity)):
                             reason = 'quiet checkpoint elapsed; supervision is still needed'
                         else:
                             reason = 'watcher failed; inspect its startup and ownership before continuing'

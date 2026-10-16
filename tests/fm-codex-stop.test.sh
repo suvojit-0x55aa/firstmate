@@ -136,6 +136,8 @@ child=
 printf '%s\n' "$$" > "$FM_HOME/controlled-arm-pid"
 stop_arm() {
   printf '%s\n' term > "$FM_HOME/controlled-arm-term"
+  sleep "${FM_TEST_ARM_TERM_DELAY:-0}"
+  printf '%s\n' done > "$FM_HOME/controlled-arm-term-delay-done"
   [ -z "$child" ] || kill -TERM "$child" 2>/dev/null || true
   [ -z "$child" ] || wait "$child" 2>/dev/null || true
   exit 0
@@ -649,7 +651,7 @@ def delayed_popen(*args, **kwargs):
         with open(marker, 'w', encoding='utf-8') as stream:
             stream.write(str(count) + '\n')
         if count == 2:
-            time.sleep(5)
+            time.sleep(16)
             with open(marker + '.done', 'w', encoding='utf-8') as stream:
                 stream.write('done\n')
     return original_popen(*args, **kwargs)
@@ -659,7 +661,7 @@ subprocess.Popen = delayed_popen
 PY
   started=$(date +%s)
   PYTHONPATH="$dir/probe-fault" FM_TEST_RECURRING_PROBE_MARKER="$dir/recurring-probe" \
-    FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=23 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 FM_ARM_CONFIRM_TIMEOUT=1 \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
     FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
@@ -671,10 +673,116 @@ PY
     'slow recurring cycle probe lost the supervision-budget refusal'
   assert_not_contains "$(cat "$dir/out")" 'owner unavailable' \
     'slow recurring cycle probe fell through to the generic transport failure'
-  [ "$elapsed" -lt 12 ] || fail 'slow recurring cycle probe overran its fixed transport reserve'
+  [ "$elapsed" -lt 26 ] || fail 'slow recurring cycle probe overran its fixed transport reserve'
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'recurring cycle probes preserve the fixed transport reserve'
+}
+
+test_identity_and_cleanup_phases_preserve_transport_reserve() {
+  local mode dir original_root=$TEST_ROOT started elapsed
+  for mode in arm-identity active-cycle finish-identity cancel; do
+    dir=$(fixture "transport-reserve-$mode")
+    install_controlled_watcher "$dir"
+    : > "$dir/state/task.meta"
+    mkdir "$dir/deadline-fault"
+    cat > "$dir/deadline-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+import time
+
+original_popen = subprocess.Popen
+
+
+def read_value(path):
+    try:
+        with open(path, encoding='utf-8') as stream:
+            return stream.read().strip()
+    except FileNotFoundError:
+        return ''
+
+
+def mark(path):
+    with open(path, 'w', encoding='utf-8') as stream:
+        stream.write('hit\n')
+
+
+def delayed_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    home = os.environ.get('FM_HOME', '')
+    mode = os.environ.get('FM_TEST_DEADLINE_MODE', '')
+    if isinstance(command, list) and len(command) > 2:
+        body = command[2]
+        target = command[-1]
+        session_pid = read_value(os.path.join(home, 'state', '.lock'))
+        marker = os.path.join(home, 'deadline-identity-hit')
+        if 'fm_pid_identity' in body and not os.path.exists(marker):
+            if mode == 'arm-identity':
+                arm_pid_path = os.path.join(home, 'controlled-arm-pid')
+                expires = time.monotonic() + 0.5
+                while not os.path.exists(arm_pid_path) and time.monotonic() < expires:
+                    time.sleep(0.01)
+                if target == read_value(arm_pid_path):
+                    mark(marker)
+                    time.sleep(22)
+            elif (mode == 'active-cycle' and target == session_pid and
+                  os.path.exists(os.path.join(home, 'controlled-watcher-ready'))):
+                mark(marker)
+                time.sleep(22)
+            elif (mode == 'finish-identity' and target == session_pid and
+                  os.path.exists(os.path.join(home, 'controlled-arm-term'))):
+                mark(marker)
+                time.sleep(2)
+        probe_marker = os.path.join(home, 'deadline-cycle-probe')
+        if mode in ('finish-identity', 'cancel') and 'remote-recovery' in body:
+            count = 0
+            try:
+                count = int(read_value(probe_marker))
+            except ValueError:
+                pass
+            count += 1
+            with open(probe_marker, 'w', encoding='utf-8') as stream:
+                stream.write(str(count) + '\n')
+            if count == 2:
+                time.sleep(22)
+                mark(probe_marker + '.done')
+    return original_popen(*args, **kwargs)
+
+
+subprocess.Popen = delayed_popen
+PY
+    started=$(date +%s)
+    if [ "$mode" = cancel ]; then
+      term_delay=2.5
+    else
+      term_delay=0
+    fi
+    PYTHONPATH="$dir/deadline-fault" FM_TEST_DEADLINE_MODE="$mode" \
+      FM_TEST_ARM_TERM_DELAY="$term_delay" FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=60 \
+      FM_ARM_CONFIRM_TIMEOUT=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+      FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 FM_POLL=0.05 \
+      TEST_ROOT="$dir" run_stop "$dir" 1
+    TEST_ROOT=$original_root
+    wait_file "$dir/rc" 250
+    elapsed=$(( $(date +%s) - started ))
+    [ "$(cat "$dir/rc")" = 2 ] || fail "$mode reserve path allowed Stop to fail open"
+    assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+      "$mode reserve path lost the supervision-budget refusal"
+    assert_not_contains "$(cat "$dir/out")" 'owner unavailable' \
+      "$mode reserve path fell through to the generic transport failure"
+    case "$mode" in
+      arm-identity|active-cycle|finish-identity)
+        [ -s "$dir/deadline-identity-hit" ] || fail "$mode identity delay did not execute"
+        ;;
+      cancel)
+        [ -s "$dir/controlled-arm-term-delay-done" ] || fail 'cancel cleanup delay did not execute'
+        ;;
+    esac
+    [ "$elapsed" -lt 40 ] || fail "$mode reserve path overran the fixed transport allowance"
+    assert_no_watcher "$dir"
+    finish "$dir"
+  done
+  pass 'identity and cleanup phases preserve the fixed transport reserve'
 }
 
 test_stalled_watcher_cannot_complete_quiet_window() {
@@ -2382,6 +2490,7 @@ test_wedged_arm_cannot_report_quiet_renewal
 test_late_watcher_gets_full_quiet_window
 test_admission_time_preserves_arm_confirmation
 test_recurring_probe_honors_transport_deadline
+test_identity_and_cleanup_phases_preserve_transport_reserve
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
