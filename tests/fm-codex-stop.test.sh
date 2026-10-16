@@ -104,6 +104,13 @@ assert_no_watcher() {
   if kill -0 "$pid" 2>/dev/null; then fail "owned watcher $pid survived Stop cleanup: $(cat "$1/watcher-after-cleanup")"; fi
 }
 
+assert_no_watch_owner_dirs() {
+  local owner
+  for owner in "$1/state"/.watch.lock.owner.*; do
+    [ ! -e "$owner" ] && [ ! -L "$owner" ] || fail "watcher lock owner directory survived release: $owner"
+  done
+}
+
 install_controlled_watcher() {
   local dir=$1
   cp -R "$ROOT/bin/." "$dir/bin/"
@@ -414,6 +421,7 @@ test_quiet_renewal() {
   [ "$(cat "$dir/rc")" = 2 ] || fail 'quiet checkpoint did not request continuation'
   assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'quiet renewal reason missing'
   assert_no_watcher "$dir"
+  assert_no_watch_owner_dirs "$dir"
   FM_STATE_OVERRIDE="$dir/state" FM_HOME="$dir" bash -c '. "$1"; fm_codex_stop_handling_healthy "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" || fail 'delivered handling interval is not healthy'
   finish "$dir"
   pass 'quiet checkpoint requests native renewal and leaves bounded handling proof'
@@ -815,6 +823,33 @@ test_dead_endpoint_preserves_inbox_escalation() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'dead endpoints retain inbox escalation without pane work'
+}
+
+test_missing_endpoint_preserves_inbox_escalation() {
+  local dir rec
+  dir=$(fixture missing-endpoint-inbox)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:missing-inbox' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    > "$dir/state/missing-inbox.meta"
+  printf '%s\n' 'working: awaiting durable steer' > "$dir/state/missing-inbox.status"
+  prime_status_seen "$dir/state" "$dir/state/missing-inbox.status"
+  rec=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-task-inbox-lib.sh"
+    fm_task_inbox_write "$2" missing-inbox "respond to the captain"
+  ' _ "$ROOT/bin" "$dir/state") || fail 'could not create missing-target inbox record'
+  PATH="$dir/fakebin:$PATH" FM_TEST_CAPTURE_LOG="$dir/capture-calls" \
+    FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=1 FM_SIGNAL_GRACE=0 \
+    run_stop "$dir" 10
+  wait_file "$dir/rc" 250
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'missing-target inbox escalation escaped Stop supervision'
+  grep -qF "unread firstmate instruction: $rec" "$dir/state/.wake-queue" \
+    || fail 'missing-target inbox record did not escalate durably'
+  [ ! -e "$dir/capture-calls" ] || fail 'missing-target inbox escalation captured the pane'
+  [ "$(cat "$dir/state/missing-inbox.inbox/.escalated")" = 001.msg ] \
+    || fail 'missing-target inbox escalation did not persist its dedup marker'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'missing endpoints retain inbox escalation without pane work'
 }
 
 test_dead_endpoint_migrates_matching_stale_marker() {
@@ -1599,6 +1634,7 @@ test_small_live_endpoint_inventory_remains_bounded
 test_failed_existence_probe_is_conservatively_budgeted
 test_many_dead_endpoints_take_cheap_watcher_path
 test_dead_endpoint_preserves_inbox_escalation
+test_missing_endpoint_preserves_inbox_escalation
 test_dead_endpoint_migrates_matching_stale_marker
 test_due_custom_and_pr_checks_remain_bounded
 test_actionable_checks_resume_bounded_sweep

@@ -376,7 +376,7 @@ inbox_steer_check() {  # <window> <task> [target-state]
       rec=${rec% *}
       ;;
   esac
-  if [ "$target_state" != dead ]; then
+  if [ "$target_state" != unavailable ]; then
     tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
     if window_is_busy "$w" "$tail40"; then
       return 0
@@ -384,8 +384,8 @@ inbox_steer_check() {  # <window> <task> [target-state]
   fi
   case "$verb" in
     ring)
-      ring_rc=dead
-      if [ "$target_state" != dead ]; then
+      ring_rc=unavailable
+      if [ "$target_state" != unavailable ]; then
         ring_rc=0
         fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
       fi
@@ -1210,7 +1210,7 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
-capability_tmp="$WATCH_LOCK/.codex-bounded-capability.$WATCHER_PID"
+capability_tmp="$WATCH_LOCK/codex-bounded-capability.tmp"
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
   capability_value=$(printf 'fm-codex-bounded.v1\t%s\n' "$CHECKS_PER_CYCLE")
 else
@@ -1504,12 +1504,11 @@ EOF
     if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
       agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null || printf unreadable)
       case "$agent_state" in
-        dead)
-          [ -z "$task" ] || inbox_steer_check "$w" "$task" dead
-          handle_authoritatively_dead_target "$w" "$task" "$kind" "$last" "$key"
+        dead|missing)
+          [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable
+          [ "$agent_state" != dead ] || handle_authoritatively_dead_target "$w" "$task" "$kind" "$last" "$key"
           continue
           ;;
-        missing) continue ;;
       esac
     fi
     # Steering-inbox loss detection runs before the secondmate stale

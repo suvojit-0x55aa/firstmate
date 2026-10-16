@@ -320,6 +320,8 @@ fm_lock_clean_known_files() {
     "$lockdir/pid-identity" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
+    "$lockdir/codex-bounded-capability" \
+    "$lockdir/codex-bounded-capability.tmp" \
     2>/dev/null || true
 }
 
