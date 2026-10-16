@@ -785,6 +785,125 @@ PY
   pass 'identity and cleanup phases preserve the fixed transport reserve'
 }
 
+test_persistent_identity_timeout_fails_closed() {
+  local mode dir original_root=$TEST_ROOT arm watcher phase
+  for mode in recurring finish finally cancel; do
+    dir=$(fixture "persistent-identity-$mode")
+    install_controlled_watcher "$dir"
+    : > "$dir/state/task.meta"
+    mkdir "$dir/identity-fault"
+    cat > "$dir/identity-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+
+original_popen = subprocess.Popen
+original_pread = os.pread
+
+
+def read_value(path):
+    try:
+        with open(path, encoding='utf-8') as stream:
+            return stream.read().strip()
+    except FileNotFoundError:
+        return ''
+
+
+def record_timeout(home):
+    path = os.path.join(home, 'identity-timeout-count')
+    try:
+        count = int(read_value(path))
+    except ValueError:
+        count = 0
+    with open(path, 'w', encoding='utf-8') as stream:
+        stream.write(str(count + 1) + '\n')
+
+
+def timed_out_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    home = os.environ.get('FM_HOME', '')
+    mode = os.environ.get('FM_TEST_IDENTITY_TIMEOUT_MODE', '')
+    if isinstance(command, list) and len(command) > 2 and 'fm_pid_identity' in command[2]:
+        target = command[-1]
+        session_pid = read_value(os.path.join(home, 'state', '.lock'))
+        timeout = False
+        if mode == 'recurring':
+            timeout = (target == session_pid and
+                       os.path.exists(os.path.join(home, 'controlled-watcher-ready')))
+        elif mode == 'finish':
+            timeout = (target == session_pid and
+                       os.path.exists(os.path.join(home, 'controlled-arm-term')))
+        elif mode == 'finally':
+            timeout = (target == session_pid and
+                       os.path.exists(os.path.join(home, 'finally-timeout-active')))
+        elif mode == 'cancel':
+            timeout = (target != session_pid and
+                       os.path.exists(os.path.join(home, 'cancel-timeout-active')))
+        if timeout:
+            record_timeout(home)
+            replacement = ['bash', '-c', 'sleep 30']
+            if args:
+                args = (replacement, *args[1:])
+            else:
+                kwargs['args'] = replacement
+    return original_popen(*args, **kwargs)
+
+
+def failed_pread(fd, length, offset):
+    home = os.environ.get('FM_HOME', '')
+    marker = os.path.join(home, 'finally-timeout-active')
+    if (os.environ.get('FM_TEST_IDENTITY_TIMEOUT_MODE') == 'finally' and
+            os.path.exists(os.path.join(home, 'controlled-watcher-ready')) and
+            not os.path.exists(marker)):
+        with open(marker, 'w', encoding='utf-8') as stream:
+            stream.write('active\n')
+        raise OSError('forced terminal identity uncertainty')
+    return original_pread(fd, length, offset)
+
+
+subprocess.Popen = timed_out_popen
+os.pread = failed_pread
+PY
+    PYTHONPATH="$dir/identity-fault" FM_TEST_IDENTITY_TIMEOUT_MODE="$mode" \
+      FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=60 FM_ARM_CONFIRM_TIMEOUT=1 \
+      FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
+      FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
+    TEST_ROOT=$original_root
+    wait_file "$dir/controlled-watcher-ready" 150
+    case "$mode" in
+      finish)
+        append_wake "$dir/state" check identity-timeout 'check: identity timeout finish'
+        ;;
+      cancel)
+        phase=
+        for _ in $(seq 1 100); do
+          phase=$(jq -r .phase "$dir/state/.codex-stop.json" 2>/dev/null || true)
+          [ "$phase" = watching ] && break
+          sleep 0.1
+        done
+        [ "$phase" = watching ] || fail 'cancel timeout fixture never established watcher proof'
+        printf '%s\n' active > "$dir/cancel-timeout-active"
+        arm=$(cat "$dir/controlled-arm-pid")
+        kill -KILL "$arm"
+        ;;
+    esac
+    wait_file "$dir/rc" 300
+    [ -s "$dir/identity-timeout-count" ] || fail "$mode persistent identity timeout did not execute"
+    [ "$(cat "$dir/rc")" = 2 ] || fail "$mode identity uncertainty allowed Stop to succeed"
+    assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+      "$mode identity uncertainty lost the supervision-budget refusal"
+    assert_not_contains "$(cat "$dir/out")" 'owner unavailable' \
+      "$mode identity uncertainty fell through to generic owner-unavailable"
+    if [ "$mode" = cancel ]; then
+      watcher=$(cat "$dir/state/.watch.lock/pid" 2>/dev/null || true)
+      [ -z "$watcher" ] || kill -TERM "$watcher" 2>/dev/null || true
+    else
+      assert_no_watcher "$dir"
+    fi
+    finish "$dir"
+  done
+  pass 'persistent identity uncertainty preserves the specific Stop refusal'
+}
+
 test_stalled_watcher_cannot_complete_quiet_window() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture stalled-watcher)
@@ -2491,6 +2610,7 @@ test_late_watcher_gets_full_quiet_window
 test_admission_time_preserves_arm_confirmation
 test_recurring_probe_honors_transport_deadline
 test_identity_and_cleanup_phases_preserve_transport_reserve
+test_persistent_identity_timeout_fails_closed
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake

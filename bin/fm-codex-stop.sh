@@ -337,12 +337,12 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
 def terminate_probe_group(process):
     try:
         os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     time.sleep(0.1)
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         process.communicate(timeout=1)
@@ -550,6 +550,8 @@ def owner(lock):
     active_cycle_limit = cycle_limit
     transport_deadline = None
     arm_budget_failure = False
+    terminal_delivered = False
+    generation_changed = False
 
     def remaining_cycle_limit(now):
         if phase == 'starting':
@@ -658,7 +660,7 @@ def owner(lock):
         conn.close()
 
     def finish(reason):
-        nonlocal acknowledged
+        nonlocal acknowledged, terminal_delivered, generation_changed
         if (transport_deadline is not None and
                 time.monotonic() + terminal_reserve > transport_deadline):
             reason = budget_reason
@@ -670,11 +672,15 @@ def owner(lock):
                                if transport_deadline is not None else None)
         current = generation_current(generation_deadline)
         time.monotonic()
-        if current is not True:
+        if current is False:
+            generation_changed = True
             return False
+        if current is None:
+            reason = budget_reason
         publish('delivering', 5)
         acknowledged = False
         send(active, dict(rc=2, reason=reason, token=token))
+        terminal_delivered = True
         return True
 
     def stop_signal(_signum, _frame):
@@ -683,7 +689,7 @@ def owner(lock):
     for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(sig, stop_signal)
     try:
-        if not generation_current():
+        if generation_current() is not True:
             return
         if os.path.lexists(SOCKET):
             os.unlink(SOCKET)
@@ -737,7 +743,10 @@ def owner(lock):
                 elif conn is active and request.get('op') == 'commit' and phase == 'delivering':
                     commit_deadline = (transport_deadline
                                        if transport_deadline is not None else None)
-                    if generation_current(commit_deadline) is not True:
+                    commit_generation = generation_current(commit_deadline)
+                    time.monotonic()
+                    if commit_generation is False:
+                        generation_changed = True
                         send(conn, dict(committed=False, token=token))
                         return
                     publish('handling', handling_grace)
@@ -767,6 +776,7 @@ def owner(lock):
                                 return
                         elif not needed():
                             send(conn, dict(rc=0, reason='', token=token))
+                            terminal_delivered = True
                             return
                         else:
                             invalidate_budget_windows()
@@ -826,7 +836,7 @@ def owner(lock):
                         probe_budget_failure = active is not None
                         if not probe_budget_failure:
                             return
-                    elif not current:
+                    elif current is False:
                         return
                 if not probe_budget_failure:
                     supervision_needed = needed(
@@ -857,6 +867,7 @@ def owner(lock):
                         reason = 'watcher delivered an actionable wake'
                 if not reason and probe_due and not supervision_needed:
                     send(active, dict(rc=0, reason='', token=token))
+                    terminal_delivered = True
                     return
                 if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
@@ -945,10 +956,19 @@ def owner(lock):
         with open('.codex-stop-error', 'w') as stream:
             stream.write(str(error) + '\n')
     finally:
-        cancel_arm()
-        if active is not None and not generation_current():
+        cleanup_deadline = None
+        if active is not None and transport_deadline is not None:
+            cleanup_deadline = transport_deadline - identity_allowance - protocol_reserve
+        cleanup_complete = cancel_arm(cleanup_deadline)
+        if active is not None and not terminal_delivered:
+            final_generation = False if generation_changed else generation_current(
+                transport_deadline - protocol_reserve if transport_deadline is not None else None)
+            time.monotonic()
             try:
-                send(active, dict(rc=0, reason='', token=token))
+                if final_generation is False:
+                    send(active, dict(rc=0, reason='', token=token))
+                elif final_generation is None or not cleanup_complete:
+                    send(active, dict(rc=2, reason=budget_reason, token=token))
             except OSError:
                 pass
         for conn in list(pending):
@@ -1017,6 +1037,7 @@ if child == 0:
 
 conn = None
 commit_pending = False
+specific_refusal = False
 
 def interrupted(_signum, _frame):
     if conn is not None:
@@ -1053,6 +1074,7 @@ try:
                   '. Run bin/fm-wake-drain.sh, handle all presented work, then run its exact '
                   'WAKE_ACK_REQUIRED command. The next Stop owns watcher renewal; do not launch another watcher.',
                   file=sys.stderr, flush=True)
+            specific_refusal = True
             send(conn, dict(op='accepted', token=record['token']))
             accepted = receive(conn)
             if accepted != dict(accepted=True, token=record['token']):
@@ -1075,11 +1097,13 @@ try:
     sys.exit(rc)
 except TransportEnded:
     if commit_pending:
-        print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
+        if not specific_refusal:
+            print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
         sys.exit(2)
     sys.exit(0)
 except (OSError, ValueError, KeyError):
-    print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
+    if not specific_refusal:
+        print('Firstmate Codex supervision: owner unavailable; inspect the Stop adapter and retry safely.', file=sys.stderr)
     sys.exit(2)
 PY
 PYTHON_PID=$!
