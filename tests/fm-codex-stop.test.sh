@@ -923,28 +923,35 @@ test_missing_endpoint_preserves_inbox_escalation() {
 }
 
 test_dead_endpoint_migrates_matching_stale_marker() {
-  local dir pane_hash
+  local dir id existing= pane_hash key
   dir=$(fixture dead-endpoint-marker-migration)
   install_endpoint_inventory_tmux "$dir"
-  printf '%s\n' 'window=fleet:dead-history' 'kind=ship' 'harness=grok' 'backend=tmux' \
-    > "$dir/state/dead-history.meta"
-  printf '%s\n' 'working: historical stopped worker' > "$dir/state/dead-history.status"
-  prime_status_seen "$dir/state" "$dir/state/dead-history.status"
   pane_hash=$(hash_text 'historical dead pane')
-  printf '%s' "$pane_hash" > "$dir/state/.stale-fleet_dead-history"
-  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:dead-history' \
+  for id in $(seq 1 25); do
+    printf 'window=fleet:dead-history-%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$id" \
+      > "$dir/state/dead-history-$id.meta"
+    printf '%s\n' 'working: historical stopped worker' > "$dir/state/dead-history-$id.status"
+    prime_status_seen "$dir/state" "$dir/state/dead-history-$id.status"
+    key="fleet_dead-history-$id"
+    printf '%s' "$pane_hash" > "$dir/state/.hash-$key"
+    printf '%s' "$pane_hash" > "$dir/state/.stale-$key"
+    existing="$existing fleet:dead-history-$id"
+  done
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
     FM_TEST_CAPTURE='historical dead pane' FM_TEST_CAPTURE_LOG="$dir/capture-calls" \
     FM_SIGNAL_GRACE=0 run_stop "$dir" 2
   wait_file "$dir/rc" 250
   [ "$(cat "$dir/rc")" = 2 ] || fail 'matching historical marker escaped Stop supervision'
   assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'matching historical marker emitted another death wake'
   [ ! -s "$dir/state/.wake-queue" ] || fail 'matching historical marker queued a duplicate death notification'
-  [ "$(cat "$dir/state/.stale-fleet_dead-history")" = authoritatively-dead ] \
-    || fail 'matching historical marker was not migrated'
-  [ "$(wc -l < "$dir/capture-calls")" -eq 1 ] || fail 'historical marker migration was not a single cheap capture'
+  for id in $(seq 1 25); do
+    [ "$(cat "$dir/state/.stale-fleet_dead-history-$id")" = authoritatively-dead ] \
+      || fail "matching historical marker $id was not migrated"
+  done
+  [ ! -e "$dir/capture-calls" ] || fail 'historical marker migration captured an exact-dead endpoint'
   assert_no_watcher "$dir"
   finish "$dir"
-  pass 'matching historical death markers migrate without duplicate wakes'
+  pass 'many historical death markers migrate without capture or duplicate wakes'
 }
 
 test_absorbed_dead_endpoint_emits_new_death_notification() {
@@ -956,6 +963,7 @@ test_absorbed_dead_endpoint_emits_new_death_notification() {
   printf '%s\n' 'working: previously absorbed worker' > "$dir/state/absorbed-dead.status"
   prime_status_seen "$dir/state" "$dir/state/absorbed-dead.status"
   pane_hash=$(hash_text 'absorbed dead pane')
+  printf '%s' "$pane_hash" > "$dir/state/.hash-fleet_absorbed-dead"
   printf '%s' "$pane_hash" > "$dir/state/.stale-fleet_absorbed-dead"
   date +%s > "$dir/state/.stale-since-fleet_absorbed-dead"
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:absorbed-dead' \
@@ -974,8 +982,7 @@ test_absorbed_dead_endpoint_emits_new_death_notification() {
     || fail 'absorbed dead endpoint did not migrate its marker'
   [ ! -e "$dir/state/.stale-since-fleet_absorbed-dead" ] \
     || fail 'absorbed dead endpoint retained its obsolete timer'
-  [ "$(wc -l < "$dir/capture-calls")" -eq 1 ] \
-    || fail 'absorbed dead endpoint did not remain on the cheap capture path'
+  [ ! -e "$dir/capture-calls" ] || fail 'absorbed dead endpoint captured the pane'
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'absorbed dead endpoints emit one new death notification'

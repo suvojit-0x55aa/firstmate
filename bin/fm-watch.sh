@@ -818,7 +818,7 @@ surface_nonterminal_stale() {  # <window> <hash>
 }
 
 handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <window-key>
-  local win=$1 task=$2 kind=$3 last=$4 key=$5 marker=authoritatively-dead sf previous tail40 current_hash
+  local win=$1 task=$2 kind=$3 last=$4 key=$5 marker=authoritatively-dead sf previous persisted_hash
   if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
     return 0
   fi
@@ -833,14 +833,12 @@ handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <
     case "$previous" in
       *[!0-9a-fA-F]*) ;;
       *)
-        if tail40=$(fm_backend_capture "$(window_backend "$win")" "$win" 40 "$(window_label "$win")" 2>/dev/null); then
-          current_hash=$(printf '%s' "$tail40" | hash_pane)
-          if [ "$current_hash" = "$previous" ] && [ ! -e "$STATE/.stale-since-$key" ]; then
-            printf '%s' "$marker" > "$sf"
-            rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-            clear_write_tracking "$key"
-            return 0
-          fi
+        persisted_hash=$(cat "$STATE/.hash-$key" 2>/dev/null || true)
+        if [ "$persisted_hash" = "$previous" ] && [ ! -e "$STATE/.stale-since-$key" ]; then
+          printf '%s' "$marker" > "$sf"
+          rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+          clear_write_tracking "$key"
+          return 0
         fi
         ;;
     esac

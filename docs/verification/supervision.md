@@ -468,7 +468,7 @@ The current continuation procedure is owned by [`../supervision-protocols/codex.
 
 On 2026-10-16, macOS Bash `3.2.57(1)-release` and Python `3.14.7` passed the portable admission regression against the shared backend agent-state dispatcher.
 The motivating primary-home inventory was measured read-only: 92 distinct recorded targets classified as 3 budgeted workers, 79 existing endpoints with no agent, and 10 absent endpoints; the combined existence and agent-state scan completed in 2.529 seconds.
-The full 40-case Codex Stop suite covered 100 historical endpoints, including both absent targets and existing agent-free panes, beside three live endpoints; it also covered a deliberately oversized two-endpoint live inventory, due authenticated custom and PR checks, unseen signals, due remote reply recovery, watcher ownership and cancellation.
+The full 49-case Codex Stop suite covered 100 historical endpoints, including both absent targets and existing agent-free panes, beside three live endpoints; it also covered legacy dead-marker migration without backend capture, one-time absorbed-worker death notification, a deliberately oversized two-endpoint live inventory, due authenticated custom and PR checks, unseen signals, due remote reply recovery, watcher ownership and cancellation.
 The unchanged Claude boundary and generated harness instructions also passed their focused suites.
 
 ```sh
@@ -484,6 +484,8 @@ Exact relevant output:
 ```text
 ok - large stale endpoint history does not consume the live cycle budget
 ok - small live endpoint inventories remain conservatively bounded
+ok - many historical death markers migrate without capture or duplicate wakes
+ok - absorbed dead endpoints emit one new death notification
 ok - due custom and PR checks complete across bounded watcher cycles
 ok - large registered-check inventories are admitted in bounded batches
 ok - due remote recovery fits the computed watcher cycle budget
