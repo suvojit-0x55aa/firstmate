@@ -568,6 +568,14 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  if ! fm_supervision_registry_reserve "$STATE" "$id" "$SPAWN_GEN"; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id supervision ownership could not be reserved before launch" >&2
+    return 1
+  fi
+  SPAWN_REGISTRY_RESERVED=1
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -637,6 +645,7 @@ spawn_remote_secondmate() {
     echo "remote_backend=$remote_backend"
     echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
+    echo "spawn_gen=$SPAWN_GEN"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
   mv -f -- "$tmp" "$meta"
@@ -647,6 +656,7 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id metadata was published, but pending supervision ownership could not be recorded" >&2
     return 1
   }
+  SPAWN_REGISTRY_RESERVED=0
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK"
@@ -687,6 +697,8 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SPAWN_GEN=
+SPAWN_REGISTRY_RESERVED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -714,6 +726,12 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ]; then
+    SPAWN_REGISTRY_RESERVED=0
+    if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" != "$SPAWN_GEN" ]; then
+      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" || true
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] \
      && [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] \
      && [ -n "$SPAWN_META_TMP" ] \
@@ -909,6 +927,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 # Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
@@ -1935,6 +1954,12 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+if ! fm_supervision_registry_reserve "$STATE" "$ID" "$SPAWN_GEN"; then
+  echo "error: $ID supervision ownership could not be reserved before endpoint creation" >&2
+  exit 1
+fi
+SPAWN_REGISTRY_RESERVED=1
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
@@ -2710,7 +2735,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2799,6 +2823,7 @@ fm_supervision_registry_prepare "$STATE" "$ID" "$STATE/$ID.meta" || {
   echo "error: $ID metadata was published, but pending supervision ownership could not be recorded" >&2
   exit 1
 }
+SPAWN_REGISTRY_RESERVED=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

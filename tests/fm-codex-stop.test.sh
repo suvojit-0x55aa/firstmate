@@ -175,8 +175,8 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v8\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v2\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
-      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
+    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v3\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
       "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -363,7 +363,7 @@ SH
 
 install_attached_watcher() {
   local dir=$1
-  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh,fm-backend.sh} "$dir/bin/"
+  cp "$ROOT/bin/"{fm-turnend-guard.sh,fm-codex-stop.sh,fm-primary-scope-lib.sh,fm-session-lock-lib.sh,fm-cursor-lib.sh,fm-wake-lib.sh,fm-supervision-lib.sh,fm-supervision-registry-lib.sh,fm-pending-reply-lib.sh,fm-task-inbox-lib.sh,fm-hook-host-lib.sh,fm-watch-arm.sh,fm-backend.sh} "$dir/bin/"
   cat > "$dir/bin/fm-watch.sh" <<'WATCH'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -381,8 +381,8 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v8\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v2\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
-      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
+    printf 'fm-codex-bounded.v9\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v3\tcheck-batch-handoff=resume-owner-cycle-v4\tcheck-batch-lease=%s\n' \
+      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
       "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -3081,6 +3081,77 @@ test_registry_pending_snapshot_is_immediately_authoritative() {
   pass 'pending lifecycle ownership publishes through one authoritative snapshot'
 }
 
+test_registry_reservation_recovers_spawn_crash_windows() {
+  local dir inventory rc
+  dir=$(fixture active-supervision-reservation-recovery)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" abandoned abandoned-gen || exit 1
+  ' _ "$ROOT/bin" || fail 'pre-endpoint reservation fixture failed'
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/rolled-back" || fail 'dead pre-endpoint reservation did not roll back'
+  [ ! -s "$dir/rolled-back" ] || fail 'dead pre-endpoint reservation entered active inventory'
+
+  set +e
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" published published-gen || exit 1
+    printf "%s\n" "window=fleet:published" "spawn_gen=published-gen" \
+      > "$FM_STATE_OVERRIDE/published.meta" || exit 1
+    exit 73
+  ' _ "$ROOT/bin" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 73 ] || fail 'post-metadata crash fixture did not reach its crash boundary'
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" > "$dir/recovered" || fail 'published reservation was not recovered'
+  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
+  [ "$inventory" = published ] || fail "post-metadata crash recovered the wrong inventory: $inventory"
+  grep -F "$(printf 'entry\tpublished\tpublished-gen\tpending')" \
+    "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'published reservation did not become pending lifecycle ownership'
+  pass 'spawn reservations recover both sides of metadata publication'
+}
+
+test_registered_check_kills_term_ignoring_process_group() {
+  local dir started elapsed child rc
+  dir=$(fixture registered-check-hard-timeout)
+  cat > "$dir/state/ignores-term.check.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$$" > "$FM_HOME/check-child-pid"
+while :; do sleep 1; done
+SH
+  chmod 0700 "$dir/state/ignores-term.check.sh"
+  started=$(date +%s)
+  set +e
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_CHECK_TIMEOUT=1 FM_CHECK_KILL_GRACE=1 \
+    bash -c '. "$1/fm-watch.sh"; run_check_capture "$2"' \
+      _ "$ROOT/bin" "$dir/state/ignores-term.check.sh"
+  rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  [ "$rc" -eq 0 ] || fail "hard-timeout check runner failed: rc=$rc"
+  [ "$elapsed" -le 4 ] || fail "TERM-ignoring check exceeded its kill/reap lease: ${elapsed}s"
+  child=$(cat "$dir/check-child-pid" 2>/dev/null || true)
+  [ -n "$child" ] || fail 'TERM-ignoring check never started'
+  ! kill -0 "$child" 2>/dev/null || fail 'TERM-ignoring check survived the hard timeout'
+  pass 'registered checks receive TERM then bounded KILL and reap'
+}
+
 test_active_only_pending_replies_exclude_archive() {
   local dir
   dir=$(fixture active-only-pending-replies)
@@ -3219,6 +3290,8 @@ test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_active_supervision_registry_owns_lifecycle_inventory
 test_registry_pending_snapshot_is_immediately_authoritative
+test_registry_reservation_recovers_spawn_crash_windows
+test_registered_check_kills_term_ignoring_process_group
 test_active_only_pending_replies_exclude_archive
 test_mixed_active_owner_policy_surfaces_once
 test_shared_endpoint_fanout_consumes_cycle_lease

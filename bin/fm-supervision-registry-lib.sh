@@ -9,19 +9,53 @@ fm_supervision_registry_task_valid() {
 }
 
 fm_supervision_registry_snapshot_header() {
-  printf 'fm-active-supervision.v2\t%s.%s.%s\n' "$(date +%s)" "${BASHPID:-$$}" "$RANDOM"
+  printf 'fm-active-supervision.v3\t%s.%s.%s\n' "$(date +%s)" "${BASHPID:-$$}" "$RANDOM"
 }
 
 fm_supervision_registry_snapshot_valid() {
-  local path=$1 protocol generation kind task spawn_gen phase
+  local path=$1 protocol generation kind task field3 field4 field5
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
   IFS="$(printf '\t')" read -r protocol generation < "$path" || return 1
-  [ "$protocol" = fm-active-supervision.v2 ] && [ -n "$generation" ] || return 1
-  while IFS="$(printf '\t')" read -r kind task spawn_gen phase; do
+  case "$protocol" in fm-active-supervision.v2|fm-active-supervision.v3) ;; *) return 1 ;; esac
+  [ -n "$generation" ] || return 1
+  while IFS="$(printf '\t')" read -r kind task field3 field4 field5; do
     [ -n "$kind" ] || continue
-    [ "$kind" = entry ] && fm_supervision_registry_task_valid "$task" \
-      && [ -n "$spawn_gen" ] || return 1
-    case "$phase" in pending|active) ;; *) return 1 ;; esac
+    fm_supervision_registry_task_valid "$task" || return 1
+    case "$kind" in
+      entry)
+        [ -n "$field3" ] || return 1
+        case "$field4" in pending|active) ;; *) return 1 ;; esac
+        [ -z "$field5" ] || return 1
+        ;;
+      reservation)
+        [ -n "$field3" ] || return 1
+        case "$field4" in *[!0-9]*|'') return 1 ;; esac
+        [ -n "$field5" ] || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done < <(sed '1d' "$path")
+}
+
+fm_supervision_registry_reconcile_locked() {
+  local state=$1 path kind task spawn_gen owner_pid owner_identity meta current identity
+  path=$(fm_supervision_registry_generation_path "$state")
+  fm_supervision_registry_snapshot_valid "$path" || return 1
+  while IFS="$(printf '\t')" read -r kind task spawn_gen owner_pid owner_identity; do
+    [ "$kind" = reservation ] || continue
+    meta="$state/$task.meta"
+    current=
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      current=$(fm_meta_get "$meta" spawn_gen)
+      [ -n "$current" ] || current=-
+    fi
+    if [ "$current" = "$spawn_gen" ]; then
+      fm_supervision_registry_write_locked "$state" "$task" "$meta" pending set || return 1
+      continue
+    fi
+    identity=$(fm_pid_identity "$owner_pid" 2>/dev/null || true)
+    [ -n "$identity" ] && [ "$identity" = "$owner_identity" ] && continue
+    fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || return 1
   done < <(sed '1d' "$path")
 }
 
@@ -30,6 +64,7 @@ fm_supervision_registry_generation() {
   lock=$(fm_supervision_registry_lock_path "$state")
   fm_lock_acquire_wait "$lock" || return 1
   path=$(fm_supervision_registry_generation_path "$state")
+  fm_supervision_registry_reconcile_locked "$state" || rc=1
   fm_supervision_registry_snapshot_valid "$path" || rc=1
   if [ "$rc" -eq 0 ]; then
     IFS="$(printf '\t')" read -r protocol generation < "$path" || rc=1
@@ -41,18 +76,25 @@ fm_supervision_registry_generation() {
 
 fm_supervision_registry_write_locked() {
   local state=$1 task=${2:-} meta=${3:-} phase=${4:-} operation=${5:-set}
-  local path tmp ordered kind existing_task existing_spawn existing_phase spawn_gen header entries
+  local owner_pid=${6:-} owner_identity=${7:-}
+  local path tmp ordered kind existing_task field3 field4 field5 spawn_gen header entries
   path=$(fm_supervision_registry_generation_path "$state")
   tmp=$(umask 077; mktemp "$state/.active-supervision-generation.XXXXXX") || return 1
   ordered="$tmp.ordered"
   fm_supervision_registry_snapshot_header > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if [ -f "$path" ]; then
     fm_supervision_registry_snapshot_valid "$path" || { rm -f -- "$tmp"; return 1; }
-    while IFS="$(printf '\t')" read -r kind existing_task existing_spawn existing_phase; do
-      [ "$kind" = entry ] || continue
-      [ "$existing_task" = "$task" ] && continue
-      printf 'entry\t%s\t%s\t%s\n' "$existing_task" "$existing_spawn" "$existing_phase" >> "$tmp" \
-        || { rm -f -- "$tmp"; return 1; }
+    while IFS="$(printf '\t')" read -r kind existing_task field3 field4 field5; do
+      if [ "$existing_task" = "$task" ]; then
+        case "$operation:$kind" in
+          cancel:entry|reserve:entry) ;;
+          *) continue ;;
+        esac
+      fi
+      case "$kind" in
+        entry) printf 'entry\t%s\t%s\t%s\n' "$existing_task" "$field3" "$field4" >> "$tmp" ;;
+        reservation) printf 'reservation\t%s\t%s\t%s\t%s\n' "$existing_task" "$field3" "$field4" "$field5" >> "$tmp" ;;
+      esac || { rm -f -- "$tmp"; return 1; }
     done < <(sed '1d' "$path")
   fi
   if [ "$operation" = set ]; then
@@ -60,12 +102,50 @@ fm_supervision_registry_write_locked() {
     spawn_gen=$(fm_meta_get "$meta" spawn_gen); [ -n "$spawn_gen" ] || spawn_gen=-
     printf 'entry\t%s\t%s\t%s\n' "$task" "$spawn_gen" "$phase" >> "$tmp" \
       || { rm -f -- "$tmp"; return 1; }
+  elif [ "$operation" = reserve ]; then
+    printf 'reservation\t%s\t%s\t%s\t%s\n' "$task" "$meta" "$owner_pid" "$owner_identity" >> "$tmp" \
+      || { rm -f -- "$tmp"; return 1; }
   fi
   header=$(sed -n '1p' "$tmp")
   entries=$(sed '1d' "$tmp" | LC_ALL=C sort -t "$(printf '\t')" -k2,2)
   { printf '%s\n' "$header"; [ -z "$entries" ] || printf '%s\n' "$entries"; } > "$ordered" \
     && mv -f -- "$ordered" "$path" || { rm -f -- "$tmp" "$ordered"; return 1; }
   rm -f -- "$tmp"
+}
+
+fm_supervision_registry_reserve() {
+  local state=$1 task=$2 spawn_gen=$3 owner_pid=${4:-${BASHPID:-$$}} owner_identity=${5:-}
+  local lock rc
+  fm_supervision_registry_task_valid "$task" || return 1
+  [ -n "$spawn_gen" ] || return 1
+  [ -n "$owner_identity" ] || owner_identity=$(fm_pid_identity "$owner_pid") || return 1
+  [ -f "$(fm_supervision_registry_generation_path "$state")" ] \
+    || fm_supervision_registry_recover "$state" || return 1
+  lock=$(fm_supervision_registry_lock_path "$state")
+  fm_lock_acquire_wait "$lock" || return 1
+  fm_supervision_registry_reconcile_locked "$state" \
+    && fm_supervision_registry_write_locked "$state" "$task" "$spawn_gen" '' reserve "$owner_pid" "$owner_identity"
+  rc=$?
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
+}
+
+fm_supervision_registry_cancel_reservation() {
+  local state=$1 task=$2 spawn_gen=$3 lock path kind entry_task entry_spawn field4 field5 found=0 rc=0
+  lock=$(fm_supervision_registry_lock_path "$state")
+  fm_lock_acquire_wait "$lock" || return 1
+  path=$(fm_supervision_registry_generation_path "$state")
+  fm_supervision_registry_snapshot_valid "$path" || rc=1
+  if [ "$rc" -eq 0 ]; then
+    while IFS="$(printf '\t')" read -r kind entry_task entry_spawn field4 field5; do
+      [ "$kind" = reservation ] && [ "$entry_task" = "$task" ] && [ "$entry_spawn" = "$spawn_gen" ] \
+        && found=1
+    done < <(sed '1d' "$path")
+  fi
+  [ "$rc" -ne 0 ] || [ "$found" -eq 0 ] \
+    || fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || rc=1
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
 }
 
 fm_supervision_registry_set() {
@@ -77,6 +157,7 @@ fm_supervision_registry_set() {
     || fm_supervision_registry_recover "$state" || return 1
   lock=$(fm_supervision_registry_lock_path "$state")
   fm_lock_acquire_wait "$lock" || return 1
+  fm_supervision_registry_reconcile_locked "$state" || { fm_lock_release "$lock"; return 1; }
   fm_supervision_registry_write_locked "$state" "$task" "$meta" "$phase" set
   rc=$?
   fm_lock_release "$lock" || rc=1
@@ -93,6 +174,7 @@ fm_supervision_registry_retire() {
     || fm_supervision_registry_recover "$state" || return 1
   lock=$(fm_supervision_registry_lock_path "$state")
   fm_lock_acquire_wait "$lock" || return 1
+  fm_supervision_registry_reconcile_locked "$state" || { fm_lock_release "$lock"; return 1; }
   fm_supervision_registry_write_locked "$state" "$task" '' '' remove
   rc=$?
   fm_lock_release "$lock" || rc=1
@@ -189,13 +271,14 @@ fm_supervision_registry_inventory() {
   lock=$(fm_supervision_registry_lock_path "$state")
   fm_lock_acquire_wait "$lock" || return 1
   path=$(fm_supervision_registry_generation_path "$state")
+  fm_supervision_registry_reconcile_locked "$state" || rc=1
   fm_supervision_registry_snapshot_valid "$path" || rc=1
   if [ "$rc" -eq 0 ]; then IFS="$(printf '\t')" read -r protocol generation < "$path" || rc=1; fi
   if [ "$rc" -eq 0 ] && [ -n "$expected" ] && [ "$generation" != "$expected" ]; then rc=2; fi
   out=
   while IFS="$(printf '\t')" read -r kind task spawn_gen phase; do
     [ "$rc" -eq 0 ] || break
-    [ "$kind" = entry ] || continue
+    [ "$kind" = entry ] || { rc=2; break; }
     meta="$state/$task.meta"
     [ -f "$meta" ] && [ ! -L "$meta" ] || { rc=1; break; }
     current=$(fm_meta_get "$meta" spawn_gen); [ -n "$current" ] || current=-
@@ -212,7 +295,9 @@ fm_supervision_registry_contains() {
   lock=$(fm_supervision_registry_lock_path "$state")
   fm_lock_acquire_wait "$lock" || return 2
   path=$(fm_supervision_registry_generation_path "$state")
-  if ! fm_supervision_registry_snapshot_valid "$path"; then
+  if ! fm_supervision_registry_reconcile_locked "$state"; then
+    rc=2
+  elif ! fm_supervision_registry_snapshot_valid "$path"; then
     rc=2
   elif ! IFS="$(printf '\t')" read -r protocol generation < "$path"; then
     rc=2

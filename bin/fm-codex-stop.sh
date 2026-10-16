@@ -141,6 +141,8 @@ try:
         raise ValueError
 except ValueError:
     check_timeout = 30
+check_kill_grace = 1
+check_slot_timeout = check_timeout + check_kill_grace
 try:
     check_interval = int(os.environ.get('FM_CHECK_INTERVAL', '300'))
 except ValueError:
@@ -346,9 +348,9 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
         worktree_write_timeout * active_owners +
         2 * remote_send_timeout * (remote_recoveries + owner_fanouts) + 5)
     if check_limit is None:
-        check_limit = max(1, math.floor((cycle_budget - non_check_components) / check_timeout))
+        check_limit = max(1, math.floor((cycle_budget - non_check_components) / check_slot_timeout))
     checks_this_cycle = min(due_checks, check_limit)
-    components = non_check_components + check_timeout * checks_this_cycle
+    components = non_check_components + check_slot_timeout * checks_this_cycle
     return max(watcher_guard_grace, components), check_limit, cycle_budget
 
 
@@ -448,6 +450,7 @@ def bounded_watcher_capability_content(check_limit):
     fields = (
         ('checks-per-cycle', check_limit),
         ('check-timeout', check_timeout),
+        ('check-kill-grace', check_kill_grace),
         ('check-interval', check_interval),
         ('poll', watcher_cadence),
         ('signal-grace', signal_grace),
@@ -457,10 +460,10 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('inventory', 'active-registry-v2'),
+        ('inventory', 'active-registry-v3'),
         ('check-batch-handoff', 'resume-owner-cycle-v4'),
     )
-    return 'fm-codex-bounded.v8\t' + '\t'.join(
+    return 'fm-codex-bounded.v9\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
@@ -1093,6 +1096,7 @@ def owner(lock):
                                 arm_environment['FM_CHECKS_PER_CYCLE'] = str(check_batch_limit)
                                 arm_environment['FM_CODEX_CHECK_BATCH_LEASE'] = token
                                 arm_environment['FM_CHECK_TIMEOUT'] = str(check_timeout)
+                                arm_environment['FM_CHECK_KILL_GRACE'] = str(check_kill_grace)
                                 arm_environment['FM_CHECK_INTERVAL'] = str(check_interval)
                                 arm_environment['FM_POLL'] = capability_number(watcher_cadence)
                                 arm_environment['FM_SIGNAL_GRACE'] = capability_number(signal_grace)
