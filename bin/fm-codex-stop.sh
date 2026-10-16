@@ -164,11 +164,12 @@ try:
 except ValueError:
     remote_send_timeout = 30
 try:
-    inactive_reconcile_timeout = int(os.environ.get('FM_INACTIVE_RECONCILE_BUDGET_SECS', '10')) + 1
-    if inactive_reconcile_timeout <= 1 or inactive_reconcile_timeout > 31:
+    inactive_reconcile_budget = int(os.environ.get('FM_INACTIVE_RECONCILE_BUDGET_SECS', '10'))
+    if inactive_reconcile_budget <= 0 or inactive_reconcile_budget > 30:
         raise ValueError
 except ValueError:
-    inactive_reconcile_timeout = 11
+    inactive_reconcile_budget = 10
+inactive_reconcile_timeout = inactive_reconcile_budget + 1
 
 
 try:
@@ -370,21 +371,38 @@ def watcher_beat():
         return 0
 
 
+def capability_number(value):
+    return format(value, 'g') if isinstance(value, float) else str(value)
+
+
+def bounded_watcher_capability_content(check_limit):
+    fields = (
+        ('checks-per-cycle', check_limit),
+        ('check-timeout', check_timeout),
+        ('check-interval', check_interval),
+        ('poll', watcher_cadence),
+        ('signal-grace', signal_grace),
+        ('crew-state-timeout', crew_state_timeout),
+        ('worktree-write-timeout', worktree_write_timeout),
+        ('remote-send-timeout', remote_send_timeout),
+        ('inactive-reconcile-budget', inactive_reconcile_budget),
+        ('remote-observation', 'deferred'),
+    )
+    return 'fm-codex-bounded.v2\t' + '\t'.join(
+        f'{key}={capability_number(value)}' for key, value in fields) + '\n'
+
+
 def bounded_watcher_capability(check_limit):
     fd = None
     try:
         flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
         fd = os.open('.watch.lock/codex-bounded-capability', flags)
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 128:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 512:
             return False
-        content = os.read(fd, 129).decode('ascii')
-        prefix = 'fm-codex-bounded.v1\t'
-        if not content.startswith(prefix) or not content.endswith('\n') or content.count('\n') != 1:
-            return False
-        bounded_limit = int(content[len(prefix):-1])
-        return 0 < bounded_limit <= check_limit
-    except (OSError, UnicodeError, ValueError):
+        content = os.read(fd, 513).decode('ascii')
+        return content == bounded_watcher_capability_content(check_limit)
+    except (OSError, UnicodeError):
         return False
     finally:
         if fd is not None:
@@ -657,6 +675,14 @@ def owner(lock):
                                 arm_environment['FM_GUARD_GRACE'] = str(cycle_limit)
                                 arm_environment['FM_CODEX_BOUNDED_WATCH'] = '1'
                                 arm_environment['FM_CHECKS_PER_CYCLE'] = str(check_batch_limit)
+                                arm_environment['FM_CHECK_TIMEOUT'] = str(check_timeout)
+                                arm_environment['FM_CHECK_INTERVAL'] = str(check_interval)
+                                arm_environment['FM_POLL'] = capability_number(watcher_cadence)
+                                arm_environment['FM_SIGNAL_GRACE'] = capability_number(signal_grace)
+                                arm_environment['FM_CREW_STATE_NM_TIMEOUT'] = str(crew_state_timeout)
+                                arm_environment['FM_WORKTREE_WRITE_TIMEOUT'] = str(worktree_write_timeout)
+                                arm_environment['FM_SEND_REMOTE_BUDGET'] = str(remote_send_timeout)
+                                arm_environment['FM_INACTIVE_RECONCILE_BUDGET_SECS'] = str(inactive_reconcile_budget)
                                 arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
                                 output = tempfile.TemporaryFile()
                                 arm_started_at = time.monotonic()

@@ -88,7 +88,10 @@ run_bounded_watcher_cycle() {
   local home=$1 fakebin=$2
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 3; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
-      FM_CHECKS_PER_CYCLE=1 FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
+      FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 \
+      FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 \
+      FM_WATCH_HANDLING_SUCCESSOR="${FM_TEST_WATCH_HANDLING_SUCCESSOR:-0}" \
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
       PATH="$fakebin:$PATH" "$ROOT/bin/fm-watch.sh"
 }
 
@@ -145,7 +148,16 @@ printf '%s\n' "$SCRIPT_DIR/fm-watch.sh" > "$lock/watcher-path"
 printf '%s\n' "$identity" > "$lock/pid-identity"
 case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
   1:*[!0-9]*|1:0|1:) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
-  1:*) printf 'fm-codex-bounded.v1\t%s\n' "$FM_CHECKS_PER_CYCLE" > "$lock/codex-bounded-capability" ;;
+  1:*)
+    [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
+      && remote_observation=deferred || remote_observation=inline
+    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tremote-observation=%s\n' \
+      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
+      "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
+      "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
+      "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" "$remote_observation" \
+      > "$lock/codex-bounded-capability"
+    ;;
   *) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
 esac
 clean_watcher() {
@@ -272,7 +284,16 @@ printf '%s\n' "$SCRIPT_DIR/fm-watch.sh" > "$lock/watcher-path"
 printf '%s\n' "$identity" > "$lock/pid-identity"
 case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
   1:*[!0-9]*|1:0|1:) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
-  1:*) printf 'fm-codex-bounded.v1\t%s\n' "$FM_CHECKS_PER_CYCLE" > "$lock/codex-bounded-capability" ;;
+  1:*)
+    [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
+      && remote_observation=deferred || remote_observation=inline
+    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tremote-observation=%s\n' \
+      "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
+      "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
+      "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
+      "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" "$remote_observation" \
+      > "$lock/codex-bounded-capability"
+    ;;
   *) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
 esac
 clean_watcher() {
@@ -599,13 +620,16 @@ test_attached_arm_uses_complete_cycle_grace() {
   dir=$(fixture attached-complete-cycle)
   install_attached_watcher "$dir"
   : > "$dir/state/task.meta"
-  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_SIGNAL_GRACE=30 \
-    FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 "$dir/bin/fm-watch.sh" &
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_POLL=1 FM_SIGNAL_GRACE=30 \
+    FM_CHECK_INTERVAL=999999 FM_CHECK_TIMEOUT=300 FM_CODEX_BOUNDED_WATCH=1 \
+    FM_CHECKS_PER_CYCLE=1 FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 \
+    "$dir/bin/fm-watch.sh" &
   watcher=$!
   printf '%s\n' "$watcher" > "$dir/sentinel-pid"
   wait_file "$dir/attached-watcher-ready"
   sleep 2
-  FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 TEST_ROOT="$dir" run_stop "$dir" 4
+  FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 FM_CHECK_TIMEOUT=300 \
+    TEST_ROOT="$dir" run_stop "$dir" 4
   TEST_ROOT=$original_root
   wait_file "$dir/rc" 500
   [ "$(cat "$dir/rc")" = 2 ] || fail 'attached watcher did not request quiet renewal'
@@ -638,6 +662,43 @@ test_attached_arm_rejects_unproven_bounded_mode() {
   kill -TERM "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
   pass 'attached watcher needs live bounded-mode capability proof'
+}
+
+test_attached_arm_rejects_mismatched_bounded_runtime() {
+  local dir original_root=$TEST_ROOT watcher mode watcher_timeout watcher_defer
+  for mode in check-timeout remote-observation; do
+    dir=$(fixture "attached-mismatched-$mode")
+    install_attached_watcher "$dir"
+    : > "$dir/state/task.meta"
+    watcher_timeout=300
+    watcher_defer=1
+    if [ "$mode" = remote-observation ]; then
+      watcher_defer=0
+    fi
+    FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_POLL=1 FM_SIGNAL_GRACE=30 \
+      FM_CHECK_INTERVAL=999999 FM_CHECK_TIMEOUT="$watcher_timeout" \
+      FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 \
+      FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION="$watcher_defer" \
+      "$dir/bin/fm-watch.sh" &
+    watcher=$!
+    printf '%s\n' "$watcher" > "$dir/sentinel-pid"
+    wait_file "$dir/attached-watcher-ready"
+    if [ "$mode" = check-timeout ]; then
+      FM_SIGNAL_GRACE=30 FM_CHECK_TIMEOUT=30 TEST_ROOT="$dir" run_stop "$dir" 2
+    else
+      FM_SIGNAL_GRACE=30 FM_CHECK_TIMEOUT=300 TEST_ROOT="$dir" run_stop "$dir" 2
+    fi
+    TEST_ROOT=$original_root
+    wait_file "$dir/rc" 250
+    [ "$(cat "$dir/rc")" = 2 ] || fail "$mode mismatch allowed Stop to fail open"
+    assert_contains "$(cat "$dir/out")" 'watcher failed' "$mode mismatch omitted the refusal"
+    assert_not_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' "$mode mismatch received bounded admission"
+    kill -0 "$watcher" 2>/dev/null || fail "$mode mismatch killed the independently owned watcher"
+    finish "$dir"
+    kill -TERM "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+  done
+  pass 'attached watcher capability binds timeout and remote observation'
 }
 
 test_sequential_checks_fit_complete_cycle_bound() {
@@ -922,10 +983,20 @@ test_missing_endpoint_preserves_inbox_escalation() {
   pass 'missing endpoints retain inbox escalation without pane work'
 }
 
-test_dead_endpoint_migrates_matching_stale_marker() {
-  local dir id existing= pane_hash key
+test_dead_endpoint_honors_explicit_notification_receipt() {
+  local dir id existing= pane_hash key meta_reads
   dir=$(fixture dead-endpoint-marker-migration)
   install_endpoint_inventory_tmux "$dir"
+  cat > "$dir/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *.meta) printf '%s\n' "$arg" >> "$FM_HOME/meta-read-log" ;;
+  esac
+done
+exec /usr/bin/grep "$@"
+SH
+  chmod +x "$dir/fakebin/grep"
   pane_hash=$(hash_text 'historical dead pane')
   for id in $(seq 1 25); do
     printf 'window=fleet:dead-history-%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$id" \
@@ -934,24 +1005,29 @@ test_dead_endpoint_migrates_matching_stale_marker() {
     prime_status_seen "$dir/state" "$dir/state/dead-history-$id.status"
     key="fleet_dead-history-$id"
     printf '%s' "$pane_hash" > "$dir/state/.hash-$key"
-    printf '%s' "$pane_hash" > "$dir/state/.stale-$key"
+    printf '%s' authoritatively-dead > "$dir/state/.stale-$key"
+    printf 'fm-death-notified.v1\t0\tdead-history-%s\ttmux\tfleet:dead-history-%s\n' \
+      "$id" "$id" > "$dir/state/.death-notified-$key"
     existing="$existing fleet:dead-history-$id"
   done
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
     FM_TEST_CAPTURE='historical dead pane' FM_TEST_CAPTURE_LOG="$dir/capture-calls" \
     FM_SIGNAL_GRACE=0 run_stop "$dir" 2
   wait_file "$dir/rc" 250
-  [ "$(cat "$dir/rc")" = 2 ] || fail 'matching historical marker escaped Stop supervision'
-  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'matching historical marker emitted another death wake'
-  [ ! -s "$dir/state/.wake-queue" ] || fail 'matching historical marker queued a duplicate death notification'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'explicit death receipts escaped Stop supervision'
+  assert_contains "$(cat "$dir/out")" 'quiet checkpoint elapsed' 'explicit death receipts emitted another death wake'
+  [ ! -s "$dir/state/.wake-queue" ] || fail 'explicit death receipts queued a duplicate notification'
   for id in $(seq 1 25); do
     [ "$(cat "$dir/state/.stale-fleet_dead-history-$id")" = authoritatively-dead ] \
-      || fail "matching historical marker $id was not migrated"
+      || fail "explicit death marker $id changed unexpectedly"
   done
-  [ ! -e "$dir/capture-calls" ] || fail 'historical marker migration captured an exact-dead endpoint'
+  [ ! -e "$dir/capture-calls" ] || fail 'explicit death receipts captured an exact-dead endpoint'
+  meta_reads=$(wc -l < "$dir/meta-read-log")
+  [ "$meta_reads" -le 1250 ] \
+    || fail "exact-dead inventory performed $meta_reads metadata reads instead of linear work"
   assert_no_watcher "$dir"
   finish "$dir"
-  pass 'many historical death markers migrate without capture or duplicate wakes'
+  pass 'exact-dead inventory is linear and explicit receipts suppress duplicates'
 }
 
 test_absorbed_dead_endpoint_emits_new_death_notification() {
@@ -986,6 +1062,64 @@ test_absorbed_dead_endpoint_emits_new_death_notification() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'absorbed dead endpoints emit one new death notification'
+}
+
+test_resumed_worker_retires_death_generation() {
+  local dir pane_hash rc receipt stale_rows
+  dir=$(fixture resumed-worker-death-generation)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:resumed-worker' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    > "$dir/state/resumed-worker.meta"
+  printf '%s\n' 'working: worker generation fixture' > "$dir/state/resumed-worker.status"
+  prime_status_seen "$dir/state" "$dir/state/resumed-worker.status"
+  pane_hash=$(hash_text 'Ctrl+c:cancel')
+  printf '%s' "$pane_hash" > "$dir/state/.hash-fleet_resumed-worker"
+  printf '%s' authoritatively-dead > "$dir/state/.stale-fleet_resumed-worker"
+  printf 'fm-death-notified.v1\t0\tresumed-worker\ttmux\tfleet:resumed-worker\n' \
+    > "$dir/state/.death-notified-fleet_resumed-worker"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:resumed-worker' \
+    FM_TEST_LIVE_TARGETS='fleet:resumed-worker' \
+    FM_TEST_CAPTURE='Ctrl+c:cancel' run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/live-watch.out" 2> "$dir/live-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "resumed worker cycle ended unexpectedly: rc=$rc $(cat "$dir/live-watch.err")"
+  [ ! -e "$dir/state/.death-notified-fleet_resumed-worker" ] \
+    || fail 'resumed worker retained the previous death receipt'
+  [ ! -e "$dir/state/.stale-fleet_resumed-worker" ] \
+    || fail 'resumed worker retained ambiguous stale state'
+  [ "$(cat "$dir/state/.death-generation-fleet_resumed-worker")" = 1 ] \
+    || fail 'resumed worker did not advance its death generation'
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:resumed-worker' \
+    FM_TEST_CAPTURE='Ctrl+c:cancel' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/dead-watch.out" 2> "$dir/dead-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "new worker death did not surface: rc=$rc $(cat "$dir/dead-watch.err")"
+  receipt=$(cat "$dir/state/.death-notified-fleet_resumed-worker")
+  [ "$receipt" = "$(printf 'fm-death-notified.v1\t1\tresumed-worker\ttmux\tfleet:resumed-worker')" ] \
+    || fail 'new worker death receipt was not bound to the resumed generation'
+  stale_rows=$(grep -c "$(printf '\tstale\tfleet:resumed-worker\tstale: fleet:resumed-worker')" \
+    "$dir/state/.wake-queue")
+  [ "$stale_rows" -eq 1 ] || fail "new worker death queued $stale_rows notifications"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:resumed-worker' \
+    FM_TEST_CAPTURE='Ctrl+c:cancel' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/repeat-dead-watch.out" 2> "$dir/repeat-dead-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "same death receipt did not suppress a duplicate: rc=$rc"
+  stale_rows=$(grep -c "$(printf '\tstale\tfleet:resumed-worker\tstale: fleet:resumed-worker')" \
+    "$dir/state/.wake-queue")
+  [ "$stale_rows" -eq 1 ] || fail "same death queued $stale_rows notifications"
+  pass 'resumed work advances death generation and wakes once'
 }
 
 test_due_custom_and_pr_checks_remain_bounded() {
@@ -1737,6 +1871,7 @@ test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
 test_attached_arm_uses_complete_cycle_grace
 test_attached_arm_rejects_unproven_bounded_mode
+test_attached_arm_rejects_mismatched_bounded_runtime
 test_sequential_checks_fit_complete_cycle_bound
 test_sequential_task_classification_fits_complete_cycle_bound
 test_retired_status_history_does_not_consume_cycle_budget
@@ -1747,8 +1882,9 @@ test_failed_existence_probe_is_conservatively_budgeted
 test_many_dead_endpoints_take_cheap_watcher_path
 test_dead_endpoint_preserves_inbox_escalation
 test_missing_endpoint_preserves_inbox_escalation
-test_dead_endpoint_migrates_matching_stale_marker
+test_dead_endpoint_honors_explicit_notification_receipt
 test_absorbed_dead_endpoint_emits_new_death_notification
+test_resumed_worker_retires_death_generation
 test_due_custom_and_pr_checks_remain_bounded
 test_actionable_checks_resume_bounded_sweep
 test_due_remote_recovery_fits_cycle_budget

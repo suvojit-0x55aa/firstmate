@@ -418,6 +418,25 @@ inbox_steer_check() {  # <window> <task> [target-state]
   esac
 }
 
+recorded_window_inventory() {
+  local meta w seen= task backend kind
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    w=$(fm_backend_target_of_meta "$meta")
+    [ -n "$w" ] || continue
+    case "$seen" in
+      *"|$w|"*) continue ;;
+    esac
+    seen="$seen|$w|"
+    task=$(basename "$meta")
+    task=${task%.meta}
+    backend=$(fm_backend_of_meta "$meta")
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ -n "$kind" ] || kind=ship
+    printf '%s\t%s\t%s\t%s\n' "$w" "$task" "$backend" "$kind"
+  done
+}
+
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
@@ -817,8 +836,46 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
-handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <window-key>
-  local win=$1 task=$2 kind=$3 last=$4 key=$5 marker=authoritatively-dead sf previous persisted_hash
+death_generation() {  # <window-key>
+  local generation
+  generation=$(cat "$STATE/.death-generation-$1" 2>/dev/null || true)
+  case "$generation" in ''|*[!0-9]*) generation=0 ;; esac
+  printf '%s' "$generation"
+}
+
+death_receipt_value() {  # <window> <task> <backend> <window-key>
+  printf 'fm-death-notified.v1\t%s\t%s\t%s\t%s\n' \
+    "$(death_generation "$4")" "$2" "$3" "$1"
+}
+
+death_receipt_matches() {  # <window> <task> <backend> <window-key>
+  local expected actual
+  expected=$(death_receipt_value "$1" "$2" "$3" "$4")
+  actual=$(cat "$STATE/.death-notified-$4" 2>/dev/null || true)
+  [ "$actual" = "$expected" ]
+}
+
+record_death_notification() {  # <window> <task> <backend> <window-key>
+  local receipt="$STATE/.death-notified-$4" tmp="$STATE/.death-notified-$4.tmp.$$"
+  ( umask 077; death_receipt_value "$1" "$2" "$3" "$4" > "$tmp" ) \
+    && mv -f "$tmp" "$receipt" || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    }
+}
+
+retire_death_notification() {  # <window-key>
+  local key=$1 generation
+  if [ -e "$STATE/.death-notified-$key" ] \
+    || [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" = authoritatively-dead ]; then
+    generation=$(death_generation "$key")
+    printf '%s\n' "$((generation + 1))" > "$STATE/.death-generation-$key" || return 1
+    rm -f "$STATE/.death-notified-$key" "$STATE/.stale-$key"
+  fi
+}
+
+handle_authoritatively_dead_target() {  # <window> <task> <backend> <kind> <last-status> <window-key>
+  local win=$1 task=$2 backend=$3 kind=$4 last=$5 key=$6 marker=authoritatively-dead sf
   if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
     return 0
   fi
@@ -827,23 +884,9 @@ handle_authoritatively_dead_target() {  # <window> <task> <kind> <last-status> <
     return 0
   fi
   sf="$STATE/.stale-$key"
-  previous=$(cat "$sf" 2>/dev/null || true)
-  [ "$previous" != "$marker" ] || return 0
-  if [ "${#previous}" -eq 32 ]; then
-    case "$previous" in
-      *[!0-9a-fA-F]*) ;;
-      *)
-        persisted_hash=$(cat "$STATE/.hash-$key" 2>/dev/null || true)
-        if [ "$persisted_hash" = "$previous" ] && [ ! -e "$STATE/.stale-since-$key" ]; then
-          printf '%s' "$marker" > "$sf"
-          rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-          clear_write_tracking "$key"
-          return 0
-        fi
-        ;;
-    esac
-  fi
+  death_receipt_matches "$win" "$task" "$backend" "$key" && return 0
   fm_wake_append stale "$win" "stale: $win" || exit 1
+  record_death_notification "$win" "$task" "$backend" "$key" || exit 1
   printf '%s' "$marker" > "$sf"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
@@ -1210,7 +1253,15 @@ FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 capability_tmp="$WATCH_LOCK/codex-bounded-capability.tmp"
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
-  capability_value=$(printf 'fm-codex-bounded.v1\t%s\n' "$CHECKS_PER_CYCLE")
+  if [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ]; then
+    remote_observation=deferred
+  else
+    remote_observation=inline
+  fi
+  capability_value=$(printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tremote-observation=%s\n' \
+    "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
+    "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
+    "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" "$remote_observation")
 else
   capability_value=$(printf 'fm-watch.v1\tunbounded\n')
 fi
@@ -1491,21 +1542,22 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
-  while IFS= read -r w; do
-    kind=$(window_kind "$w")
-    task=$(window_to_task "$w" "$STATE")
+  while IFS=$(printf '\t') read -r w task backend kind; do
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
     fi
     if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
-      agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null || printf unreadable)
+      agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || printf unreadable)
       case "$agent_state" in
         dead|missing)
           [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable
-          [ "$agent_state" != dead ] || handle_authoritatively_dead_target "$w" "$task" "$kind" "$last" "$key"
+          [ "$agent_state" != dead ] || handle_authoritatively_dead_target "$w" "$task" "$backend" "$kind" "$last" "$key"
           continue
+          ;;
+        alive)
+          retire_death_notification "$key" || exit 1
           ;;
       esac
     fi
@@ -1537,6 +1589,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$busy_now" -eq 0 ]; then
+      rm -f "$sf"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -1683,7 +1738,7 @@ EOF
         clear_pause_tracking "$key"
       fi
     fi
-  done < <(recorded_windows)
+  done < <(recorded_window_inventory)
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
