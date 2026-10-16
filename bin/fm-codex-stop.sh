@@ -245,16 +245,16 @@ def budget_window_count():
         return budget_window_cache
     result = shell(r'''
 . "$1/fm-backend.sh" || exit 1
-seen='|'
-for meta in "$FM_STATE_OVERRIDE"/*.meta; do
-  [ -f "$meta" ] || continue
-  target=$(fm_backend_target_of_meta "$meta")
-  [ -n "$target" ] || continue
-  case "$seen" in
-    *"|$target|"*) continue ;;
-  esac
-  seen="$seen$target|"
-  backend=$(fm_backend_of_meta "$meta")
+{
+  for meta in "$FM_STATE_OVERRIDE"/*.meta; do
+    [ -f "$meta" ] || continue
+    target=$(fm_backend_target_of_meta "$meta")
+    [ -n "$target" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    printf '%s\t%s\n' "$target" "$backend"
+  done
+} | awk -F '\t' '!seen[$1]++' |
+while IFS="$(printf '\t')" read -r target backend; do
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf unreadable)
   case "$agent_state" in
     dead|missing) ;;
@@ -386,6 +386,7 @@ def bounded_watcher_capability_content(check_limit):
         ('worktree-write-timeout', worktree_write_timeout),
         ('remote-send-timeout', remote_send_timeout),
         ('inactive-reconcile-budget', inactive_reconcile_budget),
+        ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
     )
     return 'fm-codex-bounded.v2\t' + '\t'.join(
@@ -683,6 +684,7 @@ def owner(lock):
                                 arm_environment['FM_WORKTREE_WRITE_TIMEOUT'] = str(worktree_write_timeout)
                                 arm_environment['FM_SEND_REMOTE_BUDGET'] = str(remote_send_timeout)
                                 arm_environment['FM_INACTIVE_RECONCILE_BUDGET_SECS'] = str(inactive_reconcile_budget)
+                                arm_environment['FM_CODEX_ADMISSION_GUARD_GRACE'] = str(watcher_guard_grace)
                                 arm_environment['FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION'] = '1'
                                 output = tempfile.TemporaryFile()
                                 arm_started_at = time.monotonic()

@@ -151,11 +151,12 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
   1:*)
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
-    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tremote-observation=%s\n' \
+    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
-      "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" "$remote_observation" \
+      "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
+      "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" \
       > "$lock/codex-bounded-capability"
     ;;
   *) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
@@ -287,11 +288,12 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
   1:*)
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
-    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tremote-observation=%s\n' \
+    printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
-      "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" "$remote_observation" \
+      "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
+      "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation" \
       > "$lock/codex-bounded-capability"
     ;;
   *) printf 'fm-watch.v1\tunbounded\n' > "$lock/codex-bounded-capability" ;;
@@ -622,7 +624,8 @@ test_attached_arm_uses_complete_cycle_grace() {
   : > "$dir/state/task.meta"
   FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_POLL=1 FM_SIGNAL_GRACE=30 \
     FM_CHECK_INTERVAL=999999 FM_CHECK_TIMEOUT=300 FM_CODEX_BOUNDED_WATCH=1 \
-    FM_CHECKS_PER_CYCLE=1 FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 \
+    FM_CHECKS_PER_CYCLE=1 FM_CODEX_ADMISSION_GUARD_GRACE=10 \
+    FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 \
     "$dir/bin/fm-watch.sh" &
   watcher=$!
   printf '%s\n' "$watcher" > "$dir/sentinel-pid"
@@ -665,19 +668,23 @@ test_attached_arm_rejects_unproven_bounded_mode() {
 }
 
 test_attached_arm_rejects_mismatched_bounded_runtime() {
-  local dir original_root=$TEST_ROOT watcher mode watcher_timeout watcher_defer
-  for mode in check-timeout remote-observation; do
+  local dir original_root=$TEST_ROOT watcher mode watcher_timeout watcher_defer watcher_guard
+  for mode in check-timeout remote-observation guard-grace; do
     dir=$(fixture "attached-mismatched-$mode")
     install_attached_watcher "$dir"
     : > "$dir/state/task.meta"
     watcher_timeout=300
     watcher_defer=1
+    watcher_guard=3
     if [ "$mode" = remote-observation ]; then
       watcher_defer=0
+    elif [ "$mode" = guard-grace ]; then
+      watcher_guard=300
     fi
     FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_POLL=1 FM_SIGNAL_GRACE=30 \
       FM_CHECK_INTERVAL=999999 FM_CHECK_TIMEOUT="$watcher_timeout" \
       FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 \
+      FM_CODEX_ADMISSION_GUARD_GRACE="$watcher_guard" \
       FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION="$watcher_defer" \
       "$dir/bin/fm-watch.sh" &
     watcher=$!
@@ -698,7 +705,7 @@ test_attached_arm_rejects_mismatched_bounded_runtime() {
     kill -TERM "$watcher" 2>/dev/null || true
     wait "$watcher" 2>/dev/null || true
   done
-  pass 'attached watcher capability binds timeout and remote observation'
+  pass 'attached watcher capability binds timeout, guard and remote observation'
 }
 
 test_sequential_checks_fit_complete_cycle_bound() {
@@ -999,15 +1006,17 @@ SH
   chmod +x "$dir/fakebin/grep"
   pane_hash=$(hash_text 'historical dead pane')
   for id in $(seq 1 25); do
-    printf 'window=fleet:dead-history-%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$id" \
+    printf 'window=fleet:dead-history-%s\nkind=ship\nharness=grok\nbackend=tmux\nspawn_gen=spawn-%s\n' "$id" "$id" \
       > "$dir/state/dead-history-$id.meta"
+    printf 'window=fleet:dead-history-%s\nkind=secondmate\nharness=grok\nbackend=tmux\nspawn_gen=duplicate-%s\n' "$id" "$id" \
+      > "$dir/state/z-duplicate-$id.meta"
     printf '%s\n' 'working: historical stopped worker' > "$dir/state/dead-history-$id.status"
     prime_status_seen "$dir/state" "$dir/state/dead-history-$id.status"
     key="fleet_dead-history-$id"
     printf '%s' "$pane_hash" > "$dir/state/.hash-$key"
     printf '%s' authoritatively-dead > "$dir/state/.stale-$key"
-    printf 'fm-death-notified.v1\t0\tdead-history-%s\ttmux\tfleet:dead-history-%s\n' \
-      "$id" "$id" > "$dir/state/.death-notified-$key"
+    printf 'fm-death-notified.v2\tspawn:spawn-%s\tdead-history-%s\ttmux\tfleet:dead-history-%s\n' \
+      "$id" "$id" "$id" > "$dir/state/.death-notified-$key"
     existing="$existing fleet:dead-history-$id"
   done
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
@@ -1023,7 +1032,7 @@ SH
   done
   [ ! -e "$dir/capture-calls" ] || fail 'explicit death receipts captured an exact-dead endpoint'
   meta_reads=$(wc -l < "$dir/meta-read-log")
-  [ "$meta_reads" -le 1250 ] \
+  [ "$meta_reads" -le 2500 ] \
     || fail "exact-dead inventory performed $meta_reads metadata reads instead of linear work"
   assert_no_watcher "$dir"
   finish "$dir"
@@ -1069,13 +1078,14 @@ test_resumed_worker_retires_death_generation() {
   dir=$(fixture resumed-worker-death-generation)
   install_endpoint_inventory_tmux "$dir"
   printf '%s\n' 'window=fleet:resumed-worker' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    'spawn_gen=spawn-a' \
     > "$dir/state/resumed-worker.meta"
   printf '%s\n' 'working: worker generation fixture' > "$dir/state/resumed-worker.status"
   prime_status_seen "$dir/state" "$dir/state/resumed-worker.status"
   pane_hash=$(hash_text 'Ctrl+c:cancel')
   printf '%s' "$pane_hash" > "$dir/state/.hash-fleet_resumed-worker"
   printf '%s' authoritatively-dead > "$dir/state/.stale-fleet_resumed-worker"
-  printf 'fm-death-notified.v1\t0\tresumed-worker\ttmux\tfleet:resumed-worker\n' \
+  printf 'fm-death-notified.v2\tspawn:spawn-a\tresumed-worker\ttmux\tfleet:resumed-worker\n' \
     > "$dir/state/.death-notified-fleet_resumed-worker"
 
   set +e
@@ -1090,8 +1100,8 @@ test_resumed_worker_retires_death_generation() {
     || fail 'resumed worker retained the previous death receipt'
   [ ! -e "$dir/state/.stale-fleet_resumed-worker" ] \
     || fail 'resumed worker retained ambiguous stale state'
-  [ "$(cat "$dir/state/.death-generation-fleet_resumed-worker")" = 1 ] \
-    || fail 'resumed worker did not advance its death generation'
+  [ ! -e "$dir/state/.death-generation-fleet_resumed-worker" ] \
+    || fail 'spawn-bound receipt unexpectedly used the legacy generation counter'
 
   set +e
   FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:resumed-worker' \
@@ -1102,7 +1112,7 @@ test_resumed_worker_retires_death_generation() {
   set -e
   [ "$rc" -eq 0 ] || fail "new worker death did not surface: rc=$rc $(cat "$dir/dead-watch.err")"
   receipt=$(cat "$dir/state/.death-notified-fleet_resumed-worker")
-  [ "$receipt" = "$(printf 'fm-death-notified.v1\t1\tresumed-worker\ttmux\tfleet:resumed-worker')" ] \
+  [ "$receipt" = "$(printf 'fm-death-notified.v2\tspawn:spawn-a\tresumed-worker\ttmux\tfleet:resumed-worker')" ] \
     || fail 'new worker death receipt was not bound to the resumed generation'
   stale_rows=$(grep -c "$(printf '\tstale\tfleet:resumed-worker\tstale: fleet:resumed-worker')" \
     "$dir/state/.wake-queue")
@@ -1119,7 +1129,49 @@ test_resumed_worker_retires_death_generation() {
   stale_rows=$(grep -c "$(printf '\tstale\tfleet:resumed-worker\tstale: fleet:resumed-worker')" \
     "$dir/state/.wake-queue")
   [ "$stale_rows" -eq 1 ] || fail "same death queued $stale_rows notifications"
-  pass 'resumed work advances death generation and wakes once'
+  pass 'resumed work retires death receipt and wakes once'
+}
+
+test_relaunch_generation_surfaces_death_before_alive_observation() {
+  local dir rc receipt stale_rows
+  dir=$(fixture relaunched-worker-death-generation)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=fleet:relaunched-worker' 'kind=ship' 'harness=grok' 'backend=tmux' \
+    'spawn_gen=spawn-a' > "$dir/state/relaunched-worker.meta"
+  printf '%s\n' 'working: original worker generation' > "$dir/state/relaunched-worker.status"
+  prime_status_seen "$dir/state" "$dir/state/relaunched-worker.status"
+  printf '%s' authoritatively-dead > "$dir/state/.stale-fleet_relaunched-worker"
+  printf 'fm-death-notified.v2\tspawn:spawn-a\trelaunched-worker\ttmux\tfleet:relaunched-worker\n' \
+    > "$dir/state/.death-notified-fleet_relaunched-worker"
+  sed 's/spawn_gen=spawn-a/spawn_gen=spawn-b/' "$dir/state/relaunched-worker.meta" \
+    > "$dir/state/relaunched-worker.meta.next"
+  mv "$dir/state/relaunched-worker.meta.next" "$dir/state/relaunched-worker.meta"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:relaunched-worker' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/dead-watch.out" 2> "$dir/dead-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "relaunched worker death did not surface: rc=$rc $(cat "$dir/dead-watch.err")"
+  receipt=$(cat "$dir/state/.death-notified-fleet_relaunched-worker")
+  [ "$receipt" = "$(printf 'fm-death-notified.v2\tspawn:spawn-b\trelaunched-worker\ttmux\tfleet:relaunched-worker')" ] \
+    || fail 'relaunched worker death receipt retained the previous spawn generation'
+  stale_rows=$(grep -c "$(printf '\tstale\tfleet:relaunched-worker\tstale: fleet:relaunched-worker')" \
+    "$dir/state/.wake-queue")
+  [ "$stale_rows" -eq 1 ] || fail "relaunched worker death queued $stale_rows notifications"
+
+  set +e
+  FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:relaunched-worker' \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/repeat-dead-watch.out" 2> "$dir/repeat-dead-watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "same relaunched death was not suppressed: rc=$rc"
+  stale_rows=$(grep -c "$(printf '\tstale\tfleet:relaunched-worker\tstale: fleet:relaunched-worker')" \
+    "$dir/state/.wake-queue")
+  [ "$stale_rows" -eq 1 ] || fail "same relaunched death queued $stale_rows notifications"
+  pass 'relaunch generation death surfaces before alive observation'
 }
 
 test_due_custom_and_pr_checks_remain_bounded() {
@@ -1885,6 +1937,7 @@ test_missing_endpoint_preserves_inbox_escalation
 test_dead_endpoint_honors_explicit_notification_receipt
 test_absorbed_dead_endpoint_emits_new_death_notification
 test_resumed_worker_retires_death_generation
+test_relaunch_generation_surfaces_death_before_alive_observation
 test_due_custom_and_pr_checks_remain_bounded
 test_actionable_checks_resume_bounded_sweep
 test_due_remote_recovery_fits_cycle_budget

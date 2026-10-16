@@ -419,36 +419,25 @@ inbox_steer_check() {  # <window> <task> [target-state]
 }
 
 recorded_window_inventory() {
-  local meta w seen= task backend kind
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    w=$(fm_backend_target_of_meta "$meta")
-    [ -n "$w" ] || continue
-    case "$seen" in
-      *"|$w|"*) continue ;;
-    esac
-    seen="$seen|$w|"
-    task=$(basename "$meta")
-    task=${task%.meta}
-    backend=$(fm_backend_of_meta "$meta")
-    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ -n "$kind" ] || kind=ship
-    printf '%s\t%s\t%s\t%s\n' "$w" "$task" "$backend" "$kind"
-  done
+  local meta w task backend kind spawn_gen
+  {
+    for meta in "$STATE"/*.meta; do
+      [ -e "$meta" ] || continue
+      w=$(fm_backend_target_of_meta "$meta")
+      [ -n "$w" ] || continue
+      task=$(basename "$meta")
+      task=${task%.meta}
+      backend=$(fm_backend_of_meta "$meta")
+      kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      spawn_gen=$(grep '^spawn_gen=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+      [ -n "$kind" ] || kind=ship
+      printf '%s\t%s\t%s\t%s\t%s\n' "$w" "$task" "$backend" "$kind" "$spawn_gen"
+    done
+  } | awk -F '\t' '!seen[$1]++'
 }
 
 recorded_windows() {
-  local meta w seen=
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    w=$(fm_backend_target_of_meta "$meta")
-    [ -n "$w" ] || continue
-    case "$seen" in
-      *"|$w|"*) continue ;;
-    esac
-    seen="$seen|$w|"
-    printf '%s\n' "$w"
-  done
+  recorded_window_inventory | cut -f1
 }
 
 # Print the oldest structurally valid row in a local secondmate's foreign queue.
@@ -843,20 +832,27 @@ death_generation() {  # <window-key>
   printf '%s' "$generation"
 }
 
-death_receipt_value() {  # <window> <task> <backend> <window-key>
-  printf 'fm-death-notified.v1\t%s\t%s\t%s\t%s\n' \
-    "$(death_generation "$4")" "$2" "$3" "$1"
+death_incarnation() {  # <spawn-generation> <window-key>
+  if [ -n "$1" ]; then
+    printf 'spawn:%s' "$1"
+  else
+    printf 'legacy:%s' "$(death_generation "$2")"
+  fi
 }
 
-death_receipt_matches() {  # <window> <task> <backend> <window-key>
+death_receipt_value() {  # <window> <task> <backend> <incarnation>
+  printf 'fm-death-notified.v2\t%s\t%s\t%s\t%s\n' "$4" "$2" "$3" "$1"
+}
+
+death_receipt_matches() {  # <window> <task> <backend> <incarnation> <window-key>
   local expected actual
   expected=$(death_receipt_value "$1" "$2" "$3" "$4")
-  actual=$(cat "$STATE/.death-notified-$4" 2>/dev/null || true)
+  actual=$(cat "$STATE/.death-notified-$5" 2>/dev/null || true)
   [ "$actual" = "$expected" ]
 }
 
-record_death_notification() {  # <window> <task> <backend> <window-key>
-  local receipt="$STATE/.death-notified-$4" tmp="$STATE/.death-notified-$4.tmp.$$"
+record_death_notification() {  # <window> <task> <backend> <incarnation> <window-key>
+  local receipt="$STATE/.death-notified-$5" tmp="$STATE/.death-notified-$5.tmp.$$"
   ( umask 077; death_receipt_value "$1" "$2" "$3" "$4" > "$tmp" ) \
     && mv -f "$tmp" "$receipt" || {
       rm -f "$tmp" 2>/dev/null || true
@@ -864,18 +860,28 @@ record_death_notification() {  # <window> <task> <backend> <window-key>
     }
 }
 
-retire_death_notification() {  # <window-key>
-  local key=$1 generation
-  if [ -e "$STATE/.death-notified-$key" ] \
-    || [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" = authoritatively-dead ]; then
-    generation=$(death_generation "$key")
-    printf '%s\n' "$((generation + 1))" > "$STATE/.death-generation-$key" || return 1
+reconcile_death_notification() {  # <window> <task> <backend> <incarnation> <window-key>
+  local key=$5
+  [ -e "$STATE/.death-notified-$key" ] || return 0
+  if ! death_receipt_matches "$1" "$2" "$3" "$4" "$key"; then
     rm -f "$STATE/.death-notified-$key" "$STATE/.stale-$key"
   fi
 }
 
-handle_authoritatively_dead_target() {  # <window> <task> <backend> <kind> <last-status> <window-key>
-  local win=$1 task=$2 backend=$3 kind=$4 last=$5 key=$6 marker=authoritatively-dead sf
+retire_death_notification() {  # <window-key> <spawn-generation>
+  local key=$1 spawn_gen=$2 generation
+  if [ -e "$STATE/.death-notified-$key" ] \
+    || [ "$(cat "$STATE/.stale-$key" 2>/dev/null || true)" = authoritatively-dead ]; then
+    if [ -z "$spawn_gen" ]; then
+      generation=$(death_generation "$key")
+      printf '%s\n' "$((generation + 1))" > "$STATE/.death-generation-$key" || return 1
+    fi
+    rm -f "$STATE/.death-notified-$key" "$STATE/.stale-$key"
+  fi
+}
+
+handle_authoritatively_dead_target() {  # <window> <task> <backend> <incarnation> <kind> <last-status> <window-key>
+  local win=$1 task=$2 backend=$3 incarnation=$4 kind=$5 last=$6 key=$7 marker=authoritatively-dead sf
   if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
     return 0
   fi
@@ -884,9 +890,9 @@ handle_authoritatively_dead_target() {  # <window> <task> <backend> <kind> <last
     return 0
   fi
   sf="$STATE/.stale-$key"
-  death_receipt_matches "$win" "$task" "$backend" "$key" && return 0
+  death_receipt_matches "$win" "$task" "$backend" "$incarnation" "$key" && return 0
   fm_wake_append stale "$win" "stale: $win" || exit 1
-  record_death_notification "$win" "$task" "$backend" "$key" || exit 1
+  record_death_notification "$win" "$task" "$backend" "$incarnation" "$key" || exit 1
   printf '%s' "$marker" > "$sf"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
@@ -1258,10 +1264,11 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ]; then
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tremote-observation=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v2\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
-    "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" "$remote_observation")
+    "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
+    "${FM_CODEX_ADMISSION_GUARD_GRACE:-${FM_GUARD_GRACE:-300}}" "$remote_observation")
 else
   capability_value=$(printf 'fm-watch.v1\tunbounded\n')
 fi
@@ -1542,8 +1549,10 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
-  while IFS=$(printf '\t') read -r w task backend kind; do
+  while IFS=$(printf '\t') read -r w task backend kind spawn_gen; do
     key=$(window_key "$w")
+    incarnation=$(death_incarnation "$spawn_gen" "$key")
+    reconcile_death_notification "$w" "$task" "$backend" "$incarnation" "$key" || exit 1
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"
@@ -1553,11 +1562,12 @@ EOF
       case "$agent_state" in
         dead|missing)
           [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable
-          [ "$agent_state" != dead ] || handle_authoritatively_dead_target "$w" "$task" "$backend" "$kind" "$last" "$key"
+          [ "$agent_state" != dead ] \
+            || handle_authoritatively_dead_target "$w" "$task" "$backend" "$incarnation" "$kind" "$last" "$key"
           continue
           ;;
         alive)
-          retire_death_notification "$key" || exit 1
+          retire_death_notification "$key" "$spawn_gen" || exit 1
           ;;
       esac
     fi

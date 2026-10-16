@@ -468,7 +468,7 @@ The current continuation procedure is owned by [`../supervision-protocols/codex.
 
 On 2026-10-16, macOS Bash `3.2.57(1)-release` and Python `3.14.7` passed the portable admission regression against the shared backend agent-state dispatcher.
 The motivating primary-home inventory was measured read-only: 92 distinct recorded targets classified as 3 budgeted workers, 79 existing endpoints with no agent, and 10 absent endpoints; the combined existence and agent-state scan completed in 2.529 seconds.
-The current 51-case Codex Stop driver covers 100 historical endpoints, including both absent targets and existing agent-free panes, beside three live endpoints; it also covers linear metadata resolution, explicit generation-bound death receipts without backend capture, resumed-worker death notification, exact attached-watcher runtime capability matching, a deliberately oversized two-endpoint live inventory, due authenticated custom and PR checks, unseen signals, due remote reply recovery, watcher ownership and cancellation.
+The current 52-case Codex Stop driver covers 100 historical endpoints, including both absent targets and existing agent-free panes, beside three live endpoints; it also covers linear metadata resolution with duplicate endpoints, durable spawn-bound death receipts without backend capture, relaunch death before alive observation, exact attached-watcher runtime capability matching including the admission guard, a deliberately oversized two-endpoint live inventory, due authenticated custom and PR checks, unseen signals, due remote reply recovery, watcher ownership and cancellation.
 The unchanged Claude boundary and generated harness instructions also passed their focused suites.
 
 ```sh
@@ -486,8 +486,9 @@ ok - large stale endpoint history does not consume the live cycle budget
 ok - small live endpoint inventories remain conservatively bounded
 ok - exact-dead inventory is linear and explicit receipts suppress duplicates
 ok - absorbed dead endpoints emit one new death notification
-ok - resumed work advances death generation and wakes once
-ok - attached watcher capability binds timeout and remote observation
+ok - resumed work retires death receipt and wakes once
+ok - relaunch generation death surfaces before alive observation
+ok - attached watcher capability binds timeout, guard and remote observation
 ok - due custom and PR checks complete across bounded watcher cycles
 ok - large registered-check inventories are admitted in bounded batches
 ok - due remote recovery fits the computed watcher cycle budget
