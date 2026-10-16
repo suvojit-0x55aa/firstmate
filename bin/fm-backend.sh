@@ -926,7 +926,7 @@ fm_backend_agent_state_batch() {  # stdin: <backend><tab><target>[<tab><payload>
                   snapshot_status=$(cat "$scope_dir/status" 2>/dev/null || true)
                   case "$snapshot_status" in
                     ok|missing|unreadable)
-                      state=$(fm_backend_tmux_agent_state "$target" "$snapshot_status" "$scope_dir/windows")
+                      state=$(fm_backend_tmux_agent_state "$target" "$snapshot_status" "$scope_dir")
                       ;;
                     *)
                       tmux_cache_failed=1

@@ -222,6 +222,7 @@ install_endpoint_inventory_tmux() {
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_TEST_BACKEND_PROBE_LOG:-}" ] || printf 'tmux\t%s\n' "${1:-}" >> "$FM_TEST_BACKEND_PROBE_LOG"
 if [ "${1:-}" = list-windows ]; then
   session=
   while [ "$#" -gt 0 ]; do
@@ -233,7 +234,12 @@ if [ "${1:-}" = list-windows ]; then
   done
   [ -z "${FM_TEST_INVENTORY_LOG:-}" ] || printf '%s\n' "$session" >> "$FM_TEST_INVENTORY_LOG"
   for target in ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}}; do
-    [ "${target%%:*}" = "$session" ] && printf '%s\n' "${target#*:}"
+    if [ "${target%%:*}" = "$session" ]; then
+      command=zsh
+      case " ${FM_TEST_LIVE_TARGETS:-} " in *" $target "*) command=codex ;; esac
+      case " ${FM_TEST_AMBIGUOUS_TARGETS:-} " in *" $target "*) command=python ;; esac
+      printf '%s\t/dev/fm-test-no-tty\t%s\n' "${target#*:}" "$command"
+    fi
   done
   exit 0
 fi
@@ -279,7 +285,14 @@ if [ "${1:-}" = display-message ]; then
 fi
 exit 1
 SH
-  chmod +x "$dir/fakebin/tmux"
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -axo ]; then
+  [ -z "${FM_TEST_BACKEND_PROBE_LOG:-}" ] || printf 'ps\tsnapshot\n' >> "$FM_TEST_BACKEND_PROBE_LOG"
+fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/ps"
 }
 
 install_attached_watcher() {
@@ -525,10 +538,10 @@ import os
 import subprocess
 import time
 
-original_run = subprocess.run
+original_popen = subprocess.Popen
 
 
-def delayed_run(*args, **kwargs):
+def delayed_popen(*args, **kwargs):
     command = args[0] if args else kwargs.get('args', [])
     marker = os.environ.get('FM_TEST_ADMISSION_MARKER', '')
     if (marker and isinstance(command, list) and len(command) > 2 and
@@ -538,10 +551,10 @@ def delayed_run(*args, **kwargs):
         time.sleep(float(os.environ.get('FM_TEST_ADMISSION_DELAY', '0')))
         with open(marker + '.done', 'w', encoding='utf-8') as stream:
             stream.write('done\n')
-    return original_run(*args, **kwargs)
+    return original_popen(*args, **kwargs)
 
 
-subprocess.run = delayed_run
+subprocess.Popen = delayed_popen
 PY
       started=$(date +%s)
       PYTHONPATH="$dir/admission-fault" FM_TEST_ADMISSION_MARKER="$dir/admission-delay" \
@@ -942,7 +955,7 @@ SH
 }
 
 test_many_dead_endpoints_take_cheap_watcher_path() {
-  local dir id existing= key pane_hash inventory_calls
+  local dir id existing= key pane_hash inventory_calls tmux_probes process_probes backend_probes
   dir=$(fixture retained-dead-endpoints)
   install_endpoint_inventory_tmux "$dir"
   cat > "$dir/slow-crew-state.sh" <<'SH'
@@ -958,6 +971,8 @@ SH
       > "$dir/state/dead-$id.meta"
     if [ "$id" -lt 25 ]; then
       printf '%s\n' 'paused: retained completed worker' > "$dir/state/dead-$id.status"
+      printf 'fm-death-notified.v2\tlegacy:0\tdead-%s\ttmux\tfleet:dead-%s\n' "$id" "$id" \
+        > "$dir/state/.death-notified-fleet_dead-$id"
     else
       printf '%s\n' 'working: agent exited without a terminal event' > "$dir/state/dead-$id.status"
     fi
@@ -970,6 +985,7 @@ SH
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
     FM_TEST_CAPTURE='retained dead pane' FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" \
     FM_TEST_INVENTORY_LOG="$dir/inventory-calls" \
+    FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probe-calls" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
     run_stop "$dir" 4
   wait_file "$dir/rc" 300
@@ -986,9 +1002,51 @@ SH
   inventory_calls=$(wc -l < "$dir/inventory-calls")
   [ "$inventory_calls" -eq 2 ] \
     || fail "admission and watcher used $inventory_calls tmux inventories for one shared session"
+  backend_probes=$(wc -l < "$dir/backend-probe-calls")
+  tmux_probes=$(grep -c "$(printf '^tmux\tlist-windows$')" "$dir/backend-probe-calls" || true)
+  process_probes=$(grep -c "$(printf '^ps\tsnapshot$')" "$dir/backend-probe-calls" || true)
+  [ "$backend_probes" -eq 4 ] && [ "$tmux_probes" -eq 2 ] && [ "$process_probes" -eq 2 ] \
+    || fail "admission and watcher used unexpected backend probes: $(tr '\n' ' ' < "$dir/backend-probe-calls")"
   assert_no_watcher "$dir"
   finish "$dir"
   pass 'retained dead endpoints stay cheap and preserve notification'
+}
+
+test_paused_and_captain_held_deaths_notify_once() {
+  local dir mode status rc stale_rows
+  for mode in paused captain-held; do
+    dir=$(fixture "dead-$mode-notification")
+    install_endpoint_inventory_tmux "$dir"
+    case "$mode" in
+      paused) status='paused: awaiting external dependency' ;;
+      *) status='captain-held [key=route]: tracked by held-decision-route' ;;
+    esac
+    printf '%s\n' "window=fleet:dead-$mode" 'kind=ship' 'harness=grok' 'backend=tmux' \
+      'spawn_gen=spawn-a' > "$dir/state/dead-$mode.meta"
+    printf '%s\n' "$status" > "$dir/state/dead-$mode.status"
+    prime_status_seen "$dir/state" "$dir/state/dead-$mode.status"
+
+    set +e
+    FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS="fleet:dead-$mode" \
+      run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+      > "$dir/first-death.out" 2> "$dir/first-death.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$mode death did not surface: rc=$rc $(cat "$dir/first-death.err")"
+    [ "$(death_receipt_count "$dir")" -eq 1 ] || fail "$mode death did not persist its receipt"
+
+    set +e
+    FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS="fleet:dead-$mode" \
+      run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+      > "$dir/repeat-death.out" 2> "$dir/repeat-death.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 124 ] || fail "$mode duplicate death was not suppressed: rc=$rc"
+    stale_rows=$(grep -Fc "$(printf '\tstale\tfleet:dead-%s\tstale: fleet:dead-%s' "$mode" "$mode")" \
+      "$dir/state/.wake-queue" || true)
+    [ "$stale_rows" -eq 1 ] || fail "$mode death queued $stale_rows notifications"
+  done
+  pass 'paused and captain-held deaths notify once before long cadence'
 }
 
 test_dead_endpoint_preserves_inbox_escalation() {
@@ -2100,6 +2158,7 @@ test_small_live_endpoint_inventory_remains_bounded
 test_failed_existence_probe_is_conservatively_budgeted
 test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
+test_paused_and_captain_held_deaths_notify_once
 test_dead_endpoint_preserves_inbox_escalation
 test_missing_endpoint_preserves_inbox_escalation
 test_dead_endpoint_honors_explicit_notification_receipt

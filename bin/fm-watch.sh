@@ -964,12 +964,13 @@ handle_authoritatively_dead_target() {  # <window> <task> <backend> <incarnation
   if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
     return 0
   fi
-  if status_is_paused_or_captain_held "$last"; then
-    handle_paused_stale "$win" "$task" "$marker"
+  sf="$STATE/.stale-$key"
+  if death_receipt_matches "$win" "$task" "$backend" "$incarnation" "$owner_id"; then
+    if status_is_paused_or_captain_held "$last"; then
+      handle_paused_stale "$win" "$task" "$marker"
+    fi
     return 0
   fi
-  sf="$STATE/.stale-$key"
-  death_receipt_matches "$win" "$task" "$backend" "$incarnation" "$owner_id" && return 0
   fm_wake_append stale "$win" "stale: $win" || exit 1
   record_death_notification "$win" "$task" "$backend" "$incarnation" "$owner_id" || exit 1
   printf '%s' "$marker" > "$sf"
