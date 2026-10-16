@@ -166,7 +166,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v5\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-v2\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v6\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-cycle-v3\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -224,7 +224,7 @@ while :; do
           > "$lock/codex-check-batch-boundary"
         next_sequence=$((batch_sequence + 1))
         request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
-        if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v2\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
+        if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v3\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
           batch_sequence=$next_sequence
           printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
           rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
@@ -372,7 +372,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v5\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-v2\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v6\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-cycle-v3\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -400,7 +400,7 @@ while :; do
   if [ -n "${batch_lease:-}" ]; then
     next_sequence=$((batch_sequence + 1))
     request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
-    if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v2\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
+    if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v3\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
       batch_sequence=$next_sequence
       printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
       rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
@@ -1661,9 +1661,9 @@ test_bounded_check_resume_requires_live_owner() {
     '. "$1/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT/bin" "$$") \
     || fail 'could not identify resume fixture owner'
   deadline=$(( $(date +%s) - 1 ))
-  printf '{"token":"expired-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"phase":"watching"}\n' \
+  printf '{"token":"expired-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"resume_cycle_timeout":3,"phase":"watching"}\n' \
     "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" > "$dir/state/.codex-stop.json"
-  request=$(printf 'fm-codex-check-batch.v2\towner-lease\t2\texpired-token\t%s\t%s\t%s\t%s\t%s\n' \
+  request=$(printf 'fm-codex-check-batch.v3\towner-lease\t2\texpired-token\t%s\t%s\t%s\t%s\t%s\t3\n' \
     "$$" "$owner_identity" "$$" "$owner_identity" "$deadline")
   printf '%s' "$request" > "$dir/state/.watch.lock/codex-check-batch-resume"
   sleep 0.2
@@ -1674,9 +1674,9 @@ test_bounded_check_resume_requires_live_owner() {
 
   kill -STOP "$watcher"
   deadline=$(( $(date +%s) + 10 ))
-  printf '{"token":"revoked-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"phase":"watching"}\n' \
+  printf '{"token":"revoked-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"resume_cycle_timeout":3,"phase":"watching"}\n' \
     "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" > "$dir/state/.codex-stop.json"
-  printf 'fm-codex-check-batch.v2\towner-lease\t2\trevoked-token\t%s\t%s\t%s\t%s\t%s\n' \
+  printf 'fm-codex-check-batch.v3\towner-lease\t2\trevoked-token\t%s\t%s\t%s\t%s\t%s\t3\n' \
     "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" \
     > "$dir/state/.watch.lock/codex-check-batch-resume"
   rm -f "$dir/state/.watch.lock/codex-check-batch-resume"
@@ -1689,6 +1689,57 @@ test_bounded_check_resume_requires_live_owner() {
   kill -TERM "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
   pass 'bounded check resume requires live unrevoked Stop ownership'
+}
+
+test_bounded_check_resume_requires_complete_cycle_budget() {
+  local dir watcher owner_identity deadline
+  dir=$(fixture bounded-check-resume-cycle-budget)
+  for name in a-first b-second c-third d-fourth e-fifth f-sixth; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "printf '%s\\n' '$name' >> \"\$FM_HOME/check-runs\"" \
+      > "$dir/state/$name.check.sh"
+    chmod 0700 "$dir/state/$name.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null \
+      || fail "could not register $name cycle-budget fixture"
+  done
+  env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
+    FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=3 FM_CODEX_CHECK_BATCH_LEASE=cycle-lease \
+    FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 FM_POLL=0.02 FM_HEARTBEAT=999999 \
+    FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher=$!
+  wait_file "$dir/state/.watch.lock/codex-check-batch-boundary" 100
+  owner_identity=$(FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$1/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT/bin" "$$") \
+    || fail 'could not identify cycle-budget fixture owner'
+  deadline=$(( $(date +%s) + 3 ))
+  printf '{"token":"short-cycle-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"resume_cycle_timeout":6,"phase":"watching"}\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" > "$dir/state/.codex-stop.json"
+  printf 'fm-codex-check-batch.v3\tcycle-lease\t2\tshort-cycle-token\t%s\t%s\t%s\t%s\t%s\t6\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" \
+    > "$dir/state/.watch.lock/codex-check-batch-resume"
+  sleep 0.2
+  [ "$(cat "$dir/state/.watch.lock/codex-check-batch-sequence")" = 1 ] \
+    || fail 'partial-cycle authorization advanced the batch sequence'
+  [ "$(cat "$dir/check-runs")" = $'a-first\nb-second\nc-third' ] \
+    || fail 'partial-cycle authorization started successor checks'
+
+  deadline=$(( $(date +%s) + 10 ))
+  printf '{"token":"full-cycle-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"resume_cycle_timeout":6,"phase":"watching"}\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" > "$dir/state/.codex-stop.json"
+  printf 'fm-codex-check-batch.v3\tcycle-lease\t2\tfull-cycle-token\t%s\t%s\t%s\t%s\t%s\t6\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" \
+    > "$dir/state/.watch.lock/codex-check-batch-resume"
+  for _ in $(seq 1 50); do
+    [ "$(wc -l < "$dir/check-runs" | tr -d ' ')" = 6 ] && break
+    sleep 0.02
+  done
+  [ "$(cat "$dir/state/.watch.lock/codex-check-batch-sequence")" = 2 ] \
+    || fail 'full-cycle authorization did not advance the batch sequence'
+  [ "$(cat "$dir/check-runs")" = $'a-first\nb-second\nc-third\nd-fourth\ne-fifth\nf-sixth' ] \
+    || fail 'full-cycle authorization did not complete the successor batch'
+  kill -TERM "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  pass 'bounded check resume requires the complete admitted cycle budget'
 }
 
 test_duplicate_endpoint_owners_share_stale_pass() {
@@ -1724,13 +1775,13 @@ test_duplicate_endpoint_owners_share_stale_pass() {
   pass 'duplicate endpoint owners share one capture and stale increment'
 }
 
-test_launcher_exit_after_spawn_retires_owned_watcher() {
+test_launcher_exit_before_child_publication_retires_owned_watcher() {
   local dir original_root=$TEST_ROOT watcher
   dir=$(fixture launcher-exit-after-spawn)
   cp -R "$ROOT/bin/." "$dir/bin/"
   : > "$dir/state/task.meta"
-  TEST_ROOT="$dir" FM_SIGNAL_GRACE=0 FM_TEST_WATCH_ARM_EXIT_AFTER_SPAWN=1 \
-    FM_TEST_WATCH_START_DELAY=3 run_stop "$dir" 5
+  TEST_ROOT="$dir" FM_SIGNAL_GRACE=0 FM_TEST_WATCH_ARM_EXIT_AFTER_FORK=1 \
+    FM_TEST_WATCH_CHILD_HANDSHAKE_DELAY=3 run_stop "$dir" 5
   TEST_ROOT=$original_root
   wait_file "$dir/rc" 250
   [ "$(cat "$dir/rc")" = 2 ] || fail 'launcher exit after spawn allowed Stop to fail open'
@@ -2979,6 +3030,7 @@ test_many_dead_endpoints_take_cheap_watcher_path
 test_duplicate_endpoint_pending_replies_share_classification
 test_bounded_check_batch_parks_at_safe_boundary
 test_bounded_check_resume_requires_live_owner
+test_bounded_check_resume_requires_complete_cycle_budget
 test_duplicate_endpoint_owners_share_stale_pass
 test_paused_and_captain_held_deaths_notify_once
 test_local_secondmate_death_notifies_once
@@ -2997,7 +3049,7 @@ test_codex_defers_remote_pending_reply_observation
 test_cycle_budget_scans_are_throttled
 test_large_check_inventory_is_batched_before_transport_deadline
 test_dead_arm_launcher_retires_owned_watcher_group
-test_launcher_exit_after_spawn_retires_owned_watcher
+test_launcher_exit_before_child_publication_retires_owned_watcher
 test_reaped_uncertain_group_is_not_signalled
 test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling

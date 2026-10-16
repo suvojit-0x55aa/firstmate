@@ -441,9 +441,9 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('check-batch-handoff', 'resume-owner-v2'),
+        ('check-batch-handoff', 'resume-owner-cycle-v3'),
     )
-    return 'fm-codex-bounded.v5\t' + '\t'.join(
+    return 'fm-codex-bounded.v6\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
@@ -494,10 +494,10 @@ def watcher_check_batch_boundary(batch_lease):
 
 def request_watcher_check_batch(batch_lease, sequence, token, owner_pid,
                                 owner_identity, session_pid, session_identity,
-                                resume_deadline):
-    value = (f'fm-codex-check-batch.v2\t{batch_lease}\t{sequence}\t{token}\t'
+                                resume_deadline, resume_cycle_timeout):
+    value = (f'fm-codex-check-batch.v3\t{batch_lease}\t{sequence}\t{token}\t'
              f'{owner_pid}\t{owner_identity}\t{session_pid}\t{session_identity}\t'
-             f'{resume_deadline}\n').encode('ascii')
+             f'{resume_deadline}\t{resume_cycle_timeout}\n').encode('ascii')
     path = '.watch.lock/codex-check-batch-resume'
     tmp = '.watch.lock/codex-check-batch-resume.tmp'
     fd = None
@@ -533,7 +533,7 @@ def check_batch_authorization(path, batch_lease, token):
         if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
             return False
         fields = os.read(fd, 1025).decode('ascii').rstrip('\n').split('\t')
-        return (len(fields) == 9 and fields[0] == 'fm-codex-check-batch.v2' and
+        return (len(fields) == 10 and fields[0] == 'fm-codex-check-batch.v3' and
                 fields[1] == batch_lease and fields[3] == token)
     except FileNotFoundError:
         return None
@@ -736,6 +736,7 @@ def owner(lock):
     active_cycle_limit = cycle_limit
     transport_deadline = None
     resume_deadline_epoch = None
+    resume_cycle_timeout = None
     arm_budget_failure = False
     terminal_delivered = False
     terminal_cleanup_complete = False
@@ -765,6 +766,8 @@ def owner(lock):
                       session_id=session_id, phase=phase, deadline=time.time() + seconds)
         if resume_deadline_epoch is not None:
             record['resume_deadline'] = resume_deadline_epoch
+        if resume_cycle_timeout is not None:
+            record['resume_cycle_timeout'] = resume_cycle_timeout
         published = record
         fd, tmp = tempfile.mkstemp(prefix='.codex-stop-record.')
         try:
@@ -824,9 +827,18 @@ def owner(lock):
                         member_pid, member_identity = ownership
                         owned_member = True
                 if not owned_member and completed:
-                    launch_ownership = arm_launch_ownership(
-                        token, arm.pid, arm_identity, cleanup_deadline)
-                    time.monotonic()
+                    launch_wait_deadline = time.monotonic() + startup_timeout
+                    if cleanup_deadline is not None:
+                        launch_wait_deadline = min(launch_wait_deadline, cleanup_deadline)
+                    while True:
+                        launch_ownership = arm_launch_ownership(
+                            token, arm.pid, arm_identity, cleanup_deadline)
+                        now = time.monotonic()
+                        if launch_ownership is not None:
+                            break
+                        if now >= launch_wait_deadline:
+                            break
+                        time.sleep(0.05)
                     if launch_ownership is None:
                         completed = False
                     elif isinstance(launch_ownership, tuple):
@@ -1049,6 +1061,7 @@ def owner(lock):
                                 budget_deadline=transport_deadline,
                                 probe_deadline=(transport_deadline - startup_phase_allowance - checkpoint -
                                                 terminal_reserve))
+                            resume_cycle_timeout = cycle_timeout
                             if cycle_timeout > active_cycle_limit:
                                 if not finish(budget_reason):
                                     return
@@ -1125,8 +1138,11 @@ def owner(lock):
                         reason = budget_reason
                     elif next_cycle_timeout > cycle_timeout:
                         cycle_timeout = next_cycle_timeout
+                        resume_cycle_timeout = cycle_timeout
                         if phase == 'confirming':
                             publish('confirming', cycle_timeout, confirmation_started_at)
+                        else:
+                            publish(phase, max(0, deadline - time.monotonic()))
                 if output is not None:
                     text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
                     if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat')) for line in text.splitlines()):
@@ -1153,7 +1169,8 @@ def owner(lock):
                                 if not request_watcher_check_batch(
                                         proof[3], expected_batch_sequence, token,
                                         os.getpid(), owner_identity, session_pid,
-                                        session_identity, resume_deadline_epoch):
+                                        session_identity, resume_deadline_epoch,
+                                        resume_cycle_timeout):
                                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                                 else:
                                     resume_authorization = (proof[3], token)

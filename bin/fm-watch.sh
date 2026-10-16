@@ -1297,6 +1297,36 @@ if [ -n "${FM_TEST_WATCH_START_DELAY:-}" ]; then
   sleep "$FM_TEST_WATCH_START_DELAY"
 fi
 
+if [ -n "${FM_WATCH_ARM_OWNER_PID:-}" ] || [ -n "${FM_WATCH_ARM_OWNER_IDENTITY:-}" ]; then
+  [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ] \
+    && [ -n "${FM_WATCH_ARM_OWNER_PID:-}" ] \
+    && [ -n "${FM_WATCH_ARM_OWNER_IDENTITY:-}" ] || exit 1
+  case "$FM_CODEX_CHECK_BATCH_LEASE:$FM_WATCH_ARM_OWNER_PID" in
+    *[!A-Za-z0-9._:-]*|*:|*::*) exit 1 ;;
+  esac
+  if [ -n "${FM_TEST_WATCH_CHILD_HANDSHAKE_DELAY:-}" ]; then
+    sleep "$FM_TEST_WATCH_CHILD_HANDSHAKE_DELAY"
+  fi
+  IFS="$(printf '\t')" read -r launch_protocol launch_lease launch_owner_pid \
+    launch_owner_identity launch_phase < "$STATE/.codex-arm-owner" || exit 1
+  [ "$launch_protocol" = fm-codex-arm-launch.v1 ] \
+    && [ "$launch_lease" = "$FM_CODEX_CHECK_BATCH_LEASE" ] \
+    && [ "$launch_owner_pid" = "$FM_WATCH_ARM_OWNER_PID" ] \
+    && [ "$launch_owner_identity" = "$FM_WATCH_ARM_OWNER_IDENTITY" ] \
+    && [ "$launch_phase" = pending ] || exit 1
+  launch_watcher_pid=${BASHPID:-$$}
+  launch_watcher_identity=$(fm_pid_identity "$launch_watcher_pid" 2>/dev/null || true)
+  [ -n "$launch_watcher_identity" ] || exit 1
+  launch_record_tmp="$STATE/.codex-arm-owner.tmp"
+  ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
+      "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
+      "$FM_WATCH_ARM_OWNER_IDENTITY" "$launch_watcher_pid" \
+      "$launch_watcher_identity" > "$launch_record_tmp" ) \
+    && mv -f "$launch_record_tmp" "$STATE/.codex-arm-owner" || exit 1
+  [ "$(fm_pid_identity "$FM_WATCH_ARM_OWNER_PID" 2>/dev/null || true)" \
+    = "$FM_WATCH_ARM_OWNER_IDENTITY" ] || exit 1
+fi
+
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
@@ -1397,7 +1427,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v5\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-v2\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v6\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-cycle-v3\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -1423,20 +1453,24 @@ publish_codex_check_batch_boundary() {
 
 codex_check_batch_request_valid() {
   local request_file=$1 next_sequence=$2 protocol lease sequence owner_token owner_pid owner_identity
-  local generation_pid generation_identity authorization_deadline record_values record_token record_owner
-  local record_owner_identity record_generation_pid record_generation_identity record_deadline record_phase now
+  local generation_pid generation_identity authorization_deadline authorization_cycle_timeout
+  local record_values record_token record_owner record_owner_identity record_generation_pid
+  local record_generation_identity record_deadline record_cycle_timeout record_phase now
   IFS="$(printf '\t')" read -r protocol lease sequence owner_token owner_pid owner_identity \
-    generation_pid generation_identity authorization_deadline < "$request_file" || return 1
-  [ "$protocol" = fm-codex-check-batch.v2 ] \
+    generation_pid generation_identity authorization_deadline authorization_cycle_timeout \
+    < "$request_file" || return 1
+  [ "$protocol" = fm-codex-check-batch.v3 ] \
     && [ "$lease" = "$FM_CODEX_CHECK_BATCH_LEASE" ] \
     && [ "$sequence" = "$next_sequence" ] || return 1
-  case "$owner_pid:$generation_pid:$authorization_deadline" in
+  case "$owner_pid:$generation_pid:$authorization_deadline:$authorization_cycle_timeout" in
     *[!0-9:]*|:*|*::*|*:) return 1 ;;
   esac
-  record_values=$(jq -jer '[.token, (.owner|tostring), .owner_identity, (.session_pid|tostring), .session_identity, (.resume_deadline|tostring), .phase] | join("\u001f")' \
+  [ "$authorization_cycle_timeout" -gt 0 ] || return 1
+  record_values=$(jq -jer '[.token, (.owner|tostring), .owner_identity, (.session_pid|tostring), .session_identity, (.resume_deadline|tostring), (.resume_cycle_timeout|tostring), .phase] | join("\u001f")' \
     "$STATE/.codex-stop.json" 2>/dev/null) || return 1
   IFS="$(printf '\037')" read -r record_token record_owner record_owner_identity \
-    record_generation_pid record_generation_identity record_deadline record_phase <<EOF
+    record_generation_pid record_generation_identity record_deadline record_cycle_timeout \
+    record_phase <<EOF
 $record_values
 EOF
   [ "$record_token" = "$owner_token" ] \
@@ -1444,12 +1478,13 @@ EOF
     && [ "$record_owner_identity" = "$owner_identity" ] \
     && [ "$record_generation_pid" = "$generation_pid" ] \
     && [ "$record_generation_identity" = "$generation_identity" ] \
-    && [ "$record_deadline" = "$authorization_deadline" ] || return 1
+    && [ "$record_deadline" = "$authorization_deadline" ] \
+    && [ "$record_cycle_timeout" = "$authorization_cycle_timeout" ] || return 1
   case "$record_phase" in starting|watching|confirming) ;; *) return 1 ;; esac
   [ "$(fm_pid_identity "$owner_pid" 2>/dev/null || true)" = "$owner_identity" ] || return 1
   [ "$(fm_pid_identity "$generation_pid" 2>/dev/null || true)" = "$generation_identity" ] || return 1
   now=$(date +%s)
-  [ $((now + CHECK_TIMEOUT)) -le "$authorization_deadline" ]
+  [ $((now + authorization_cycle_timeout)) -le "$authorization_deadline" ]
 }
 
 park_at_codex_check_batch_boundary() {

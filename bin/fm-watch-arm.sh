@@ -489,6 +489,7 @@ export FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
 case "${FM_CODEX_CHECK_BATCH_LEASE:-}" in
   ''|*[!A-Za-z0-9._-]*) ;;
   *)
+    [ -n "$FM_WATCH_ARM_OWNER_IDENTITY" ] || exit 1
     arm_owner_record="$STATE/.codex-arm-owner"
     ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
         "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
@@ -502,25 +503,7 @@ else
   "$WATCH" >"$child_out" &
 fi
 child=$!
-if [ -n "$arm_owner_record" ]; then
-  child_identity=$(fm_pid_identity "$child" 2>/dev/null || true)
-  if [ -z "$child_identity" ]; then
-    cleanup_child
-    wait "$child" 2>/dev/null || true
-    cleanup_arm_owner_record
-    exit 1
-  fi
-  if ! ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
-      "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
-      "$FM_WATCH_ARM_OWNER_IDENTITY" "$child" "$child_identity" > "$arm_owner_record.tmp" ) \
-    || ! mv -f "$arm_owner_record.tmp" "$arm_owner_record"; then
-    cleanup_child
-    wait "$child" 2>/dev/null || true
-    cleanup_arm_owner_record
-    exit 1
-  fi
-fi
-if [ "${FM_TEST_WATCH_ARM_EXIT_AFTER_SPAWN:-0}" = 1 ]; then
+if [ "${FM_TEST_WATCH_ARM_EXIT_AFTER_FORK:-0}" = 1 ]; then
   printf '%s\n' "$child" > "$FM_HOME/arm-exit-candidate-pid"
   exit 1
 fi
