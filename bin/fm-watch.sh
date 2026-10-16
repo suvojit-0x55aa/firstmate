@@ -1639,6 +1639,7 @@ EOF
   # crossed turn bound already handed to the away-mode daemon).
   while IFS=$(printf '\t') read -r backend w agent_state route record_home task kind spawn_gen; do
     [ "$backend" != __FM_AGENT_STATE_ERROR__ ] || exit 1
+    [ "$route" != remote ] || continue
     key=$(window_key "$w")
     death_owner=$(death_owner_id "$w" "$task" "$backend")
     incarnation=$(death_incarnation "$spawn_gen" "$death_owner")

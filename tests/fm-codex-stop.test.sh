@@ -954,6 +954,8 @@ test_remote_endpoints_avoid_local_backend_probes() {
   install_endpoint_inventory_tmux "$dir"
   printf '%s\n' 'window=remote:mate' 'kind=secondmate' \
     'remote_host=remote.invalid' 'home=/remote/firstmate' > "$dir/state/mate.meta"
+  printf '%s\n' 'paused: waiting for the captain' > "$dir/state/mate.status"
+  prime_status_seen "$dir/state" "$dir/state/mate.status"
   printf '%s\n' 'window=fleet:dead' 'kind=ship' 'backend=tmux' > "$dir/state/z-dead.meta"
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='remote:mate fleet:dead' \
     FM_TEST_INVENTORY_LOG="$dir/inventories" FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probes" \
@@ -970,7 +972,36 @@ test_remote_endpoints_avoid_local_backend_probes() {
   ! grep -qF 'remote' "$dir/inventories" || fail 'remote endpoint was probed through a local backend'
   [ ! -e "$dir/captures" ] || fail 'remote endpoint was captured through a local backend'
   finish "$dir"
-  pass 'remote endpoints stay isolated from colliding local backend state'
+  pass 'paused remote endpoints stay isolated from local stale handling'
+}
+
+test_remote_inbox_stays_owned_by_remote_delivery() {
+  local dir rec
+  dir=$(fixture remote-inbox-isolation)
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' 'window=remote:inbox' 'kind=secondmate' \
+    'remote_host=remote.invalid' 'home=/remote/firstmate' > "$dir/state/mate.meta"
+  printf '%s\n' 'window=fleet:dead' 'kind=ship' 'backend=tmux' > "$dir/state/z-dead.meta"
+  rec=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-task-inbox-lib.sh"
+    fm_task_inbox_write "$2" mate "respond through the remote delivery path"
+  ' _ "$ROOT/bin" "$dir/state") || fail 'could not create remote retained inbox record'
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='remote:inbox fleet:dead' \
+    FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probes" FM_TEST_CAPTURE_LOG="$dir/captures" \
+    FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=1 FM_SIGNAL_GRACE=0 \
+    run_stop "$dir" 180
+  wait_file "$dir/rc" 200
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'remote inbox escaped Codex Stop supervision'
+  [ -f "$rec" ] || fail 'remote retained inbox record was discarded locally'
+  [ ! -e "$dir/state/mate.inbox/.ring-state" ] \
+    || fail 'remote retained inbox advanced the local ring ladder'
+  [ ! -e "$dir/state/mate.inbox/.escalated" ] \
+    || fail 'remote retained inbox was falsely escalated locally'
+  ! grep -qF $'tmux\tsend-keys' "$dir/backend-probes" \
+    || fail 'remote retained inbox rang a colliding local pane'
+  [ ! -e "$dir/captures" ] || fail 'remote retained inbox captured a colliding local pane'
+  finish "$dir"
+  pass 'remote inboxes remain owned by durable remote delivery'
 }
 
 test_herdr_endpoints_use_one_snapshot_per_cycle() {
@@ -2239,6 +2270,7 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_small_live_endpoint_inventory_remains_bounded
 test_failed_existence_probe_is_conservatively_budgeted
 test_remote_endpoints_avoid_local_backend_probes
+test_remote_inbox_stays_owned_by_remote_delivery
 test_herdr_endpoints_use_one_snapshot_per_cycle
 test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
