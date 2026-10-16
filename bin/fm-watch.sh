@@ -197,11 +197,11 @@ write_check_sweep_state() {
 }
 
 check_sweep_has_remaining() {
-  local pending_check pending_name
+  local effective_cursor=${1:-} pending_check pending_name
   for pending_check in "$STATE"/*.check.sh; do
     [ -e "$pending_check" ] || continue
     pending_name=$(basename "$pending_check")
-    [[ "$pending_name" > "$last_check_name" ]] \
+    [[ "$pending_name" > "$effective_cursor" ]] \
       && [[ "$pending_name" < "$check_sweep_high_water" || "$pending_name" = "$check_sweep_high_water" ]] \
       && return 0
   done
@@ -209,12 +209,14 @@ check_sweep_has_remaining() {
 }
 
 checkpoint_check_sweep() {
-  if [ "$CHECKS_PER_CYCLE" -gt 0 ] && check_sweep_has_remaining; then
-    [ -n "$last_check_name" ] || return 1
-    write_check_sweep_state "$last_check_name" "$check_sweep_high_water" || return 1
+  local effective_cursor=${last_check_name:-${check_cursor:-}}
+  if [ "$CHECKS_PER_CYCLE" -gt 0 ] && check_sweep_has_remaining "$effective_cursor"; then
+    [ -n "$effective_cursor" ] || return 1
+    write_check_sweep_state "$effective_cursor" "$check_sweep_high_water" || return 1
     rm -f "$STATE/.last-check"
   else
-    rm -f "$CHECK_SWEEP_CURSOR" "$CHECK_SWEEP_HIGH_WATER"
+    rm -f "$CHECK_SWEEP_HIGH_WATER"
+    rm -f "$CHECK_SWEEP_CURSOR"
     touch "$STATE/.last-check"
   fi
 }

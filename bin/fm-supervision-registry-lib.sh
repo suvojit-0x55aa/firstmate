@@ -77,7 +77,7 @@ fm_supervision_registry_snapshot_valid() {
 
 fm_supervision_registry_recover_reservation_meta_locked() {
   local state=$1 task=$2 spawn_gen=$3 phase=$4 backend=$5 target=$6 detail=$7
-  local meta tmp old kind
+  local recovery_path=${8:-} meta tmp old kind worktree project
   meta="$state/$task.meta"
   tmp=$(umask 077; mktemp "$state/.$task.meta.recovery.XXXXXX") || return 1
   old=
@@ -93,6 +93,8 @@ fm_supervision_registry_recover_reservation_meta_locked() {
     } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   else
     kind=$(fm_meta_get "$old" kind); [ -n "$kind" ] || kind=ship
+    worktree=$(fm_meta_get "$old" worktree); [ -n "$worktree" ] || worktree=$recovery_path
+    project=$(fm_meta_get "$old" project); [ -n "$project" ] || project=$recovery_path
     {
       if [ "$backend" = orca ]; then
         printf 'window=fm-%s\nterminal=%s\n' "$task" "$target"
@@ -102,11 +104,13 @@ fm_supervision_registry_recover_reservation_meta_locked() {
       fi
       printf 'endpoint_task_id=%s\nkind=%s\nspawn_gen=%s\n' "$task" "$kind" "$spawn_gen"
       [ "$backend" = tmux ] || printf 'backend=%s\n' "$backend"
+      [ -z "$worktree" ] || [ "$worktree" = - ] || printf 'worktree=%s\n' "$worktree"
+      [ -z "$project" ] || [ "$project" = - ] || printf 'project=%s\n' "$project"
     } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   fi
   if [ -n "$old" ]; then
     awk -F= '
-      BEGIN { split("worktree project harness tasktmp model effort home projects", keys, " "); for (i in keys) keep[keys[i]]=1 }
+      BEGIN { split("harness tasktmp model effort home projects", keys, " "); for (i in keys) keep[keys[i]]=1 }
       $1 in keep && !seen[$1]++ { print }
     ' "$old" >> "$tmp" || { rm -f -- "$tmp"; return 1; }
   fi
@@ -115,6 +119,7 @@ fm_supervision_registry_recover_reservation_meta_locked() {
 
 fm_supervision_registry_reconcile_locked() {
   local state=$1 path kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail meta current identity verdict
+  local recovery_identity recovery_state recovery_path recovery_target
   path=$(fm_supervision_registry_generation_path "$state")
   fm_supervision_registry_snapshot_valid "$path" || return 1
   while IFS="$(printf '\t')" read -r kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail; do
@@ -135,9 +140,29 @@ fm_supervision_registry_reconcile_locked() {
     case "$reservation_phase" in
       created|remote-unknown)
         verdict=unverified
+        recovery_state=unverified
+        recovery_path=-
+        recovery_target=$target
         case "$backend:$target" in
           remote:*|remote-herdr:*) ;;
-          tmux:@*) ;;
+          tmux:@*)
+            recovery_identity=$(fm_backend_reservation_identity "$backend" "$target" "$detail") \
+              || recovery_identity=$'unverified\t-'
+            IFS="$(printf '\t')" read -r recovery_state recovery_path <<EOF
+$recovery_identity
+EOF
+            verdict=$(printf '%s\t%s\tlocal\t-\n' "$backend" "$detail" \
+              | fm_backend_agent_state_batch 2>/dev/null \
+              | awk -F '\t' 'NR == 1 { print $3 }') || verdict=unreadable
+            [ -n "$verdict" ] || verdict=unreadable
+            case "$recovery_state:$recovery_path:$verdict" in
+              match:-:*) verdict=unverified ;;
+              match:*:missing) verdict=unverified ;;
+              match:*:*) recovery_target=$detail ;;
+              unverified:*:missing) ;;
+              *) verdict=unverified ;;
+            esac
+            ;;
           *)
             verdict=$(printf '%s\t%s\tlocal\t-\n' "$backend" "$target" \
               | fm_backend_agent_state_batch 2>/dev/null \
@@ -149,8 +174,17 @@ fm_supervision_registry_reconcile_locked() {
           fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || return 1
           continue
         fi
+        if [ "$backend" = tmux ] && [ "$recovery_state" = match ] && [ "$verdict" = dead ]; then
+          if fm_backend_retire_reservation "$backend" "$target"; then
+            fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || return 1
+            continue
+          fi
+          verdict=unverified
+          recovery_target=$target
+          recovery_path=-
+        fi
         fm_supervision_registry_recover_reservation_meta_locked \
-          "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+          "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$recovery_target" "$detail" "$recovery_path" || return 1
         fm_supervision_registry_write_locked "$state" "$task" "$state/$task.meta" pending set || return 1
         continue
         ;;

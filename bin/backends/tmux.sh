@@ -105,6 +105,28 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
+fm_backend_tmux_reservation_identity() {
+  local stable=$1 detail=$2 observed tab observed_id observed_detail observed_path
+  case "$stable" in @*[!0-9]*|@|'') printf 'unverified\t-\n'; return 0 ;; esac
+  case "$detail" in *:*:*|'':*|*:'') printf 'unverified\t-\n'; return 0 ;; *:*) ;; *) printf 'unverified\t-\n'; return 0 ;; esac
+  tab=$(printf '\t')
+  observed=$(tmux display-message -p -t "$stable" \
+    "#{window_id}${tab}#{session_name}:#{window_name}${tab}#{pane_current_path}" 2>/dev/null) \
+    || { printf 'unverified\t-\n'; return 0; }
+  IFS="$tab" read -r observed_id observed_detail observed_path <<EOF
+$observed
+EOF
+  [ "$observed_id" = "$stable" ] && [ "$observed_detail" = "$detail" ] \
+    || { printf 'mismatch\t-\n'; return 0; }
+  case "$observed_path" in ''|*[$'\t\r\n']*) printf 'match\t-\n' ;; *) printf 'match\t%s\n' "$observed_path" ;; esac
+}
+
+fm_backend_tmux_retire_reservation() {
+  local stable=$1
+  case "$stable" in @*[!0-9]*|@|'') return 1 ;; esac
+  tmux kill-window -t "$stable" >/dev/null 2>&1
+}
+
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
 # composer verification - used for the fixed spawn-time commands
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence

@@ -97,7 +97,7 @@ run_bounded_watcher_cycle() {
   perl -e 'my $timeout=shift @ARGV; my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm $timeout; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
     "${FM_TEST_BOUNDED_WATCH_TIMEOUT:-3}" \
     env FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
-      FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 \
+      FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE="${FM_TEST_CHECKS_PER_CYCLE:-1}" \
       FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 \
       FM_WATCH_HANDLING_SUCCESSOR="${FM_TEST_WATCH_HANDLING_SUCCESSOR:-0}" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 \
@@ -299,11 +299,25 @@ if [ "${1:-}" = display-message ]; then
       target=${2:-}
     fi
     case "$1" in
+      *window_id*) format=reservation ;;
       *pane_current_command*) format=current-command ;;
       *pane_id*) format=existence ;;
     esac
     shift
   done
+  if [ "$format" = reservation ]; then
+    for reservation in ${FM_TEST_TMUX_RESERVATIONS:-}; do
+      stable=${reservation%%=*}
+      remainder=${reservation#*=}
+      detail=${remainder%%=*}
+      path=${remainder#*=}
+      if [ "$target" = "$stable" ]; then
+        printf '%s\t%s\t%s\n' "$stable" "$detail" "$path"
+        exit 0
+      fi
+    done
+    exit 1
+  fi
   case " ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}} " in
     *" $target "*)
       case " ${FM_TEST_EXISTENCE_PROBE_FAILURES:-} " in
@@ -325,6 +339,10 @@ if [ "${1:-}" = display-message ]; then
       exit 0
       ;;
   esac
+fi
+if [ "${1:-}" = kill-window ]; then
+  [ -z "${FM_TEST_TMUX_KILL_LOG:-}" ] || printf '%s\n' "${3:-}" >> "$FM_TEST_TMUX_KILL_LOG"
+  exit 0
 fi
 exit 1
 SH
@@ -2438,6 +2456,49 @@ SH
     || fail "immutable high-water sweep starved an earlier arrival: $(cat "$dir/check-runs")"
   [ ! -e "$state/.check-sweep-cursor" ] && [ ! -e "$state/.check-sweep-high-water" ] \
     || fail 'completed adversarial sweep retained progress state'
+
+  dir=$(fixture disappearing-check-high-water)
+  state="$dir/state"
+  mkdir "$dir/fakebin"
+  for check_id in a m z; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "printf '%s\\n' $check_id >> \"\$FM_HOME/check-runs\"" > "$state/$check_id.check.sh"
+    chmod 0700 "$state/$check_id.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$check_id" >/dev/null \
+      || fail "could not register $check_id high-water check"
+  done
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_CHECKS_PER_CYCLE=2 FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch-1.out" 2> "$dir/watch-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "initial disappearing-bound cycle ended unexpectedly: rc=$rc $(cat "$dir/watch-1.err")"
+  [ "$(cat "$dir/check-runs")" = $'a\nm' ] \
+    && [ "$(cat "$state/.check-sweep-cursor")" = m.check.sh ] \
+    && [ "$(cat "$state/.check-sweep-high-water")" = z.check.sh ] \
+    || fail 'initial frozen high-water sweep did not checkpoint after a and m'
+  rm -f "$state/z.check.sh"
+  set +e
+  FM_TEST_CHECKS_PER_CYCLE=2 FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch-2.out" 2> "$dir/watch-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "removed high-water cycle ended unexpectedly: rc=$rc $(cat "$dir/watch-2.err")"
+  [ "$(cat "$dir/check-runs")" = $'a\nm' ] \
+    || fail 'removed high-water item reran completed checks before wrapping'
+  [ ! -e "$state/.check-sweep-cursor" ] && [ ! -e "$state/.check-sweep-high-water" ] \
+    && [ -e "$state/.last-check" ] \
+    || fail 'removed high-water item stranded the completed sweep'
+  rm -f "$state/.last-check"
+  set +e
+  FM_TEST_CHECKS_PER_CYCLE=2 FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch-3.out" 2> "$dir/watch-3.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "wrapped high-water cycle ended unexpectedly: rc=$rc $(cat "$dir/watch-3.err")"
+  [ "$(cat "$dir/check-runs")" = $'a\nm\na\nm' ] \
+    || fail "removed high-water item starved the next lexical sweep: $(cat "$dir/check-runs")"
   pass 'actionable custom and merged checks resume bounded sweeps fairly'
 }
 
@@ -3235,6 +3296,7 @@ test_registry_snapshot_index_is_generation_bound() {
 test_registry_reservation_recovers_spawn_crash_windows() {
   local dir inventory rc
   dir=$(fixture active-supervision-reservation-recovery)
+  install_endpoint_inventory_tmux "$dir"
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
@@ -3255,15 +3317,25 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
-    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" created created-gen || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" live live-gen || exit 1
     fm_supervision_registry_mark_reservation \
-      "$FM_STATE_OVERRIDE" created created-gen created tmux @42 fleet:created || exit 1
+      "$FM_STATE_OVERRIDE" live live-gen created tmux @42 fleet:fm-live || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" dead dead-gen || exit 1
+    fm_supervision_registry_mark_reservation \
+      "$FM_STATE_OVERRIDE" dead dead-gen created tmux @43 fleet:fm-dead || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" uncertain uncertain-gen || exit 1
+    fm_supervision_registry_mark_reservation \
+      "$FM_STATE_OVERRIDE" uncertain uncertain-gen created tmux @44 fleet:fm-uncertain || exit 1
     exit 74
   ' _ "$ROOT/bin" >/dev/null 2>&1
   rc=$?
   set -e
   [ "$rc" -eq 74 ] || fail 'post-creation crash fixture did not reach its crash boundary'
-  FM_STATE_OVERRIDE="$dir/state" bash -c '
+  PATH="$dir/fakebin:$PATH" \
+    FM_TEST_EXISTING_TARGETS='fleet:fm-live fleet:fm-dead fleet:fm-uncertain' \
+    FM_TEST_LIVE_TARGETS='fleet:fm-live' FM_TEST_AMBIGUOUS_TARGETS='fleet:fm-uncertain' \
+    FM_TEST_TMUX_RESERVATIONS="@42=fleet:fm-live=$dir/live-worktree @43=fleet:fm-dead=$dir/dead-worktree @44=fleet:fm-uncertain=$dir/uncertain-worktree" \
+    FM_TEST_TMUX_KILL_LOG="$dir/killed-reservations" FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
@@ -3271,13 +3343,25 @@ test_registry_reservation_recovers_spawn_crash_windows() {
   ' _ "$ROOT/bin" > "$dir/created-unpublished" \
     || fail 'created endpoint reservation did not converge after owner death'
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/created-unpublished")
-  [ "$inventory" = created ] || fail "created endpoint recovery produced the wrong inventory: $inventory"
-  [ "$(sed -n 's/^window=//p' "$dir/state/created.meta")" = @42 ] \
-    && [ "$(sed -n 's/^spawn_gen=//p' "$dir/state/created.meta")" = created-gen ] \
-    || fail 'created endpoint recovery did not preserve its exact reserved identity'
-  grep -F "$(printf 'entry\tcreated\tcreated-gen\tpending')" \
+  [ "$inventory" = $'live\nuncertain' ] \
+    || fail "created endpoint recovery produced the wrong inventory: $inventory"
+  [ "$(sed -n 's/^window=//p' "$dir/state/live.meta")" = fleet:fm-live ] \
+    && [ "$(sed -n 's/^worktree=//p' "$dir/state/live.meta")" = "$dir/live-worktree" ] \
+    && [ "$(sed -n 's/^spawn_gen=//p' "$dir/state/live.meta")" = live-gen ] \
+    || fail 'live endpoint recovery did not publish its classifier-compatible identity'
+  [ "$(sed -n 's/^window=//p' "$dir/state/uncertain.meta")" = fleet:fm-uncertain ] \
+    && [ "$(sed -n 's/^worktree=//p' "$dir/state/uncertain.meta")" = "$dir/uncertain-worktree" ] \
+    || fail 'uncertain endpoint recovery did not remain conservatively active'
+  [ ! -e "$dir/state/dead.meta" ] && [ "$(cat "$dir/killed-reservations")" = @43 ] \
+    || fail 'proven dead reservation was not retired through its stable identity'
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-backend.sh"
+    fm_backend_validate_task_endpoint "$FM_STATE_OVERRIDE/live.meta" live
+    fm_backend_validate_task_endpoint "$FM_STATE_OVERRIDE/uncertain.meta" uncertain
+  ' _ "$ROOT/bin" || fail 'recovered tmux metadata did not pass lifecycle validation'
+  grep -F "$(printf 'entry\tlive\tlive-gen\tpending')" \
     "$dir/state/.active-supervision-generation" >/dev/null \
-    || fail 'created endpoint reservation did not become pending ownership'
+    || fail 'live endpoint reservation did not become pending ownership'
 
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -3302,7 +3386,7 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     || fail 'remote unknown completion did not converge conservatively'
   set -e
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/remote-unknown")
-  [ "$inventory" = $'created\nremote' ] \
+  [ "$inventory" = $'live\nremote\nuncertain' ] \
     || fail "remote unknown recovery produced the wrong inventory: $inventory"
   [ "$(sed -n 's/^window=//p' "$dir/state/remote.meta")" = remote:remote ] \
     && [ "$(sed -n 's/^remote_host=//p' "$dir/state/remote.meta")" = host.example ] \
@@ -3331,12 +3415,12 @@ test_registry_reservation_recovers_spawn_crash_windows() {
     fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
   ' _ "$ROOT/bin" > "$dir/recovered" || fail 'published reservation was not recovered'
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
-  [ "$inventory" = $'created\npublished\nremote' ] \
+  [ "$inventory" = $'live\npublished\nremote\nuncertain' ] \
     || fail "post-metadata crash recovered the wrong inventory: $inventory"
   grep -F "$(printf 'entry\tpublished\tpublished-gen\tpending')" \
     "$dir/state/.active-supervision-generation" >/dev/null \
     || fail 'published reservation did not become pending lifecycle ownership'
-  pass 'spawn reservations recover creation, publication, and remote uncertainty'
+  pass 'spawn reservations recover live, dead, uncertain, published, and remote outcomes'
 }
 
 test_registered_check_kills_term_ignoring_process_group() {

@@ -870,6 +870,27 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+fm_backend_reservation_identity() {
+  local backend=$1
+  shift
+  case "$backend" in
+    tmux)
+      fm_backend_source tmux || { printf 'unverified\t-\n'; return 0; }
+      fm_backend_tmux_reservation_identity "$@"
+      ;;
+    *) printf 'unverified\t-\n' ;;
+  esac
+}
+
+fm_backend_retire_reservation() {
+  local backend=$1
+  shift
+  case "$backend" in
+    tmux) fm_backend_source tmux && fm_backend_tmux_retire_reservation "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
