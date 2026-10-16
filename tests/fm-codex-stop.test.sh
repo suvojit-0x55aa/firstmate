@@ -621,6 +621,62 @@ PY
   pass 'admission preserves arm confirmation and consumes cycle budget'
 }
 
+test_recurring_probe_honors_transport_deadline() {
+  local dir original_root=$TEST_ROOT started elapsed
+  dir=$(fixture recurring-probe-deadline)
+  install_controlled_watcher "$dir"
+  : > "$dir/state/task.meta"
+  mkdir "$dir/probe-fault"
+  cat > "$dir/probe-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+import time
+
+original_popen = subprocess.Popen
+
+
+def delayed_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    marker = os.environ.get('FM_TEST_RECURRING_PROBE_MARKER', '')
+    if marker and isinstance(command, list) and len(command) > 2 and 'remote-recovery' in command[2]:
+        count = 0
+        try:
+            with open(marker, encoding='utf-8') as stream:
+                count = int(stream.read().strip())
+        except (FileNotFoundError, ValueError):
+            pass
+        count += 1
+        with open(marker, 'w', encoding='utf-8') as stream:
+            stream.write(str(count) + '\n')
+        if count == 2:
+            time.sleep(5)
+            with open(marker + '.done', 'w', encoding='utf-8') as stream:
+                stream.write('done\n')
+    return original_popen(*args, **kwargs)
+
+
+subprocess.Popen = delayed_popen
+PY
+  started=$(date +%s)
+  PYTHONPATH="$dir/probe-fault" FM_TEST_RECURRING_PROBE_MARKER="$dir/recurring-probe" \
+    FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=23 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
+    FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc" 150
+  elapsed=$(( $(date +%s) - started ))
+  [ -s "$dir/recurring-probe.done" ] || fail 'recurring cycle probe delay did not execute'
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'slow recurring cycle probe allowed Stop to fail open'
+  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
+    'slow recurring cycle probe lost the supervision-budget refusal'
+  assert_not_contains "$(cat "$dir/out")" 'owner unavailable' \
+    'slow recurring cycle probe fell through to the generic transport failure'
+  [ "$elapsed" -lt 12 ] || fail 'slow recurring cycle probe overran its fixed transport reserve'
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'recurring cycle probes preserve the fixed transport reserve'
+}
+
 test_stalled_watcher_cannot_complete_quiet_window() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture stalled-watcher)
@@ -2256,6 +2312,7 @@ test_quiet_renewal
 test_wedged_arm_cannot_report_quiet_renewal
 test_late_watcher_gets_full_quiet_window
 test_admission_time_preserves_arm_confirmation
+test_recurring_probe_honors_transport_deadline
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake

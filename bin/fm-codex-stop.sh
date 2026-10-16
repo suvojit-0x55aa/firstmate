@@ -177,12 +177,17 @@ try:
 except ValueError:
     startup_timeout = 11
 
-transport_timeout = 590
+try:
+    transport_timeout = min(590, max(1, int(
+        os.environ.get('FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT', '590'))))
+except ValueError:
+    transport_timeout = 590
 protocol_reserve = 10
 cycle_limit = transport_timeout - startup_timeout - checkpoint - protocol_reserve
+budget_reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'
 
 
-def cycle_work():
+def cycle_work(probe_deadline=None):
     result = shell(r'''
 for file in "$FM_STATE_OVERRIDE"/*.status "$FM_STATE_OVERRIDE"/*.turn-ended; do
   [ -f "$file" ] || continue
@@ -209,7 +214,7 @@ for rec in "$dir"/*; do
   fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id" || continue
   printf 'remote-recovery\t%s\n' "$(basename "$rec")"
 done
-''')
+''', deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
     signal_tasks = set()
@@ -238,7 +243,7 @@ def invalidate_budget_windows():
     budget_window_cache_until = 0
 
 
-def budget_window_count():
+def budget_window_count(probe_deadline=None):
     global budget_window_cache, budget_window_cache_until
     now = time.monotonic()
     if budget_window_cache is not None and now < budget_window_cache_until:
@@ -270,7 +275,7 @@ while IFS="$(printf '\t')" read -r backend target agent_state route record_home;
     *) printf 'budget-window\t%s\n' "$target" ;;
   esac
 done
-''', timeout=8)
+''', timeout=8, deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
     windows = set()
@@ -283,7 +288,8 @@ done
     return budget_window_cache
 
 
-def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None):
+def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
+                          probe_deadline=None):
     names = os.listdir('.')
     try:
         check_age = int(time.time()) - int(os.path.getmtime('.last-check'))
@@ -292,10 +298,10 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
     due_checks = 0
     if check_age >= check_interval:
         due_checks = sum(name.endswith('.check.sh') and os.path.isfile(name) for name in names)
-    work = cycle_work()
+    work = cycle_work(probe_deadline)
     if work is None:
         return cycle_limit + 1, check_limit or 1, 0
-    budget_windows = budget_window_count()
+    budget_windows = budget_window_count(probe_deadline)
     if budget_windows is None:
         return cycle_limit + 1, check_limit or 1, 0
     if budget_deadline is not None:
@@ -344,9 +350,13 @@ def terminate_probe_group(process):
             pass
 
 
-def shell(body, *args, timeout=3):
+def shell(body, *args, timeout=3, deadline=None):
     process = None
     try:
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+            if timeout <= 0:
+                return None
         command = ['bash', '-c', '. "$1/fm-wake-lib.sh"; ' + body,
                    'codex-stop-probe', scripts, *args]
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -388,8 +398,9 @@ def generation_current():
         return False
 
 
-def needed():
-    result = shell('. "$1/fm-supervision-lib.sh"; fm_supervision_needed "$FM_STATE_OVERRIDE"')
+def needed(probe_deadline=None):
+    result = shell('. "$1/fm-supervision-lib.sh"; fm_supervision_needed "$FM_STATE_OVERRIDE"',
+                   deadline=probe_deadline)
     # An unavailable probe is uncertainty, not proof that the fleet is idle.
     return result is None or result.returncode != 1
 
@@ -451,10 +462,10 @@ def bounded_watcher_capability(check_limit):
             os.close(fd)
 
 
-def watcher_snapshot(grace, check_limit):
+def watcher_snapshot(grace, check_limit, probe_deadline=None):
     result = shell('fm_watcher_healthy "$FM_STATE_OVERRIDE" "$1/fm-watch.sh" "$2" "$FM_HOME" '
                    '&& printf "%s\\t%s\\n" "$FM_WATCHER_HEALTHY_PID" "$FM_WATCHER_HEALTHY_IDENTITY"',
-                   str(grace))
+                   str(grace), deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
     if not bounded_watcher_capability(check_limit):
@@ -534,10 +545,22 @@ def owner(lock):
     watcher_last_progress = 0
     next_watcher_probe = 0
     confirmation_beat = 0
+    confirmation_started_at = 0
     cycle_timeout = watcher_guard_grace
     check_batch_limit = 1
     active_cycle_limit = cycle_limit
     transport_deadline = None
+
+    def remaining_cycle_limit(now):
+        if phase == 'starting':
+            cycle_starts = max(now, deadline) + checkpoint
+        elif phase == 'watching':
+            cycle_starts = max(now, deadline)
+        elif phase == 'confirming':
+            cycle_starts = confirmation_started_at
+        else:
+            return 0
+        return max(0, math.floor(transport_deadline - cycle_starts - protocol_reserve))
 
     def publish(next_phase, seconds, started_at=None):
         nonlocal phase, deadline, published
@@ -708,9 +731,11 @@ def owner(lock):
                         else:
                             invalidate_budget_windows()
                             cycle_timeout, check_batch_limit, active_cycle_limit = watcher_cycle_timeout(
-                                budget_deadline=transport_deadline)
+                                budget_deadline=transport_deadline,
+                                probe_deadline=(transport_deadline - startup_timeout - checkpoint -
+                                                protocol_reserve))
                             if cycle_timeout > active_cycle_limit:
-                                if not finish('watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'):
+                                if not finish(budget_reason):
                                     return
                             else:
                                 arm_environment = os.environ.copy()
@@ -743,17 +768,27 @@ def owner(lock):
             if probe_due:
                 if not generation_current():
                     return
-                supervision_needed = needed()
+                supervision_needed = needed(
+                    transport_deadline - protocol_reserve if active is not None else None)
+                now = time.monotonic()
                 next_probe = now + 1
             if phase in ('starting', 'watching', 'confirming') and active is not None:
                 reason = 'durable wake pending' if queued() else ''
+                if not reason and now >= transport_deadline - protocol_reserve:
+                    reason = budget_reason
                 if not reason and probe_due:
                     next_cycle_timeout, _next_check_limit, _next_cycle_limit = watcher_cycle_timeout(
-                        check_batch_limit, active_cycle_limit)
-                    if next_cycle_timeout > active_cycle_limit:
-                        reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoints and outstanding supervision work'
+                        check_batch_limit, active_cycle_limit,
+                        probe_deadline=transport_deadline - protocol_reserve)
+                    now = time.monotonic()
+                    next_cycle_limit = remaining_cycle_limit(now)
+                    if (now >= transport_deadline - protocol_reserve or
+                            next_cycle_timeout > next_cycle_limit):
+                        reason = budget_reason
                     elif next_cycle_timeout > cycle_timeout:
                         cycle_timeout = next_cycle_timeout
+                        if phase == 'confirming':
+                            publish('confirming', cycle_timeout, confirmation_started_at)
                 if output is not None:
                     text = os.pread(output.fileno(), 65536, 0).decode(errors='replace')
                     if any(line.startswith(('signal:', 'stale:', 'check:', 'heartbeat')) for line in text.splitlines()):
@@ -764,13 +799,21 @@ def owner(lock):
                 if not reason and arm is not None and (arm.poll() is not None or not arm_identity):
                     reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'starting' and probe_due:
-                    proof = watcher_snapshot(cycle_timeout, check_batch_limit)
+                    proof = watcher_snapshot(cycle_timeout, check_batch_limit,
+                                             transport_deadline - protocol_reserve)
+                    now = time.monotonic()
                     if proof is not None:
-                        watcher_proof = proof
-                        watcher_last_beat = proof[2]
-                        watcher_last_progress = now
-                        next_watcher_probe = now + watcher_cadence
-                        publish('watching', checkpoint)
+                        if cycle_timeout > max(0, math.floor(
+                                transport_deadline - now - checkpoint - protocol_reserve)):
+                            reason = budget_reason
+                        else:
+                            watcher_proof = proof
+                            watcher_last_beat = proof[2]
+                            watcher_last_progress = now
+                            next_watcher_probe = now + watcher_cadence
+                            publish('watching', checkpoint)
+                    elif now >= transport_deadline - protocol_reserve:
+                        reason = budget_reason
                     elif now >= deadline:
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'watching' and probe_due:
@@ -779,7 +822,9 @@ def owner(lock):
                         watcher_last_beat = beat
                         watcher_last_progress = now
                     if now >= next_watcher_probe:
-                        proof = watcher_snapshot(cycle_timeout, check_batch_limit)
+                        proof = watcher_snapshot(cycle_timeout, check_batch_limit,
+                                                 transport_deadline - protocol_reserve)
+                        now = time.monotonic()
                         if (proof is None or watcher_proof is None or
                                 proof[:2] != watcher_proof[:2] or proof[2] < watcher_last_beat):
                             reason = 'watcher failed; inspect its startup and ownership before continuing'
@@ -789,19 +834,29 @@ def owner(lock):
                     if not reason and now - watcher_last_progress >= cycle_timeout:
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
                 if not reason and phase == 'watching' and now >= deadline:
-                    proof = watcher_snapshot(cycle_timeout, check_batch_limit)
+                    proof = watcher_snapshot(cycle_timeout, check_batch_limit,
+                                             transport_deadline - protocol_reserve)
+                    now = time.monotonic()
                     if ((arm is not None and identity(arm.pid) != arm_identity) or
                             proof is None or watcher_proof is None or
                             proof[:2] != watcher_proof[:2]):
                         reason = 'watcher failed; inspect its startup and ownership before continuing'
+                    elif cycle_timeout > max(0, math.floor(
+                            transport_deadline - now - protocol_reserve)):
+                        reason = budget_reason
                     else:
                         confirmation_beat = proof[2]
-                        publish('confirming', cycle_timeout)
+                        confirmation_started_at = now
+                        publish('confirming', cycle_timeout, confirmation_started_at)
                 if not reason and phase == 'confirming' and probe_due:
                     beat = watcher_beat()
                     if beat > confirmation_beat:
-                        proof = watcher_snapshot(cycle_timeout, check_batch_limit)
-                        if (proof is not None and watcher_proof is not None and
+                        proof = watcher_snapshot(cycle_timeout, check_batch_limit,
+                                                 transport_deadline - protocol_reserve)
+                        now = time.monotonic()
+                        if now >= transport_deadline - protocol_reserve:
+                            reason = budget_reason
+                        elif (proof is not None and watcher_proof is not None and
                                 proof[:2] == watcher_proof[:2] and proof[2] > confirmation_beat and
                                 (arm is None or identity(arm.pid) == arm_identity)):
                             reason = 'quiet checkpoint elapsed; supervision is still needed'
