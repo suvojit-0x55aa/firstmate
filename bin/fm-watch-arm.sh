@@ -452,7 +452,6 @@ arm_owner_record=
 cleanup_arm_owner_record() {
   [ -z "$arm_owner_record" ] || rm -f "$arm_owner_record" "$arm_owner_record.tmp" 2>/dev/null || true
 }
-trap cleanup_arm_owner_record EXIT
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
@@ -472,6 +471,7 @@ handle_arm_signal() {
   fi
   cycle_log_append "$rc" "$signal" arm-interrupted none
   cleanup_child
+  cleanup_arm_owner_record
   exit "$rc"
 }
 
@@ -504,17 +504,32 @@ fi
 child=$!
 if [ -n "$arm_owner_record" ]; then
   child_identity=$(fm_pid_identity "$child" 2>/dev/null || true)
-  [ -n "$child_identity" ] || exit 1
-  ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
+  if [ -z "$child_identity" ]; then
+    cleanup_child
+    wait "$child" 2>/dev/null || true
+    cleanup_arm_owner_record
+    exit 1
+  fi
+  if ! ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
       "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
       "$FM_WATCH_ARM_OWNER_IDENTITY" "$child" "$child_identity" > "$arm_owner_record.tmp" ) \
-    && mv -f "$arm_owner_record.tmp" "$arm_owner_record" || exit 1
+    || ! mv -f "$arm_owner_record.tmp" "$arm_owner_record"; then
+    cleanup_child
+    wait "$child" 2>/dev/null || true
+    cleanup_arm_owner_record
+    exit 1
+  fi
+fi
+if [ "${FM_TEST_WATCH_ARM_EXIT_AFTER_SPAWN:-0}" = 1 ]; then
+  printf '%s\n' "$child" > "$FM_HOME/arm-exit-candidate-pid"
+  exit 1
 fi
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
 owned_child_finished() {
   local rc=$1 signal reason_type status
+  cleanup_arm_owner_record
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
@@ -579,6 +594,7 @@ while :; do
       if ! handling_generation=$(handling_successor_generation); then
         cleanup_child
         wait "$child" 2>/dev/null || true
+        cleanup_arm_owner_record
         cycle_log_append 1 none handling-handoff-failed none
         echo "watcher: FAILED - established successor could not inspect handling state"
         exit 1
@@ -616,6 +632,7 @@ print_watch_output "$child_out"
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
+cleanup_arm_owner_record
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1

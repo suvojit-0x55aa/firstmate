@@ -166,7 +166,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v4\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-v1\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v5\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-v2\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -224,7 +224,7 @@ while :; do
           > "$lock/codex-check-batch-boundary"
         next_sequence=$((batch_sequence + 1))
         request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
-        if [ "$request" = "$(printf 'fm-codex-check-batch.v1\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
+        if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v2\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
           batch_sequence=$next_sequence
           printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
           rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
@@ -372,7 +372,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v4\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-v1\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v5\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-v2\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -400,7 +400,7 @@ while :; do
   if [ -n "${batch_lease:-}" ]; then
     next_sequence=$((batch_sequence + 1))
     request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
-    if [ "$request" = "$(printf 'fm-codex-check-batch.v1\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
+    if [ "$(printf '%s' "$request" | cut -f1-3)" = "$(printf 'fm-codex-check-batch.v2\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
       batch_sequence=$next_sequence
       printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
       rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
@@ -1640,40 +1640,107 @@ test_bounded_check_batch_parks_at_safe_boundary() {
   pass 'bounded checks park and heartbeat cannot impersonate completion'
 }
 
+test_bounded_check_resume_requires_live_owner() {
+  local dir watcher owner_identity deadline request
+  dir=$(fixture bounded-check-resume-owner)
+  for name in a-first b-second; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "printf '%s\\n' '$name' >> \"\$FM_HOME/check-runs\"" \
+      > "$dir/state/$name.check.sh"
+    chmod 0700 "$dir/state/$name.check.sh"
+    FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null \
+      || fail "could not register $name owner fixture"
+  done
+  env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=1 \
+    FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 FM_CODEX_CHECK_BATCH_LEASE=owner-lease \
+    FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 FM_POLL=0.02 FM_HEARTBEAT=999999 \
+    FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher=$!
+  wait_file "$dir/state/.watch.lock/codex-check-batch-boundary" 100
+  owner_identity=$(FM_STATE_OVERRIDE="$dir/state" bash -c \
+    '. "$1/fm-wake-lib.sh"; fm_pid_identity "$2"' _ "$ROOT/bin" "$$") \
+    || fail 'could not identify resume fixture owner'
+  deadline=$(( $(date +%s) - 1 ))
+  printf '{"token":"expired-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"phase":"watching"}\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" > "$dir/state/.codex-stop.json"
+  request=$(printf 'fm-codex-check-batch.v2\towner-lease\t2\texpired-token\t%s\t%s\t%s\t%s\t%s\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline")
+  printf '%s' "$request" > "$dir/state/.watch.lock/codex-check-batch-resume"
+  sleep 0.2
+  [ "$(cat "$dir/state/.watch.lock/codex-check-batch-sequence")" = 1 ] \
+    || fail 'expired resume authorization advanced the batch sequence'
+  [ "$(cat "$dir/check-runs")" = a-first ] \
+    || fail 'expired resume authorization started an unowned check batch'
+
+  kill -STOP "$watcher"
+  deadline=$(( $(date +%s) + 10 ))
+  printf '{"token":"revoked-token","owner":%s,"owner_identity":"%s","session_pid":%s,"session_identity":"%s","resume_deadline":%s,"phase":"watching"}\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" > "$dir/state/.codex-stop.json"
+  printf 'fm-codex-check-batch.v2\towner-lease\t2\trevoked-token\t%s\t%s\t%s\t%s\t%s\n' \
+    "$$" "$owner_identity" "$$" "$owner_identity" "$deadline" \
+    > "$dir/state/.watch.lock/codex-check-batch-resume"
+  rm -f "$dir/state/.watch.lock/codex-check-batch-resume"
+  kill -CONT "$watcher"
+  sleep 0.2
+  [ "$(cat "$dir/state/.watch.lock/codex-check-batch-sequence")" = 1 ] \
+    || fail 'revoked resume authorization advanced the batch sequence'
+  [ "$(cat "$dir/check-runs")" = a-first ] \
+    || fail 'revoked resume authorization started an unowned check batch'
+  kill -TERM "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  pass 'bounded check resume requires live unrevoked Stop ownership'
+}
+
+test_duplicate_endpoint_owners_share_stale_pass() {
+  local dir pane_hash rc captures
+  dir=$(fixture duplicate-endpoint-stale-pass)
+  install_endpoint_inventory_tmux "$dir"
+  for task in a-owner b-owner c-owner; do
+    printf '%s\n' 'window=fleet:shared' 'kind=ship' 'harness=grok' 'backend=tmux' \
+      > "$dir/state/$task.meta"
+    printf '%s\n' 'working: shared endpoint fixture' > "$dir/state/$task.status"
+    prime_status_seen "$dir/state" "$dir/state/$task.status"
+  done
+  if command -v md5 >/dev/null 2>&1; then
+    pane_hash=$(printf '%s' 'retained endpoint' | md5 -q)
+  else
+    pane_hash=$(printf '%s' 'retained endpoint' | md5sum | cut -d' ' -f1)
+  fi
+  printf '%s' "$pane_hash" > "$dir/state/.hash-fleet_shared"
+  printf '%s\n' 0 > "$dir/state/.count-fleet_shared"
+  set +e
+  FM_TEST_EXISTING_TARGETS='fleet:shared' FM_TEST_LIVE_TARGETS='fleet:shared' \
+    FM_TEST_CAPTURE_LOG="$dir/captures" run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    > "$dir/out" 2> "$dir/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "duplicate endpoint stale cycle ended unexpectedly: rc=$rc $(cat "$dir/err")"
+  captures=$(wc -l < "$dir/captures" | tr -d ' ')
+  [ "$captures" -eq 1 ] || fail "duplicate endpoint owners caused $captures pane captures"
+  [ "$(cat "$dir/state/.count-fleet_shared")" = 1 ] \
+    || fail 'duplicate endpoint owners advanced the stale counter more than once'
+  [ ! -s "$dir/state/.wake-queue" ] \
+    || fail 'duplicate endpoint owners produced a false stale wake'
+  pass 'duplicate endpoint owners share one capture and stale increment'
+}
+
 test_launcher_exit_after_spawn_retires_owned_watcher() {
   local dir original_root=$TEST_ROOT watcher
   dir=$(fixture launcher-exit-after-spawn)
   cp -R "$ROOT/bin/." "$dir/bin/"
-  cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
-#!/usr/bin/env bash
-set -u
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-arm_pid=${BASHPID:-$$}
-arm_identity=$(fm_pid_identity "$arm_pid") || exit 1
-record="$FM_HOME/state/.codex-arm-owner"
-printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
-  "$FM_CODEX_CHECK_BATCH_LEASE" "$arm_pid" "$arm_identity" > "$record"
-export FM_WATCH_ARM_OWNER_PID="$arm_pid" FM_WATCH_ARM_OWNER_IDENTITY="$arm_identity"
-bash "$SCRIPT_DIR/fm-watch.sh" &
-child=$!
-child_identity=$(fm_pid_identity "$child") || exit 1
-printf '%s\n' "$child" > "$FM_HOME/orphan-candidate-pid"
-printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
-  "$FM_CODEX_CHECK_BATCH_LEASE" "$arm_pid" "$arm_identity" "$child" "$child_identity" > "$record"
-exit 1
-ARM
-  chmod +x "$dir/bin/fm-watch-arm.sh"
   : > "$dir/state/task.meta"
-  TEST_ROOT="$dir" FM_SIGNAL_GRACE=0 run_stop "$dir" 5
+  TEST_ROOT="$dir" FM_SIGNAL_GRACE=0 FM_TEST_WATCH_ARM_EXIT_AFTER_SPAWN=1 \
+    FM_TEST_WATCH_START_DELAY=3 run_stop "$dir" 5
   TEST_ROOT=$original_root
   wait_file "$dir/rc" 250
   [ "$(cat "$dir/rc")" = 2 ] || fail 'launcher exit after spawn allowed Stop to fail open'
-  wait_file "$dir/orphan-candidate-pid"
-  watcher=$(cat "$dir/orphan-candidate-pid")
+  wait_file "$dir/arm-exit-candidate-pid"
+  watcher=$(cat "$dir/arm-exit-candidate-pid")
   if kill -0 "$watcher" 2>/dev/null; then fail "launcher-exit watcher $watcher survived refusal commit"; fi
+  [ ! -e "$dir/state/.codex-arm-owner" ] \
+    || fail 'retired launcher ownership record survived exact child cleanup'
   finish "$dir"
-  pass 'launcher exit after spawn cannot orphan its owned watcher'
+  pass 'production launcher exit retains ownership until child retirement'
 }
 
 test_paused_and_captain_held_deaths_notify_once() {
@@ -2911,6 +2978,8 @@ test_admission_timeout_reaps_probe_descendants
 test_many_dead_endpoints_take_cheap_watcher_path
 test_duplicate_endpoint_pending_replies_share_classification
 test_bounded_check_batch_parks_at_safe_boundary
+test_bounded_check_resume_requires_live_owner
+test_duplicate_endpoint_owners_share_stale_pass
 test_paused_and_captain_held_deaths_notify_once
 test_local_secondmate_death_notifies_once
 test_dead_endpoint_preserves_inbox_escalation

@@ -441,9 +441,9 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('check-batch-handoff', 'resume-v1'),
+        ('check-batch-handoff', 'resume-owner-v2'),
     )
-    return 'fm-codex-bounded.v4\t' + '\t'.join(
+    return 'fm-codex-bounded.v5\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
@@ -492,8 +492,12 @@ def watcher_check_batch_boundary(batch_lease):
             os.close(fd)
 
 
-def request_watcher_check_batch(batch_lease, sequence):
-    value = f'fm-codex-check-batch.v1\t{batch_lease}\t{sequence}\n'.encode('ascii')
+def request_watcher_check_batch(batch_lease, sequence, token, owner_pid,
+                                owner_identity, session_pid, session_identity,
+                                resume_deadline):
+    value = (f'fm-codex-check-batch.v2\t{batch_lease}\t{sequence}\t{token}\t'
+             f'{owner_pid}\t{owner_identity}\t{session_pid}\t{session_identity}\t'
+             f'{resume_deadline}\n').encode('ascii')
     path = '.watch.lock/codex-check-batch-resume'
     tmp = '.watch.lock/codex-check-batch-resume.tmp'
     fd = None
@@ -518,6 +522,51 @@ def request_watcher_check_batch(batch_lease, sequence):
             os.unlink(tmp)
         except FileNotFoundError:
             pass
+
+
+def check_batch_authorization(path, batch_lease, token):
+    fd = None
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
+            return False
+        fields = os.read(fd, 1025).decode('ascii').rstrip('\n').split('\t')
+        return (len(fields) == 9 and fields[0] == 'fm-codex-check-batch.v2' and
+                fields[1] == batch_lease and fields[3] == token)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError):
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def revoke_watcher_check_batch(batch_lease, token, cleanup_deadline):
+    request_path = '.watch.lock/codex-check-batch-resume'
+    active_path = '.watch.lock/codex-check-batch-active'
+    while True:
+        request = check_batch_authorization(request_path, batch_lease, token)
+        if request is False:
+            return False
+        if request is True:
+            try:
+                os.unlink(request_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            continue
+        active = check_batch_authorization(active_path, batch_lease, token)
+        if active is False:
+            return False
+        if active is None:
+            return True
+        if cleanup_deadline is None or time.monotonic() >= cleanup_deadline:
+            return False
+        time.sleep(0.05)
 
 
 def watcher_arm_ownership(batch_lease, arm_pid, expected_arm_identity, deadline=None):
@@ -686,11 +735,13 @@ def owner(lock):
     check_batch_limit = 1
     active_cycle_limit = cycle_limit
     transport_deadline = None
+    resume_deadline_epoch = None
     arm_budget_failure = False
     terminal_delivered = False
     terminal_cleanup_complete = False
     generation_changed = False
     expected_batch_sequence = None
+    resume_authorization = None
 
     def remaining_cycle_limit(now):
         if phase == 'starting':
@@ -712,6 +763,8 @@ def owner(lock):
         record = dict(token=token, owner=os.getpid(), owner_identity=owner_identity,
                       session_pid=session_pid, session_identity=session_identity,
                       session_id=session_id, phase=phase, deadline=time.time() + seconds)
+        if resume_deadline_epoch is not None:
+            record['resume_deadline'] = resume_deadline_epoch
         published = record
         fd, tmp = tempfile.mkstemp(prefix='.codex-stop-record.')
         try:
@@ -723,8 +776,14 @@ def owner(lock):
                 os.unlink(tmp)
 
     def cancel_arm(cleanup_deadline=None):
-        nonlocal arm, arm_identity, output
+        nonlocal arm, arm_identity, output, resume_authorization
         completed = True
+        if resume_authorization is not None:
+            batch_lease, authorization_token = resume_authorization
+            completed = revoke_watcher_check_batch(
+                batch_lease, authorization_token, cleanup_deadline)
+            if completed:
+                resume_authorization = None
         if arm is not None:
             if (cleanup_deadline is not None and
                     time.monotonic() + arm_cleanup_allowance > cleanup_deadline):
@@ -973,6 +1032,8 @@ def owner(lock):
                         acknowledged = False
                         terminal_cleanup_complete = False
                         transport_deadline = time.monotonic() + transport_timeout
+                        resume_deadline_epoch = math.floor(
+                            time.time() + transport_timeout - terminal_reserve)
                         publish('preflighting', max(0, transport_deadline - time.monotonic()))
                         arm_budget_failure = False
                         if queued():
@@ -1090,8 +1151,12 @@ def owner(lock):
                             if proof[3] != token and boundary_sequence == proof[4]:
                                 expected_batch_sequence = proof[4] + 1
                                 if not request_watcher_check_batch(
-                                        proof[3], expected_batch_sequence):
+                                        proof[3], expected_batch_sequence, token,
+                                        os.getpid(), owner_identity, session_pid,
+                                        session_identity, resume_deadline_epoch):
                                     reason = 'watcher failed; inspect its startup and ownership before continuing'
+                                else:
+                                    resume_authorization = (proof[3], token)
                             if not reason:
                                 watcher_proof = proof
                                 watcher_last_beat = proof[2]

@@ -363,8 +363,21 @@ window_key() {  # <window>
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
-inbox_steer_check() {  # <window> <task> [target-state]
-  local w=$1 task=$2 target_state=${3:-unknown} action verb rec count tail40 reason ring_rc
+observe_endpoint_once() {  # <backend> <window> <task>
+  [ "${FM_ENDPOINT_OBSERVED:-0}" -eq 0 ] || return 0
+  FM_ENDPOINT_OBSERVATION_AVAILABLE=1
+  FM_ENDPOINT_TAIL40=$(fm_backend_capture "$1" "$2" 40 "fm-$3" 2>/dev/null) \
+    || { FM_ENDPOINT_TAIL40=; FM_ENDPOINT_OBSERVATION_AVAILABLE=0; }
+  if window_is_busy "$2" "$FM_ENDPOINT_TAIL40"; then
+    FM_ENDPOINT_BUSY_STATE=busy
+  else
+    FM_ENDPOINT_BUSY_STATE=idle
+  fi
+  FM_ENDPOINT_OBSERVED=1
+}
+
+inbox_steer_check() {  # <window> <task> [target-state] [backend]
+  local w=$1 task=$2 target_state=${3:-unknown} backend=${4:-} action verb rec count reason ring_rc
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -376,18 +389,19 @@ inbox_steer_check() {  # <window> <task> [target-state]
       rec=${rec% *}
       ;;
   esac
-  if [ "$target_state" != unavailable ]; then
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
-    if window_is_busy "$w" "$tail40"; then
-      return 0
-    fi
+  if [ "$target_state" = unknown ]; then
+    [ -n "$backend" ] || backend=$(window_backend "$w")
+    observe_endpoint_once "$backend" "$w" "$task"
+    target_state=$FM_ENDPOINT_BUSY_STATE
   fi
+  [ "$target_state" != busy ] || return 0
   case "$verb" in
     ring)
       ring_rc=unavailable
       if [ "$target_state" != unavailable ]; then
         ring_rc=0
-        fm_task_inbox_ring "$(window_backend "$w")" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+        [ -n "$backend" ] || backend=$(window_backend "$w")
+        fm_task_inbox_ring "$backend" "$w" "$rec" "fm-$task" || ring_rc=$?
       fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
@@ -1279,6 +1293,10 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+if [ -n "${FM_TEST_WATCH_START_DELAY:-}" ]; then
+  sleep "$FM_TEST_WATCH_START_DELAY"
+fi
+
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.
@@ -1379,7 +1397,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v4\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-v1\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v5\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-owner-v2\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -1399,25 +1417,60 @@ publish_codex_check_batch_boundary() {
     && mv -f "$sequence_tmp" "$WATCH_LOCK/codex-check-batch-sequence" \
     && ( umask 077; printf 'fm-codex-check-batch.v1\t%s\t%s\n' \
       "$FM_CODEX_CHECK_BATCH_LEASE" "$CODEX_CHECK_BATCH_SEQUENCE" > "$boundary_tmp" ) \
-    && mv -f "$boundary_tmp" "$WATCH_LOCK/codex-check-batch-boundary"
+    && mv -f "$boundary_tmp" "$WATCH_LOCK/codex-check-batch-boundary" \
+    && rm -f "$WATCH_LOCK/codex-check-batch-active"
+}
+
+codex_check_batch_request_valid() {
+  local request_file=$1 next_sequence=$2 protocol lease sequence owner_token owner_pid owner_identity
+  local generation_pid generation_identity authorization_deadline record_values record_token record_owner
+  local record_owner_identity record_generation_pid record_generation_identity record_deadline record_phase now
+  IFS="$(printf '\t')" read -r protocol lease sequence owner_token owner_pid owner_identity \
+    generation_pid generation_identity authorization_deadline < "$request_file" || return 1
+  [ "$protocol" = fm-codex-check-batch.v2 ] \
+    && [ "$lease" = "$FM_CODEX_CHECK_BATCH_LEASE" ] \
+    && [ "$sequence" = "$next_sequence" ] || return 1
+  case "$owner_pid:$generation_pid:$authorization_deadline" in
+    *[!0-9:]*|:*|*::*|*:) return 1 ;;
+  esac
+  record_values=$(jq -jer '[.token, (.owner|tostring), .owner_identity, (.session_pid|tostring), .session_identity, (.resume_deadline|tostring), .phase] | join("\u001f")' \
+    "$STATE/.codex-stop.json" 2>/dev/null) || return 1
+  IFS="$(printf '\037')" read -r record_token record_owner record_owner_identity \
+    record_generation_pid record_generation_identity record_deadline record_phase <<EOF
+$record_values
+EOF
+  [ "$record_token" = "$owner_token" ] \
+    && [ "$record_owner" = "$owner_pid" ] \
+    && [ "$record_owner_identity" = "$owner_identity" ] \
+    && [ "$record_generation_pid" = "$generation_pid" ] \
+    && [ "$record_generation_identity" = "$generation_identity" ] \
+    && [ "$record_deadline" = "$authorization_deadline" ] || return 1
+  case "$record_phase" in starting|watching|confirming) ;; *) return 1 ;; esac
+  [ "$(fm_pid_identity "$owner_pid" 2>/dev/null || true)" = "$owner_identity" ] || return 1
+  [ "$(fm_pid_identity "$generation_pid" 2>/dev/null || true)" = "$generation_identity" ] || return 1
+  now=$(date +%s)
+  [ $((now + CHECK_TIMEOUT)) -le "$authorization_deadline" ]
 }
 
 park_at_codex_check_batch_boundary() {
-  local next_sequence request expected
+  local next_sequence request_file active_file
   publish_codex_check_batch_boundary || return 1
   while [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]; do
     touch "$STATE/.last-watcher-beat"
     next_sequence=$((CODEX_CHECK_BATCH_SEQUENCE + 1))
-    expected=$(printf 'fm-codex-check-batch.v1\t%s\t%s' \
-      "$FM_CODEX_CHECK_BATCH_LEASE" "$next_sequence")
-    request=$(cat "$WATCH_LOCK/codex-check-batch-resume" 2>/dev/null || true)
-    if [ "$request" = "$expected" ]; then
+    request_file="$WATCH_LOCK/codex-check-batch-resume"
+    active_file="$WATCH_LOCK/codex-check-batch-active"
+    if [ -f "$request_file" ] && mv -f "$request_file" "$active_file" 2>/dev/null; then
+      if ! codex_check_batch_request_valid "$active_file" "$next_sequence"; then
+        rm -f "$active_file"
+        continue
+      fi
       CODEX_CHECK_BATCH_SEQUENCE=$next_sequence
       ( umask 077; printf '%s\n' "$CODEX_CHECK_BATCH_SEQUENCE" \
           > "$WATCH_LOCK/codex-check-batch-sequence.tmp" ) \
         && mv -f "$WATCH_LOCK/codex-check-batch-sequence.tmp" \
           "$WATCH_LOCK/codex-check-batch-sequence" || return 1
-      rm -f "$WATCH_LOCK/codex-check-batch-resume" "$WATCH_LOCK/codex-check-batch-boundary"
+      rm -f "$WATCH_LOCK/codex-check-batch-boundary"
       return 0
     fi
     sleep "$POLL"
@@ -1494,6 +1547,8 @@ while :; do
   case "$agent_state_inventory" in
     __FM_AGENT_STATE_ERROR__*) exit 1 ;;
   esac
+  agent_state_inventory=$(printf '%s\n' "$agent_state_inventory" \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k4,4 -k2,2 -k6,6)
   fm_pending_reply_tick "$STATE" "$agent_state_inventory" || true
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
@@ -1704,9 +1759,24 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
+  last_endpoint=
+  FM_ENDPOINT_OBSERVED=0
+  FM_ENDPOINT_BUSY_STATE=unknown
+  FM_ENDPOINT_TAIL40=
+  FM_ENDPOINT_OBSERVATION_AVAILABLE=0
+  endpoint_stale_done=0
   while IFS=$(printf '\t') read -r backend w agent_state route record_home task kind spawn_gen; do
     [ "$backend" != __FM_AGENT_STATE_ERROR__ ] || exit 1
     [ "$route" != remote ] || continue
+    endpoint=$(printf '%s\t%s\t%s' "$backend" "$route" "$w")
+    if [ "$endpoint" != "$last_endpoint" ]; then
+      last_endpoint=$endpoint
+      FM_ENDPOINT_OBSERVED=0
+      FM_ENDPOINT_BUSY_STATE=unknown
+      FM_ENDPOINT_TAIL40=
+      FM_ENDPOINT_OBSERVATION_AVAILABLE=0
+      endpoint_stale_done=0
+    fi
     key=$(window_key "$w")
     death_owner=$(death_owner_id "$w" "$task" "$backend")
     incarnation=$(death_incarnation "$spawn_gen" "$death_owner")
@@ -1718,7 +1788,7 @@ EOF
     if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
       case "$agent_state" in
         dead|missing)
-          [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable
+          [ -z "$task" ] || inbox_steer_check "$w" "$task" unavailable "$backend"
           [ "$agent_state" != dead ] \
             || handle_authoritatively_dead_target "$w" "$task" "$backend" "$incarnation" "$death_owner" "$last" "$key"
           continue
@@ -1730,7 +1800,9 @@ EOF
     fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
-    [ -z "$task" ] || inbox_steer_check "$w" "$task"
+    [ -z "$task" ] || inbox_steer_check "$w" "$task" unknown "$backend"
+    [ "$endpoint_stale_done" -eq 0 ] || continue
+    endpoint_stale_done=1
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a declared wait's bounded re-surface -
     # the same declarations pause_state_class reconciles below, which is why this
@@ -1741,7 +1813,9 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    observe_endpoint_once "$backend" "$w" "$task"
+    [ "$FM_ENDPOINT_OBSERVATION_AVAILABLE" -eq 1 ] || continue
+    tail40=$FM_ENDPOINT_TAIL40
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"

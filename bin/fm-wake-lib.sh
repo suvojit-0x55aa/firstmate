@@ -326,6 +326,7 @@ fm_lock_clean_known_files() {
     "$lockdir/codex-check-batch-boundary.tmp" \
     "$lockdir/codex-check-batch-resume" \
     "$lockdir/codex-check-batch-resume.tmp" \
+    "$lockdir/codex-check-batch-active" \
     "$lockdir/codex-check-batch-sequence" \
     "$lockdir/codex-check-batch-sequence.tmp" \
     "$lockdir/codex-arm-ownership" \
