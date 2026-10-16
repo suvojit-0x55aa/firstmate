@@ -39,7 +39,7 @@ fixture() {
 run_stop() { # <home> [checkpoint]
   local home=$1
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT="${2:-2}" \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_POLL="${FM_POLL:-1}" \
+    FM_CHECK_INTERVAL="${FM_CHECK_INTERVAL:-999999}" FM_HEARTBEAT=999999 FM_POLL="${FM_POLL:-1}" \
     FM_GUARD_GRACE="${FM_GUARD_GRACE:-3}" FM_BACKEND=tmux \
     "$TEST_CODEX" -c '
       printf "%s\n" "$$" > "$FM_HOME/state/.lock"
@@ -166,7 +166,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v3\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=park-v1\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v4\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-v1\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -185,6 +185,7 @@ touch "$FM_HOME/state/.last-watcher-beat"
 printf '%s\n' "${FM_CHECKS_PER_CYCLE:-0}" > "$FM_HOME/controlled-check-limit"
 date +%s > "$FM_HOME/controlled-watcher-ready"
 cycles=0
+batch_sequence=1
 while :; do
   sleep "${FM_POLL:-1}"
   cycles=$((cycles + 1))
@@ -217,7 +218,18 @@ while :; do
       ;;
     *)
       touch "$FM_HOME/state/.last-watcher-beat"
-      [ -z "${batch_lease:-}" ] || printf '%s\n' "$batch_lease" > "$lock/codex-check-batch-boundary"
+      if [ -n "${batch_lease:-}" ]; then
+        printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
+        printf 'fm-codex-check-batch.v1\t%s\t%s\n' "$batch_lease" "$batch_sequence" \
+          > "$lock/codex-check-batch-boundary"
+        next_sequence=$((batch_sequence + 1))
+        request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
+        if [ "$request" = "$(printf 'fm-codex-check-batch.v1\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
+          batch_sequence=$next_sequence
+          printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
+          rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
+        fi
+      fi
       ;;
   esac
 done
@@ -325,7 +337,10 @@ if [ "${1:-}" = pane ] && [ "${2:-}" = list ]; then
   for target in ${FM_TEST_HERDR_EXISTING_TARGETS:-}; do
     if [ "${target%%:*}" = "$session" ]; then
       pane=${target#*:}
-      printf '%s{"pane_id":"%s","tab_id":"tab-%s"}' "$separator" "$pane" "$pane"
+      agent_status=unknown
+      case " ${FM_TEST_HERDR_LIVE_TARGETS:-} " in *" $target "*) agent_status=working ;; esac
+      printf '%s{"pane_id":"%s","tab_id":"tab-%s","agent_status":"%s"}' \
+        "$separator" "$pane" "$pane" "$agent_status"
       separator=,
     fi
   done
@@ -357,7 +372,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v3\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=park-v1\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v4\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-v1\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -376,10 +391,23 @@ touch "$FM_HOME/state/.last-watcher-beat"
 printf '%s\n' "$$" > "$FM_HOME/attached-watcher-ready"
 sleep "${FM_SIGNAL_GRACE:-30}"
 if [ -n "${batch_lease:-}" ]; then
-  printf '%s\n' "$batch_lease" > "$lock/codex-check-batch-boundary"
+  batch_sequence=1
+  printf '%s\n' 1 > "$lock/codex-check-batch-sequence"
+  printf 'fm-codex-check-batch.v1\t%s\t1\n' "$batch_lease" > "$lock/codex-check-batch-boundary"
 fi
 while :; do
   touch "$FM_HOME/state/.last-watcher-beat"
+  if [ -n "${batch_lease:-}" ]; then
+    next_sequence=$((batch_sequence + 1))
+    request=$(cat "$lock/codex-check-batch-resume" 2>/dev/null || true)
+    if [ "$request" = "$(printf 'fm-codex-check-batch.v1\t%s\t%s' "$batch_lease" "$next_sequence")" ]; then
+      batch_sequence=$next_sequence
+      printf '%s\n' "$batch_sequence" > "$lock/codex-check-batch-sequence"
+      rm -f "$lock/codex-check-batch-resume" "$lock/codex-check-batch-boundary"
+      printf 'fm-codex-check-batch.v1\t%s\t%s\n' "$batch_lease" "$batch_sequence" \
+        > "$lock/codex-check-batch-boundary"
+    fi
+  fi
   sleep 1
 done
 WATCH
@@ -1355,10 +1383,20 @@ test_remote_inbox_stays_owned_by_remote_delivery() {
 }
 
 test_herdr_endpoints_use_one_snapshot_per_cycle() {
-  local dir id calls
+  local dir id calls states
   dir=$(fixture herdr-endpoint-inventory)
   install_endpoint_inventory_herdr "$dir"
   install_endpoint_inventory_tmux "$dir"
+  states=$(printf 'herdr\tfleet:w-dead:p1\tlocal\t\nherdr\tfleet:w-live:p1\tlocal\t\n' \
+    | PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-dead:p1 fleet:w-live:p1' \
+      FM_TEST_HERDR_LIVE_TARGETS='fleet:w-live:p1' bash -c '
+        . "$1/fm-backend.sh"
+        fm_backend_agent_state_batch
+      ' _ "$ROOT/bin") || fail 'Herdr bulk classifier failed'
+  [ "$(printf '%s\n' "$states" | awk -F '\t' '$2 == "fleet:w-dead:p1" { print $3 }')" = dead ] \
+    || fail 'Herdr bulk classifier did not mark an existing agent-less pane dead'
+  [ "$(printf '%s\n' "$states" | awk -F '\t' '$2 == "fleet:w-live:p1" { print $3 }')" = alive ] \
+    || fail 'Herdr bulk classifier did not retain a registered live pane'
   for id in $(seq 1 40); do
     printf 'window=fleet:w%s:p1\nbackend=herdr\n' "$id" > "$dir/state/dead-$id.meta"
   done
@@ -1468,6 +1506,7 @@ SH
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS="$existing" \
     FM_TEST_AMBIGUOUS_TARGETS='fleet:uncertain-reply' \
     FM_TEST_CAPTURE='retained dead pane' FM_TEST_CAPTURE_LOG="$dir/capture-calls" \
+    FM_PENDING_REPLY_PLAN_LOOKUP_LOG="$dir/plan-lookups" \
     FM_CREW_STATE_BIN="$dir/slow-crew-state.sh" FM_PENDING_REPLY_NOW=1000 \
     FM_TEST_INVENTORY_LOG="$dir/inventory-calls" \
     FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probe-calls" \
@@ -1484,6 +1523,8 @@ SH
   grep -F "$(printf '\tstale\tfleet:dead-25\tstale: fleet:dead-25')" "$dir/state/.wake-queue" >/dev/null \
     || fail 'authoritatively dead worker did not retain its stale notification'
   [ ! -e "$dir/crew-state-calls" ] || fail 'authoritatively dead targets reached expensive crew-state classification'
+  [ "$(wc -l < "$dir/plan-lookups" | tr -d '[:space:]')" = 27 ] \
+    || fail 'pending replies did not perform exactly one keyed classification lookup per owner'
   inventory_calls=$(wc -l < "$dir/inventory-calls")
   [ "$inventory_calls" -ge 2 ] && [ "$inventory_calls" -le 7 ] \
     || fail "admission and watcher used $inventory_calls inventories across bounded probe cycles"
@@ -1543,7 +1584,7 @@ test_duplicate_endpoint_pending_replies_share_classification() {
 }
 
 test_bounded_check_batch_parks_at_safe_boundary() {
-  local dir watcher rc original_root=$TEST_ROOT
+  local dir watcher rc original_root=$TEST_ROOT sequence
   dir=$(fixture bounded-check-batch-boundary)
   for name in a-first b-second; do
     printf '%s\n' '#!/usr/bin/env bash' \
@@ -1555,21 +1596,34 @@ test_bounded_check_batch_parks_at_safe_boundary() {
     FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" "$name" >/dev/null \
       || fail "could not register $name boundary fixture"
   done
-  env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=2 \
+  env FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=30 \
     FM_CODEX_BOUNDED_WATCH=1 FM_CHECKS_PER_CYCLE=1 FM_CODEX_CHECK_BATCH_LEASE=test-lease \
     FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION=1 FM_POLL=0.02 FM_HEARTBEAT=999999 \
-    FM_SIGNAL_GRACE=0 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
+    FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher=$!
   wait_file "$dir/state/.watch.lock/codex-check-batch-boundary" 100
   sleep 0.3
   [ "$(cat "$dir/check-runs")" = $'a-first-start\na-first-finish' ] \
     || fail "bounded watcher crossed its safe boundary: $(cat "$dir/check-runs")"
   kill -0 "$watcher" 2>/dev/null || fail 'bounded watcher exited instead of parking at its boundary'
+  : > "$dir/state/task.meta"
+  FM_CHECK_INTERVAL=300 FM_CHECK_TIMEOUT=30 FM_POLL=0.02 FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=3 \
+    FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=100 \
+    run_stop "$dir" 1
+  wait_file "$dir/rc" 250
+  case "$(cat "$dir/rc")" in 0|2) ;; *) fail 'attached parked watcher returned an invalid Stop result' ;; esac
+  sequence=$(cat "$dir/state/.watch.lock/codex-check-batch-sequence")
+  [ "$sequence" = 2 ] || fail "attached parked watcher did not accept the next batch lease: $sequence"
+  [ "$(cat "$dir/check-runs")" = $'a-first-start\na-first-finish\nb-second-start\nb-second-finish' ] \
+    || fail "attached parked watcher did not continue the next lexical batch: $(cat "$dir/check-runs")"
+  kill -0 "$watcher" 2>/dev/null || fail 'Stop killed an independently owned parked watcher'
+  finish "$dir"
   kill -TERM "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
-  [ "$(cat "$dir/state/.check-sweep-cursor")" = a-first.check.sh ] \
-    || fail 'bounded watcher did not persist progress before parking'
+  [ ! -e "$dir/state/.check-sweep-cursor" ] \
+    || fail 'bounded watcher did not retire its lexical cursor after the complete sweep'
 
+  rm -f "$dir/rc" "$dir/release" "$dir/out"
   install_controlled_watcher "$dir"
   : > "$dir/state/task.meta"
   FM_TEST_WATCH_MODE=heartbeat-only FM_SIGNAL_GRACE=0 FM_CHECK_TIMEOUT=1 \
@@ -1584,6 +1638,42 @@ test_bounded_check_batch_parks_at_safe_boundary() {
     'heartbeat was treated as batch completion'
   finish "$dir"
   pass 'bounded checks park and heartbeat cannot impersonate completion'
+}
+
+test_launcher_exit_after_spawn_retires_owned_watcher() {
+  local dir original_root=$TEST_ROOT watcher
+  dir=$(fixture launcher-exit-after-spawn)
+  cp -R "$ROOT/bin/." "$dir/bin/"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'ARM'
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+arm_pid=${BASHPID:-$$}
+arm_identity=$(fm_pid_identity "$arm_pid") || exit 1
+record="$FM_HOME/state/.codex-arm-owner"
+printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
+  "$FM_CODEX_CHECK_BATCH_LEASE" "$arm_pid" "$arm_identity" > "$record"
+export FM_WATCH_ARM_OWNER_PID="$arm_pid" FM_WATCH_ARM_OWNER_IDENTITY="$arm_identity"
+bash "$SCRIPT_DIR/fm-watch.sh" &
+child=$!
+child_identity=$(fm_pid_identity "$child") || exit 1
+printf '%s\n' "$child" > "$FM_HOME/orphan-candidate-pid"
+printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
+  "$FM_CODEX_CHECK_BATCH_LEASE" "$arm_pid" "$arm_identity" "$child" "$child_identity" > "$record"
+exit 1
+ARM
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  : > "$dir/state/task.meta"
+  TEST_ROOT="$dir" FM_SIGNAL_GRACE=0 run_stop "$dir" 5
+  TEST_ROOT=$original_root
+  wait_file "$dir/rc" 250
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'launcher exit after spawn allowed Stop to fail open'
+  wait_file "$dir/orphan-candidate-pid"
+  watcher=$(cat "$dir/orphan-candidate-pid")
+  if kill -0 "$watcher" 2>/dev/null; then fail "launcher-exit watcher $watcher survived refusal commit"; fi
+  finish "$dir"
+  pass 'launcher exit after spawn cannot orphan its owned watcher'
 }
 
 test_paused_and_captain_held_deaths_notify_once() {
@@ -2838,6 +2928,7 @@ test_codex_defers_remote_pending_reply_observation
 test_cycle_budget_scans_are_throttled
 test_large_check_inventory_is_batched_before_transport_deadline
 test_dead_arm_launcher_retires_owned_watcher_group
+test_launcher_exit_after_spawn_retires_owned_watcher
 test_reaped_uncertain_group_is_not_signalled
 test_final_source_wake_retains_continuation
 test_cleanup_cancellation_revokes_handling

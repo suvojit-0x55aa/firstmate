@@ -448,6 +448,11 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
+arm_owner_record=
+cleanup_arm_owner_record() {
+  [ -z "$arm_owner_record" ] || rm -f "$arm_owner_record" "$arm_owner_record.tmp" 2>/dev/null || true
+}
+trap cleanup_arm_owner_record EXIT
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
@@ -478,12 +483,33 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
+FM_WATCH_ARM_OWNER_PID=${BASHPID:-$$}
+FM_WATCH_ARM_OWNER_IDENTITY=$(fm_pid_identity "$FM_WATCH_ARM_OWNER_PID" 2>/dev/null || true)
+export FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
+case "${FM_CODEX_CHECK_BATCH_LEASE:-}" in
+  ''|*[!A-Za-z0-9._-]*) ;;
+  *)
+    arm_owner_record="$STATE/.codex-arm-owner"
+    ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
+        "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
+        "$FM_WATCH_ARM_OWNER_IDENTITY" > "$arm_owner_record.tmp" ) \
+      && mv -f "$arm_owner_record.tmp" "$arm_owner_record" || exit 1
+    ;;
+esac
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
   "$WATCH" >"$child_out" &
 fi
 child=$!
+if [ -n "$arm_owner_record" ]; then
+  child_identity=$(fm_pid_identity "$child" 2>/dev/null || true)
+  [ -n "$child_identity" ] || exit 1
+  ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tspawned\t%s\t%s\n' \
+      "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
+      "$FM_WATCH_ARM_OWNER_IDENTITY" "$child" "$child_identity" > "$arm_owner_record.tmp" ) \
+    && mv -f "$arm_owner_record.tmp" "$arm_owner_record" || exit 1
+fi
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 

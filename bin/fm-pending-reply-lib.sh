@@ -1292,10 +1292,29 @@ fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory]
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local batch_inventory=${2-} inventory_backend inventory_target inventory_state inventory_route
   local inventory_home inventory_task inventory_kind inventory_spawn_gen
-  local observation observation_key observation_route found i
-  local -a observation_keys=() observation_values=()
+  local observation observation_key observation_route observation_cache_key found
+  local lookup_dir lookup_file observation_file task_key
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
+  lookup_dir=$(umask 077; mktemp -d "$state/.pending-agent-plan.XXXXXX") || return 1
+  mkdir "$lookup_dir/tasks" "$lookup_dir/observations" || {
+    find "$lookup_dir" -depth -delete 2>/dev/null || true
+    return 1
+  }
+  if [ -n "$batch_inventory" ]; then
+    while IFS="$(printf '\t')" read -r inventory_backend inventory_target inventory_state \
+      inventory_route inventory_home inventory_task inventory_kind inventory_spawn_gen; do
+      case "$inventory_task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+      task_key=$(fm_backend_agent_state_cache_key "$inventory_task") || continue
+      printf '%s\t%s\t%s\t%s\n' "$inventory_backend" "$inventory_target" \
+        "$inventory_route" "$inventory_state" > "$lookup_dir/tasks/$task_key" || {
+        find "$lookup_dir" -depth -delete 2>/dev/null || true
+        return 1
+      }
+    done <<EOF
+$batch_inventory
+EOF
+  fi
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
@@ -1375,32 +1394,31 @@ fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory]
         [ -z "$remote_host" ] || observation_route=remote
         observation=
         found=0
-        if [ -n "$batch_inventory" ]; then
-          while IFS="$(printf '\t')" read -r inventory_backend inventory_target inventory_state \
-            inventory_route inventory_home inventory_task inventory_kind inventory_spawn_gen; do
-            [ "$inventory_backend" = "$backend" ] || continue
-            [ "$inventory_target" = "$target" ] || continue
-            [ "$inventory_route" = "$observation_route" ] || continue
-            [ "$inventory_route" = local ] || continue
+        task_key=$(fm_backend_agent_state_cache_key "$task_id") || task_key=
+        lookup_file="$lookup_dir/tasks/$task_key"
+        if [ -f "$lookup_file" ]; then
+          IFS="$(printf '\t')" read -r inventory_backend inventory_target inventory_route inventory_state < "$lookup_file"
+          [ -z "${FM_PENDING_REPLY_PLAN_LOOKUP_LOG:-}" ] \
+            || printf '%s\n' "$task_id" >> "$FM_PENDING_REPLY_PLAN_LOOKUP_LOG"
+          if [ "$inventory_backend" = "$backend" ] \
+            && [ "$inventory_target" = "$target" ] \
+            && [ "$inventory_route" = "$observation_route" ] \
+            && [ "$inventory_route" = local ]; then
             case "$inventory_state" in
               dead|missing)
                 observation=unavailable
                 found=1
                 ;;
             esac
-            break
-          done <<EOF
-$batch_inventory
-EOF
+          fi
         fi
         observation_key="$backend:$observation_route:$target"
-        for ((i = 0; i < ${#observation_keys[@]}; i++)); do
-          [ "$found" = 0 ] || break
-          [ "${observation_keys[$i]}" = "$observation_key" ] || continue
-          observation=${observation_values[$i]}
+        observation_cache_key=$(fm_backend_agent_state_cache_key "$observation_key") || observation_cache_key=
+        observation_file="$lookup_dir/observations/$observation_cache_key"
+        if [ "$found" = 0 ] && [ -n "$observation_cache_key" ] && [ -f "$observation_file" ]; then
+          observation=$(cat "$observation_file")
           found=1
-          break
-        done
+        fi
         if [ "$found" = 0 ]; then
           if [ "$observation_route" = remote ]; then
             if [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ]; then
@@ -1413,14 +1431,16 @@ EOF
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
-          observation_keys+=("$observation_key")
-          observation_values+=("$observation")
         fi
+        [ -z "$observation_cache_key" ] \
+          || printf '%s\n' "$observation" > "$observation_file" \
+          || true
         busy=$(fm_pending_reply_busy_state_from_observation "$rec" "$observation")
       fi
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
+  find "$lookup_dir" -depth -delete 2>/dev/null || return 1
   return 0
 }
 

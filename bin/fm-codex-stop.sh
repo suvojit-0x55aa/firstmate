@@ -441,9 +441,9 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('check-batch-handoff', 'park-v1'),
+        ('check-batch-handoff', 'resume-v1'),
     )
-    return 'fm-codex-bounded.v3\t' + '\t'.join(
+    return 'fm-codex-bounded.v4\t' + '\t'.join(
         f'{key}={capability_number(value)}' for key, value in fields) + '\n'
 
 
@@ -476,11 +476,113 @@ def watcher_check_batch_boundary(batch_lease):
         flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
         fd = os.open('.watch.lock/codex-check-batch-boundary', flags)
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 128:
-            return False
-        return os.read(fd, 129).decode('ascii') == batch_lease + '\n'
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 192:
+            return None
+        fields = os.read(fd, 193).decode('ascii').rstrip('\n').split('\t')
+        if len(fields) != 3 or fields[:2] != ['fm-codex-check-batch.v1', batch_lease]:
+            return None
+        sequence = int(fields[2])
+        return sequence if sequence > 0 else None
+    except ValueError:
+        return None
     except (OSError, UnicodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def request_watcher_check_batch(batch_lease, sequence):
+    value = f'fm-codex-check-batch.v1\t{batch_lease}\t{sequence}\n'.encode('ascii')
+    path = '.watch.lock/codex-check-batch-resume'
+    tmp = '.watch.lock/codex-check-batch-resume.tmp'
+    fd = None
+    try:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(tmp, flags, 0o600)
+        os.write(fd, value)
+        os.close(fd)
+        fd = None
+        os.replace(tmp, path)
+        return True
+    except OSError:
         return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def watcher_arm_ownership(batch_lease, arm_pid, expected_arm_identity, deadline=None):
+    fd = None
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open('.watch.lock/codex-arm-ownership', flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 512:
+            return None
+        fields = os.read(fd, 513).decode('ascii').rstrip('\n').split('\t')
+        if (len(fields) != 6 or fields[0] != 'fm-codex-arm-owner.v1' or
+                fields[1] != batch_lease or fields[2] != str(arm_pid) or
+                fields[3] != expected_arm_identity):
+            return None
+        watcher_pid = int(fields[4])
+        if watcher_pid <= 0 or not fields[5]:
+            return None
+        current = identity(watcher_pid, deadline)
+        if current is None:
+            return False
+        if current != fields[5]:
+            return None
+        return watcher_pid, fields[5]
+    except (OSError, UnicodeError, ValueError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def arm_launch_ownership(batch_lease, arm_pid, expected_arm_identity, deadline=None):
+    path = '.codex-arm-owner'
+    fd = None
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 512:
+            return None
+        fields = os.read(fd, 513).decode('ascii').rstrip('\n').split('\t')
+        if (len(fields) < 5 or fields[:4] != [
+                'fm-codex-arm-launch.v1', batch_lease, str(arm_pid), expected_arm_identity]):
+            return None
+        if fields[4] == 'pending' and len(fields) == 5:
+            try:
+                os.killpg(arm_pid, 0)
+                return None
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return None
+        if fields[4] != 'spawned' or len(fields) != 7:
+            return None
+        watcher_pid = int(fields[5])
+        current = identity(watcher_pid, deadline)
+        if current is None:
+            return None
+        if current != fields[6]:
+            return True
+        return watcher_pid, fields[6]
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeError, ValueError):
+        return None
     finally:
         if fd is not None:
             os.close(fd)
@@ -502,7 +604,17 @@ def watcher_snapshot(grace, check_limit, probe_deadline=None):
         beat = os.stat('.last-watcher-beat').st_mtime_ns
     except OSError:
         return None
-    return fields[0], fields[1], beat, batch_lease
+    sequence = 1
+    try:
+        with open('.watch.lock/codex-check-batch-sequence') as stream:
+            sequence = int(stream.read().strip())
+        if sequence <= 0:
+            return None
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        return None
+    return fields[0], fields[1], beat, batch_lease, sequence
 
 
 def read_record():
@@ -578,6 +690,7 @@ def owner(lock):
     terminal_delivered = False
     terminal_cleanup_complete = False
     generation_changed = False
+    expected_batch_sequence = None
 
     def remaining_cycle_limit(now):
         if phase == 'starting':
@@ -630,6 +743,8 @@ def owner(lock):
             else:
                 proof = watcher_proof
                 owned_member = False
+                member_pid = None
+                member_identity = ''
                 if proof is not None:
                     try:
                         member_pid = int(proof[0])
@@ -638,25 +753,59 @@ def owner(lock):
                         owned_member = False
                     except OSError:
                         owned_member = False
+                    if owned_member:
+                        member_identity = proof[1]
+                if not owned_member:
+                    ownership = watcher_arm_ownership(
+                        token, arm.pid, arm_identity, cleanup_deadline)
+                    time.monotonic()
+                    if ownership is False:
+                        completed = False
+                    elif ownership is not None:
+                        member_pid, member_identity = ownership
+                        owned_member = True
+                if not owned_member and completed:
+                    launch_ownership = arm_launch_ownership(
+                        token, arm.pid, arm_identity, cleanup_deadline)
+                    time.monotonic()
+                    if launch_ownership is None:
+                        completed = False
+                    elif isinstance(launch_ownership, tuple):
+                        member_pid, member_identity = launch_ownership
+                        owned_member = True
                 if owned_member:
                     current = identity(member_pid, cleanup_deadline)
                     time.monotonic()
                     if current is None:
                         completed = False
                         owned_member = False
-                    elif current != proof[1]:
+                    elif current != member_identity:
                         owned_member = False
+                    else:
+                        try:
+                            if os.getpgid(member_pid) != arm.pid:
+                                completed = False
+                                owned_member = False
+                        except ProcessLookupError:
+                            owned_member = False
+                        except OSError:
+                            completed = False
+                            owned_member = False
                 if owned_member:
                     try:
                         os.killpg(arm.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
+                    except PermissionError:
+                        completed = False
                     expires = time.monotonic() + 3
                     while time.monotonic() < expires:
-                        try:
-                            if os.getpgid(member_pid) != arm.pid:
-                                break
-                        except OSError:
+                        current = identity(member_pid, cleanup_deadline)
+                        time.monotonic()
+                        if current is None:
+                            completed = False
+                            break
+                        if current != member_identity:
                             break
                         time.sleep(0.05)
                     else:
@@ -664,12 +813,37 @@ def owner(lock):
                         time.monotonic()
                         if current is None:
                             completed = False
-                        elif current == proof[1]:
+                        elif current == member_identity:
                             try:
-                                os.killpg(arm.pid, signal.SIGKILL)
+                                if os.getpgid(member_pid) == arm.pid:
+                                    os.killpg(arm.pid, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
+                            except PermissionError:
+                                completed = False
+                            kill_expires = time.monotonic() + 1
+                            while time.monotonic() < kill_expires:
+                                current = identity(member_pid, cleanup_deadline)
+                                time.monotonic()
+                                if current is None:
+                                    completed = False
+                                    break
+                                if current != member_identity:
+                                    break
+                                time.sleep(0.05)
+                            else:
+                                completed = False
+                elif completed:
+                    possible_orphan = watcher_snapshot(
+                        cycle_timeout, check_batch_limit, cleanup_deadline)
+                    time.monotonic()
+                    if possible_orphan is not None and possible_orphan[3] == token:
+                        completed = False
             if completed:
+                try:
+                    os.unlink('.codex-arm-owner')
+                except FileNotFoundError:
+                    pass
                 arm = None
                 arm_identity = ''
         if output is not None:
@@ -911,11 +1085,19 @@ def owner(lock):
                                 transport_deadline - now - checkpoint - terminal_reserve)):
                             reason = budget_reason
                         else:
-                            watcher_proof = proof
-                            watcher_last_beat = proof[2]
-                            watcher_last_progress = now
-                            next_watcher_probe = now + watcher_cadence
-                            publish('watching', checkpoint)
+                            boundary_sequence = watcher_check_batch_boundary(proof[3])
+                            expected_batch_sequence = proof[4]
+                            if proof[3] != token and boundary_sequence == proof[4]:
+                                expected_batch_sequence = proof[4] + 1
+                                if not request_watcher_check_batch(
+                                        proof[3], expected_batch_sequence):
+                                    reason = 'watcher failed; inspect its startup and ownership before continuing'
+                            if not reason:
+                                watcher_proof = proof
+                                watcher_last_beat = proof[2]
+                                watcher_last_progress = now
+                                next_watcher_probe = now + watcher_cadence
+                                publish('watching', checkpoint)
                     elif now >= transport_deadline - terminal_reserve:
                         reason = budget_reason
                     elif now >= deadline:
@@ -957,7 +1139,10 @@ def owner(lock):
                         confirmation_started_at = now
                         publish('confirming', cycle_timeout, confirmation_started_at)
                 if not reason and phase == 'confirming' and probe_due:
-                    if watcher_proof is not None and watcher_check_batch_boundary(watcher_proof[3]):
+                    boundary_sequence = (watcher_check_batch_boundary(watcher_proof[3])
+                                         if watcher_proof is not None else None)
+                    if (watcher_proof is not None and expected_batch_sequence is not None and
+                            boundary_sequence == expected_batch_sequence):
                         proof = watcher_snapshot(cycle_timeout, check_batch_limit,
                                                  transport_deadline - terminal_reserve)
                         now = time.monotonic()
@@ -969,6 +1154,7 @@ def owner(lock):
                             reason = budget_reason
                         elif (proof is not None and watcher_proof is not None and
                                 proof[:2] == watcher_proof[:2] and proof[3] == watcher_proof[3] and
+                                proof[4] == expected_batch_sequence and
                                 (arm is None or current_arm_identity == arm_identity)):
                             reason = 'quiet checkpoint elapsed; supervision is still needed'
                         else:

@@ -1350,6 +1350,7 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
+CODEX_CHECK_BATCH_SEQUENCE=1
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   && [ -z "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
   FM_CODEX_CHECK_BATCH_LEASE="watcher-$WATCHER_PID"
@@ -1360,6 +1361,16 @@ printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
 printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+if [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ] \
+  && [ -n "${FM_WATCH_ARM_OWNER_PID:-}" ] \
+  && [ -n "${FM_WATCH_ARM_OWNER_IDENTITY:-}" ]; then
+  ownership_tmp="$WATCH_LOCK/codex-arm-ownership.tmp"
+  ownership_value=$(printf 'fm-codex-arm-owner.v1\t%s\t%s\t%s\t%s\t%s\n' \
+    "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
+    "$FM_WATCH_ARM_OWNER_IDENTITY" "$WATCHER_PID" "$FM_WATCH_DELIVERY_IDENTITY")
+  ( umask 077; printf '%s' "$ownership_value" > "$ownership_tmp" ) \
+    && mv -f "$ownership_tmp" "$WATCH_LOCK/codex-arm-ownership" || exit 1
+fi
 capability_tmp="$WATCH_LOCK/codex-bounded-capability.tmp"
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   && [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
@@ -1368,7 +1379,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v3\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=park-v1\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v4\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tcheck-batch-handoff=resume-v1\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
@@ -1380,17 +1391,35 @@ fi
 
 publish_codex_check_batch_boundary() {
   local boundary_tmp="$WATCH_LOCK/codex-check-batch-boundary.tmp"
+  local sequence_tmp="$WATCH_LOCK/codex-check-batch-sequence.tmp"
   [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] || return 1
   [ "$CHECKS_PER_CYCLE" -gt 0 ] || return 1
   [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ] || return 1
-  ( umask 077; printf '%s\n' "$FM_CODEX_CHECK_BATCH_LEASE" > "$boundary_tmp" ) \
+  ( umask 077; printf '%s\n' "$CODEX_CHECK_BATCH_SEQUENCE" > "$sequence_tmp" ) \
+    && mv -f "$sequence_tmp" "$WATCH_LOCK/codex-check-batch-sequence" \
+    && ( umask 077; printf 'fm-codex-check-batch.v1\t%s\t%s\n' \
+      "$FM_CODEX_CHECK_BATCH_LEASE" "$CODEX_CHECK_BATCH_SEQUENCE" > "$boundary_tmp" ) \
     && mv -f "$boundary_tmp" "$WATCH_LOCK/codex-check-batch-boundary"
 }
 
 park_at_codex_check_batch_boundary() {
+  local next_sequence request expected
   publish_codex_check_batch_boundary || return 1
   while [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$WATCHER_PID" ]; do
     touch "$STATE/.last-watcher-beat"
+    next_sequence=$((CODEX_CHECK_BATCH_SEQUENCE + 1))
+    expected=$(printf 'fm-codex-check-batch.v1\t%s\t%s' \
+      "$FM_CODEX_CHECK_BATCH_LEASE" "$next_sequence")
+    request=$(cat "$WATCH_LOCK/codex-check-batch-resume" 2>/dev/null || true)
+    if [ "$request" = "$expected" ]; then
+      CODEX_CHECK_BATCH_SEQUENCE=$next_sequence
+      ( umask 077; printf '%s\n' "$CODEX_CHECK_BATCH_SEQUENCE" \
+          > "$WATCH_LOCK/codex-check-batch-sequence.tmp" ) \
+        && mv -f "$WATCH_LOCK/codex-check-batch-sequence.tmp" \
+          "$WATCH_LOCK/codex-check-batch-sequence" || return 1
+      rm -f "$WATCH_LOCK/codex-check-batch-resume" "$WATCH_LOCK/codex-check-batch-boundary"
+      return 0
+    fi
     sleep "$POLL"
   done
 }
@@ -1916,7 +1945,6 @@ EOF
 
   if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
     park_at_codex_check_batch_boundary || exit 1
-    exit 0
   else
     # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
     # else the blind poll sleep. See event_wait_or_sleep.

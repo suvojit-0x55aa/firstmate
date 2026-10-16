@@ -1938,7 +1938,7 @@ fm_backend_herdr_agent_state() {  # <target>
 }
 
 fm_backend_herdr_agent_inventory_snapshot() {  # <session> <snapshot-dir>
-  local session=$1 snapshot_dir=$2 out pane_ids pane_id key
+  local session=$1 snapshot_dir=$2 out pane_rows pane_id agent_status state key
   mkdir -p "$snapshot_dir/panes" || return 1
   out=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || {
     printf 'unverified\n' > "$snapshot_dir/status"
@@ -1946,21 +1946,30 @@ fm_backend_herdr_agent_inventory_snapshot() {  # <session> <snapshot-dir>
   }
   if ! printf '%s' "$out" | jq -e '
     (.result.panes | type) == "array"
-    and all(.result.panes[]; (.pane_id | type) == "string" and (.pane_id | test("^[^[:space:]]+$")))
+    and all(.result.panes[];
+      (.pane_id | type) == "string"
+      and (.pane_id | test("^[^[:space:]]+$"))
+      and (.agent_status == "unknown" or .agent_status == "working" or .agent_status == "idle"
+        or .agent_status == "done" or .agent_status == "blocked"))
   ' >/dev/null 2>&1; then
     printf 'unverified\n' > "$snapshot_dir/status"
     return 0
   fi
-  pane_ids=$(printf '%s' "$out" | jq -r '.result.panes[].pane_id' 2>/dev/null) || {
+  pane_rows=$(printf '%s' "$out" | jq -r '.result.panes[] | [.pane_id, .agent_status] | @tsv' 2>/dev/null) || {
     printf 'unverified\n' > "$snapshot_dir/status"
     return 0
   }
-  while IFS= read -r pane_id; do
+  while IFS="$(printf '\t')" read -r pane_id agent_status; do
     [ -n "$pane_id" ] || continue
     key=$(fm_backend_agent_state_cache_key "$pane_id") || return 1
-    : > "$snapshot_dir/panes/$key" || return 1
+    case "$agent_status" in
+      unknown) state=dead ;;
+      working|idle|done|blocked) state=alive ;;
+      *) return 1 ;;
+    esac
+    printf '%s\n' "$state" > "$snapshot_dir/panes/$key" || return 1
   done <<EOF
-$pane_ids
+$pane_rows
 EOF
   printf 'ok\n' > "$snapshot_dir/status"
 }
@@ -1974,7 +1983,7 @@ fm_backend_herdr_agent_state_from_snapshot() {  # <target> <snapshot-status> <sn
     return 0
   }
   if [ -f "$snapshot_dir/panes/$key" ]; then
-    printf 'unverified'
+    cat "$snapshot_dir/panes/$key"
   else
     printf 'missing'
   fi
