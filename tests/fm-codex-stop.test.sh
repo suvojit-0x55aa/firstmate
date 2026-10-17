@@ -37,7 +37,7 @@ fixture() {
   printf '%s\n' "$dir"
 }
 run_stop() { # <home> [checkpoint]
-  local home=$1
+  local home=$1 fixture_tasks= fixture_task snapshot
   # Legacy fixtures used an empty .meta merely as a boolean.  The production
   # predicate now (correctly) treats a valid empty active snapshot as idle, so
   # make those fixtures real recoverable task records instead of relying on the
@@ -46,12 +46,23 @@ run_stop() { # <home> [checkpoint]
     [ -f "$fixture_meta" ] || continue
     [ -s "$fixture_meta" ] && continue
     fixture_task=${fixture_meta##*/}; fixture_task=${fixture_task%.meta}
+    fixture_tasks="${fixture_tasks}${fixture_tasks:+$'\n'}$fixture_task"
     {
       printf 'window=firstmate:fm-%s\n' "$fixture_task"
       printf 'worktree=%s\nproject=%s\n' "$home" "$home"
       printf 'harness=codex\nkind=ship\nspawn_gen=fixture-%s\n' "$fixture_task"
     } > "$fixture_meta"
   done
+  snapshot="$home/state/.active-supervision-generation"
+  if [ -n "$fixture_tasks" ] && [ ! -e "$snapshot" ]; then
+    printf 'fm-active-supervision.v6\tg1\n' > "$snapshot"
+    while IFS= read -r fixture_task; do
+      [ -n "$fixture_task" ] || continue
+      printf 'entry\t%s\tfixture-%s\tactive\n' "$fixture_task" "$fixture_task" >> "$snapshot"
+    done <<EOF
+$fixture_tasks
+EOF
+  fi
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT="${2:-2}" \
     FM_CHECK_INTERVAL="${FM_CHECK_INTERVAL:-999999}" FM_HEARTBEAT=999999 FM_POLL="${FM_POLL:-1}" \
     FM_GUARD_GRACE="${FM_GUARD_GRACE:-3}" FM_BACKEND=tmux \
@@ -350,15 +361,21 @@ set -u
 [ -z "${FM_TEST_BACKEND_PROBE_LOG:-}" ] || printf 'tmux\t%s\n' "${1:-}" >> "$FM_TEST_BACKEND_PROBE_LOG"
 if [ "${1:-}" = list-windows ]; then
   session=
+  all=0
   while [ "$#" -gt 0 ]; do
     if [ "$1" = -t ]; then
       session=${2:-}
       break
     fi
+    [ "$1" != -a ] || all=1
     shift
   done
-  [ -z "${FM_TEST_INVENTORY_LOG:-}" ] || printf '%s\n' "$session" >> "$FM_TEST_INVENTORY_LOG"
+  [ -z "${FM_TEST_INVENTORY_LOG:-}" ] || { [ "$all" -eq 1 ] && printf '%s\n' all || printf '%s\n' "$session"; } >> "$FM_TEST_INVENTORY_LOG"
   for target in ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}}; do
+    if [ "$all" -eq 1 ]; then
+      printf '%s\t%s\n' "$target" "${target#*:}"
+      continue
+    fi
     if [ "${target%%:*}" = "$session" ]; then
       command=zsh
       case " ${FM_TEST_LIVE_TARGETS:-} " in *" $target "*) command=codex ;; esac
@@ -1750,6 +1767,51 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass '10,000 archived task records stay outside the active supervision hot set'
+}
+
+test_no_snapshot_bootstrap_discovers_live_ordinary_owners() {
+  local dir original_root=$TEST_ROOT inventory inventory_sessions
+  dir=$(fixture no-snapshot-live-ordinary-upgrade)
+  install_controlled_watcher "$dir"
+  install_endpoint_inventory_tmux "$dir"
+  printf '%s\n' \
+    'window=firstmate:fm-live-ship' "worktree=$dir/ship-worktree" "project=$dir" \
+    'kind=ship' 'harness=codex' 'spawn_gen=ship-1' > "$dir/state/live-ship.meta"
+  printf '%s\n' \
+    'window=firstmate:fm-live-scout' "worktree=$dir/scout-worktree" "project=$dir" \
+    'kind=scout' 'harness=codex' 'spawn_gen=scout-1' > "$dir/state/live-scout.meta"
+  printf '%s\n' \
+    'window=archive:fm-retired' "worktree=$dir/pooled-worktree" "project=$dir" \
+    'kind=ship' 'harness=codex' 'spawn_gen=retired-1' > "$dir/state/retired.meta"
+  mkdir -p "$dir/ship-worktree" "$dir/scout-worktree" "$dir/pooled-worktree"
+
+  PATH="$dir/fakebin:$PATH" \
+    FM_TEST_EXISTING_TARGETS='firstmate:fm-live-ship firstmate:fm-live-scout' \
+    FM_TEST_LIVE_TARGETS='firstmate:fm-live-ship firstmate:fm-live-scout' \
+    FM_TEST_INVENTORY_LOG="$dir/inventory-access" \
+    FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=10 TEST_ROOT="$dir" run_stop "$dir" 180
+  TEST_ROOT=$original_root
+  wait_file "$dir/controlled-watcher-ready"
+  append_wake "$dir/state" check release 'check: release no-snapshot live-owner fixture'
+  wait_file "$dir/rc"
+  [ "$(cat "$dir/rc")" = 2 ] || fail 'no-snapshot live ordinary owners returned idle'
+  assert_contains "$(cat "$dir/out")" 'durable wake pending' \
+    'no-snapshot live ordinary owners did not arm supervision'
+  inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" | sed 's|.*/||; s/\.meta$//') \
+    || fail 'could not read the no-snapshot live-owner inventory'
+  [ "$inventory" = $'live-scout\nlive-ship' ] \
+    || fail "bounded bootstrap did not retain exactly live ordinary owners: $inventory"
+  inventory_sessions=$(LC_ALL=C sort -u "$dir/inventory-access")
+  [ "$inventory_sessions" = $'all\nfirstmate' ] \
+    || fail "bounded bootstrap probed metadata-derived scopes: $inventory_sessions"
+  assert_no_watcher "$dir"
+  finish "$dir"
+  pass 'no-snapshot bootstrap retains live ordinary ship and scout owners'
 }
 
 test_bounded_event_wait_uses_active_registry() {
@@ -5446,6 +5508,7 @@ test_sequential_task_classification_fits_complete_cycle_bound
 test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
+test_no_snapshot_bootstrap_discovers_live_ordinary_owners
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata

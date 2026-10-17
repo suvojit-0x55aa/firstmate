@@ -376,6 +376,18 @@ $windows
 EOF
 }
 
+fm_backend_tmux_list_live() {
+  local windows target label tab
+  tab=$(printf '\t')
+  windows=$(LC_ALL=C tmux list-windows -a \
+    -F "#{session_name}:#{window_name}${tab}#{window_name}" 2>/dev/null) || return 0
+  while IFS="$tab" read -r target label; do
+    case "$label" in fm-?*) printf '%s\t%s\n' "$target" "$label" ;; esac
+  done <<EOF
+$windows
+EOF
+}
+
 fm_backend_tmux_recover_planned() {  # <task> <target> <detail>
   local task=$1 target=$2 detail=$3 spawn_gen=${4:-} session name expected tab out status matches count stable live path final_detail
   case "$target" in *:*) ;; *) return 1 ;; esac

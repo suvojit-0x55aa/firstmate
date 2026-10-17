@@ -1088,7 +1088,8 @@ fm_supervision_registry_secondmate_registered() {
 }
 
 fm_supervision_registry_bounded_migration_candidate() {
-  local state=$1 task=$2 home=$3 owner_kind=$4 record
+  local state=$1 task=$2 backend=$3 target=$4 home=$5 worktree=$6 owner_kind=$7 live_index=$8
+  local record live_backend live_target
   if [ "$owner_kind" = secondmate ] \
     && fm_supervision_registry_secondmate_registered "$state" "$task" "$home"; then
     return 0
@@ -1096,12 +1097,43 @@ fm_supervision_registry_bounded_migration_candidate() {
   for record in "$state/$task.inbox"/*; do
     [ -f "$record" ] && [ ! -L "$record" ] && return 0
   done
+  case "$owner_kind:$backend:$worktree" in
+    ship:orca:?*|scout:orca:?*) [ "$worktree" = - ] || [ ! -d "$worktree" ] || return 0 ;;
+  esac
+  case "$owner_kind" in ship|scout) ;; *) return 1 ;; esac
+  record="$live_index/$task"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  while IFS="$(printf '\t')" read -r live_backend live_target; do
+    [ "$live_backend" = "$backend" ] && [ "$live_target" = "$target" ] && return 0
+  done < "$record"
   return 1
+}
+
+fm_supervision_registry_bounded_live_index() {
+  local index=$1 backend target label task live
+  mkdir "$index" || return 1
+  live=$(fm_backend_list_live) || return 1
+  while IFS="$(printf '\t')" read -r backend target label; do
+    case "$label" in fm-?*) task=${label#fm-} ;; *) continue ;; esac
+    fm_backend_is_known "$backend" || continue
+    fm_supervision_registry_task_valid "$task" || continue
+    case "$target" in ''|*[$'\t\r\n']*) continue ;; esac
+    fm_supervision_tsv_row "$backend" "$target" >> "$index/$task" || return 1
+  done <<EOF
+$live
+EOF
+}
+
+fm_supervision_registry_recovery_cleanup() {
+  local live_index=$1
+  shift
+  rm -f -- "$@"
+  [ -z "$live_index" ] || find "$live_index" -depth -delete 2>/dev/null || true
 }
 
 fm_supervision_registry_recover_mode() {
   local state=$1 mode=$2 path lock candidates states endpoints meta task target backend route home verdict tmp spawn_gen rc
-  local endpoint owner_kind incarnation candidate_task surfaced filtered
+  local endpoint owner_kind incarnation candidate_task worktree surfaced filtered live_index=
   case "$mode" in legacy|bounded) ;; *) return 1 ;; esac
   path=$(fm_supervision_registry_generation_path "$state")
   [ -f "$path" ] && fm_supervision_registry_snapshot_valid "$path" && return 0
@@ -1123,6 +1155,16 @@ fm_supervision_registry_recover_mode() {
     || { rm -f -- "$candidates" "$states" "$endpoints"; fm_lock_release "$lock"; return 1; }
   filtered=$(umask 077; mktemp "$state/.active-supervision-filtered.XXXXXX") \
     || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced"; fm_lock_release "$lock"; return 1; }
+  if [ "$mode" = bounded ]; then
+    live_index=$(umask 077; mktemp -d "$state/.active-supervision-live.XXXXXX") \
+      || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
+    if ! fm_supervision_registry_bounded_live_index "$live_index/tasks"; then
+      fm_supervision_registry_recovery_cleanup \
+        "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"
+      fm_lock_release "$lock"
+      return 1
+    fi
+  fi
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     task=${meta##*/}; task=${task%.meta}
@@ -1136,26 +1178,27 @@ fm_supervision_registry_recover_mode() {
     candidate_task=$FM_SUPERVISION_FACT_TASK
     owner_kind=$FM_SUPERVISION_FACT_KIND
     spawn_gen=$FM_SUPERVISION_FACT_SPAWN
+    worktree=$FM_SUPERVISION_FACT_WORKTREE
     incarnation=$FM_SUPERVISION_FACT_INCARNATION
     [ "$mode" != bounded ] \
       || fm_supervision_registry_bounded_migration_candidate \
-        "$state" "$task" "$home" "$owner_kind" \
+        "$state" "$task" "$backend" "$target" "$home" "$worktree" "$owner_kind" "$live_index/tasks" \
       || continue
     [ "$endpoint" = present ] || continue
     fm_supervision_tsv_row \
       "$backend" "$target" "$route" "$home" "$candidate_task" "$spawn_gen" "$incarnation" \
-      >> "$candidates" || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
+      >> "$candidates" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
   done
   if ! awk -F '\t' 'BEGIN { OFS="\t" } !seen[$1 SUBSEP $3 SUBSEP $2]++ { print $1, $2, $3, $4 }' "$candidates" \
       | fm_backend_agent_state_batch > "$endpoints"; then
-    rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1
+    fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1
   fi
   { cat "$endpoints"; printf '__FM_REGISTRY_CANDIDATES__\n'; cat "$candidates"; } | awk -F '\t' '
     BEGIN { OFS="\t" }
     $0 == "__FM_REGISTRY_CANDIDATES__" { candidates=1; next }
     !candidates { verdict[$1 SUBSEP $4 SUBSEP $2]=$3; next }
     { key=$1 SUBSEP $3 SUBSEP $2; print $1, $2, verdict[key], $3, $4, $5, $6, $7 }
-  ' > "$states" || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
+  ' > "$states" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
   rc=0
   while IFS="$(printf '\t')" read -r backend target verdict route home task spawn_gen incarnation; do
     case "$verdict" in dead|missing) ;; *) continue ;; esac
@@ -1166,7 +1209,8 @@ fm_supervision_registry_recover_mode() {
     fi
   done < "$states"
   if [ "$rc" -ne 0 ]; then
-    rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"
+    fm_supervision_registry_recovery_cleanup \
+      "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"
     fm_lock_release "$lock"
     return 1
   fi
@@ -1179,12 +1223,12 @@ fm_supervision_registry_recover_mode() {
       if (($3 == "dead" || $3 == "missing") && key in surfaced) next
       print
     }
-  ' > "$filtered" || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
+  ' > "$filtered" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
   mv -f -- "$filtered" "$states" \
-    || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
+    || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
   tmp=$(umask 077; mktemp "$state/.active-supervision-generation.XXXXXX") \
-    || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced"; fm_lock_release "$lock"; return 1; }
-  fm_supervision_registry_snapshot_header "$state" > "$tmp" || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$tmp"; fm_lock_release "$lock"; return 1; }
+    || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced"; fm_lock_release "$lock"; return 1; }
+  fm_supervision_registry_snapshot_header "$state" > "$tmp" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$tmp"; fm_lock_release "$lock"; return 1; }
   rc=0
   while IFS="$(printf '\t')" read -r backend target verdict route home task spawn_gen incarnation; do
     meta="$state/$task.meta"
@@ -1193,11 +1237,13 @@ fm_supervision_registry_recover_mode() {
       || { rc=1; break; }
   done < "$states"
   if [ "$rc" -ne 0 ]; then
-    rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$tmp"
+    fm_supervision_registry_recovery_cleanup \
+      "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$tmp"
     fm_lock_release "$lock"
     return 1
   fi
-  rm -f -- "$candidates" "$states" "$endpoints" "$surfaced"
+  fm_supervision_registry_recovery_cleanup \
+    "$live_index" "$candidates" "$states" "$endpoints" "$surfaced"
   mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
 }

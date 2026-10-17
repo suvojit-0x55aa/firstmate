@@ -656,6 +656,48 @@ fm_backend_source() {  # <name>
   esac
 }
 
+fm_backend_list_live() {
+  local backend live sessions session target label
+  for backend in tmux herdr zellij cmux; do
+    fm_backend_source "$backend" || return 1
+    case "$backend" in
+      tmux)
+        live=$(fm_backend_tmux_list_live) || return 1
+        ;;
+      herdr)
+        live=
+        sessions=$(herdr session list --json 2>/dev/null \
+          | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          live="${live}${live:+$'\n'}$(fm_backend_herdr_list_live "$session")"
+        done <<EOF
+$sessions
+EOF
+        ;;
+      zellij)
+        live=
+        sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null)
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          live="${live}${live:+$'\n'}$(fm_backend_zellij_list_live "$session")"
+        done <<EOF
+$sessions
+EOF
+        ;;
+      cmux)
+        live=$(fm_backend_cmux_list_live) || return 1
+        ;;
+    esac
+    while IFS="$(printf '\t')" read -r target label; do
+      [ -n "$target" ] && [ -n "$label" ] || continue
+      printf '%s\t%s\t%s\n' "$backend" "$target" "$label" || return 1
+    done <<EOF
+$live
+EOF
+  done
+}
+
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
 # selector to a live session-provider target. Four forms, in order:
 #   target with ":"   used as-is (the escape hatch for a window/pane outside
