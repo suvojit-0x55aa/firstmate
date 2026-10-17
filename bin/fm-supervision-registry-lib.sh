@@ -1070,20 +1070,38 @@ fm_supervision_registry_meta_facts() { # <meta> <task>
     "$FM_SUPERVISION_FACT_WORKTREE" "$FM_SUPERVISION_FACT_INCARNATION"
 }
 
+fm_supervision_registry_secondmate_registered() {
+  local state=$1 task=$2 home=$3 data lib registered_home
+  if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
+    data=$FM_DATA_OVERRIDE
+  else
+    case "$state" in */state) data=${state%/state}/data ;; *) return 1 ;; esac
+  fi
+  lib=${BASH_SOURCE[0]%/*}/fm-secondmate-registry-lib.sh
+  [ -f "$lib" ] && [ ! -L "$lib" ] || return 1
+  if ! declare -F secondmate_registry_field >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    . "$lib" || return 1
+  fi
+  registered_home=$(secondmate_registry_field "$data/secondmates.md" "$task" home 2>/dev/null) || return 1
+  [ "$registered_home" = "$home" ]
+}
+
 fm_supervision_registry_bounded_migration_candidate() {
-  local state=$1 task=$2 worktree=$3 home=$4 owner_kind=$5 record
-  case "$worktree" in ''|-) ;; *) [ -d "$worktree" ] && return 0 ;; esac
-  case "$home" in ''|-) ;; *) [ -d "$home" ] && return 0 ;; esac
-  [ "$owner_kind" != secondmate ] || return 0
+  local state=$1 task=$2 home=$3 owner_kind=$4 record
+  if [ "$owner_kind" = secondmate ] \
+    && fm_supervision_registry_secondmate_registered "$state" "$task" "$home"; then
+    return 0
+  fi
   for record in "$state/$task.inbox"/*; do
     [ -f "$record" ] && [ ! -L "$record" ] && return 0
   done
   return 1
 }
 
-fm_supervision_registry_recover() {
-  local state=$1 mode=${2:-legacy} path lock candidates states endpoints meta task target backend route home verdict tmp spawn_gen rc
-  local endpoint owner_kind incarnation candidate_task worktree surfaced filtered
+fm_supervision_registry_recover_mode() {
+  local state=$1 mode=$2 path lock candidates states endpoints meta task target backend route home verdict tmp spawn_gen rc
+  local endpoint owner_kind incarnation candidate_task surfaced filtered
   case "$mode" in legacy|bounded) ;; *) return 1 ;; esac
   path=$(fm_supervision_registry_generation_path "$state")
   [ -f "$path" ] && fm_supervision_registry_snapshot_valid "$path" && return 0
@@ -1118,11 +1136,10 @@ fm_supervision_registry_recover() {
     candidate_task=$FM_SUPERVISION_FACT_TASK
     owner_kind=$FM_SUPERVISION_FACT_KIND
     spawn_gen=$FM_SUPERVISION_FACT_SPAWN
-    worktree=$FM_SUPERVISION_FACT_WORKTREE
     incarnation=$FM_SUPERVISION_FACT_INCARNATION
     [ "$mode" != bounded ] \
       || fm_supervision_registry_bounded_migration_candidate \
-        "$state" "$task" "$worktree" "$home" "$owner_kind" \
+        "$state" "$task" "$home" "$owner_kind" \
       || continue
     [ "$endpoint" = present ] || continue
     fm_supervision_tsv_row \
@@ -1183,6 +1200,16 @@ fm_supervision_registry_recover() {
   rm -f -- "$candidates" "$states" "$endpoints" "$surfaced"
   mv -f -- "$tmp" "$path" || { rm -f -- "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
+}
+
+fm_supervision_registry_recover() {
+  [ "$#" -eq 1 ] || return 1
+  fm_supervision_registry_recover_mode "$1" bounded
+}
+
+fm_supervision_registry_recover_legacy() {
+  [ "$#" -eq 1 ] || return 1
+  fm_supervision_registry_recover_mode "$1" legacy
 }
 
 fm_supervision_registry_inventory() {

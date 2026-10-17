@@ -1699,9 +1699,11 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
     fm_pending_reply_index_recover "$FM_STATE_OVERRIDE"
   ' _ "$ROOT/bin" || fail 'could not initialize the pending-reply hot-set index'
   mkdir -p "$dir/state/pending-replies"
+  mkdir -p "$dir/pooled-worktree"
   id=1
   while [ "$id" -le 10000 ]; do
-    printf 'window=archive-%s:dead\nspawn_gen=archive-%s\n' "$id" "$id" \
+    printf 'window=archive-%s:dead\nworktree=%s\nproject=%s\nspawn_gen=archive-%s\n' \
+      "$id" "$dir/pooled-worktree" "$dir" "$id" \
       > "$dir/state/archive-$id.meta"
     printf 'done: archived-%s\n' "$id" > "$dir/state/archive-$id.status"
     printf 'archived-%s\n' "$id" > "$dir/state/archive-$id.turn-ended"
@@ -1714,6 +1716,15 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
     "$dir/live-a-worktree" "$dir" > "$dir/state/live-a.meta"
   printf 'window=fleet:live-b\nworktree=%s\nproject=%s\nspawn_gen=live-b\n' \
     "$dir/live-b-worktree" "$dir" > "$dir/state/live-b.meta"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" bootstrap bootstrap-gen || exit 1
+    fm_supervision_registry_cancel_reservation "$FM_STATE_OVERRIDE" bootstrap bootstrap-gen || exit 1
+    fm_supervision_registry_register "$FM_STATE_OVERRIDE" live-a "$FM_STATE_OVERRIDE/live-a.meta" || exit 1
+    fm_supervision_registry_register "$FM_STATE_OVERRIDE" live-b "$FM_STATE_OVERRIDE/live-b.meta"
+  ' _ "$ROOT/bin" || fail 'pre-Stop lifecycle mutation could not publish the bounded hot set'
   for id in $(seq 1 12); do
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/check-$id.check.sh"
     chmod 0700 "$dir/state/check-$id.check.sh"
@@ -4092,7 +4103,7 @@ test_active_supervision_registry_owns_lifecycle_inventory() {
       . "$1/fm-wake-lib.sh"
       . "$1/fm-backend.sh"
       . "$1/fm-supervision-registry-lib.sh"
-      fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
+      fm_supervision_registry_recover_legacy "$FM_STATE_OVERRIDE"
       fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
     ' _ "$ROOT/bin" > "$dir/recovered" || fail 'active registry recovery failed'
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
@@ -4158,7 +4169,7 @@ SH
       . "$1/fm-wake-lib.sh"
       . "$1/fm-backend.sh"
       . "$1/fm-supervision-registry-lib.sh"
-      fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+      fm_supervision_registry_recover_legacy "$FM_STATE_OVERRIDE" || exit 1
       fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
     ' _ "$ROOT/bin" > "$dir/recovered" || fail 'large surfaced-death registry recovery failed'
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
@@ -4178,7 +4189,7 @@ test_registry_pending_snapshot_is_immediately_authoritative() {
       . "$1/fm-wake-lib.sh"
       . "$1/fm-backend.sh"
       . "$1/fm-supervision-registry-lib.sh"
-      fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
+      fm_supervision_registry_recover_legacy "$FM_STATE_OVERRIDE"
     ' _ "$ROOT/bin" || fail 'could not initialize registry snapshot'
   before=$(cut -f2 "$dir/state/.active-supervision-generation")
   printf '%s\n' 'window=fleet:pending' 'spawn_gen=pending-a' > "$dir/state/pending.meta"
@@ -4210,7 +4221,7 @@ test_registry_snapshot_index_is_generation_bound() {
       . "$1/fm-wake-lib.sh"
       . "$1/fm-backend.sh"
       . "$1/fm-supervision-registry-lib.sh"
-      fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+      fm_supervision_registry_recover_legacy "$FM_STATE_OVERRIDE" || exit 1
     ' _ "$ROOT/bin" || fail 'large active registry fixture could not be recovered'
   generation=$(head -1 "$dir/state/.active-supervision-generation" | cut -f2)
   index=$(mktemp -d "$dir/state/.active-supervision-index.test.XXXXXX")
@@ -5311,8 +5322,8 @@ test_active_only_pending_replies_exclude_archive() {
       corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" "$task" report) || exit 1
       fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" 1000 || exit 1
     done
-    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
-    fm_supervision_registry_retire "$FM_STATE_OVERRIDE" archived || exit 1
+    fm_supervision_registry_register "$FM_STATE_OVERRIDE" active "$FM_STATE_OVERRIDE/active.meta" || exit 1
+    fm_supervision_registry_register "$FM_STATE_OVERRIDE" dead-active "$FM_STATE_OVERRIDE/dead-active.meta" || exit 1
     fm_pending_reply_backend_observation() {
       printf "%s\n" "$2" >> "$FM_HOME/observations"
       printf idle

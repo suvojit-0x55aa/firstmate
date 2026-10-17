@@ -1717,7 +1717,7 @@ WATCHER_PID=${BASHPID:-$$}
 CODEX_CHECK_BATCH_SEQUENCE=1
 CODEX_CHECK_BATCH_AUTHORIZED=1
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
-  fm_supervision_registry_recover "$STATE" bounded || exit 1
+  fm_supervision_registry_recover "$STATE" || exit 1
   if [ -z "${FM_CODEX_REGISTRY_GENERATION:-}" ]; then
     FM_CODEX_REGISTRY_GENERATION=$(fm_supervision_registry_generation "$STATE") || exit 1
   else

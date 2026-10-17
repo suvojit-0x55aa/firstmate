@@ -223,7 +223,7 @@ def admission_cycle_work(probe_deadline=None):
 . "$1/fm-task-inbox-lib.sh" || exit 1
 . "$1/fm-pr-lib.sh" || exit 1
 set -o pipefail
-fm_supervision_registry_recover "$FM_STATE_OVERRIDE" bounded || exit 1
+fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
 generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 printf 'generation\t%s\n' "$generation"
 registered_checks=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
