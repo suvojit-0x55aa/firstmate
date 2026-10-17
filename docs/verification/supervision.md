@@ -462,7 +462,7 @@ ok - native Codex Stop delivered quiet renewal and post-turn event, then cancell
 
 The two `handled` entries come from real model tool calls following native Stop feedback, not from hook output alone.
 The guard checks the watcher's process identity after Escape and refuses an extra continuation or a resurrected watcher.
-Portable ownership and cancellation coverage lives in `tests/fm-codex-stop.test.sh`; generated instruction and dispatch contracts are exercised by `tests/fm-supervision-instructions.test.sh` and `tests/fm-turnend-guard.test.sh`.
+Portable ownership and cancellation coverage lives in `tests/fm-codex-stop-suite.sh`, run through six focused `tests/fm-codex-stop-*.test.sh` entry points; generated instruction and dispatch contracts are exercised by `tests/fm-supervision-instructions.test.sh` and `tests/fm-turnend-guard.test.sh`.
 `tests/fm-watch-checkpoint.test.sh` retains the foreground helper controls and exercises two native actionable successors with ordinary drain/ack and duplicate-owner refusal.
 The current continuation procedure is owned by [`../supervision-protocols/codex.md`](../supervision-protocols/codex.md).
 
@@ -474,7 +474,7 @@ The unchanged Claude boundary and generated harness instructions also passed the
 The same date's focused wake-drain regression used one active task beside 100 retained status logs and proved that only the active status was folded, while a separately queued status signal remained readable after lifecycle retirement.
 
 ```sh
-bash tests/fm-codex-stop.test.sh
+for test in tests/fm-codex-stop-{admission,checks,cycle,inventory,ownership,signals}.test.sh; do "$test" || exit; done
 bash tests/fm-claude-stop-autoarm.test.sh
 bash tests/fm-turnend-guard.test.sh
 bash tests/fm-supervision-instructions.test.sh

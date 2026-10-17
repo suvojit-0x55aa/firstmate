@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Public Codex Stop behavior with real singleton watcher and process ownership.
+# Shared public Codex Stop cases with real singleton watcher and process ownership.
 # shellcheck disable=SC2016 # variables expand inside the fake harness child
 set -u
 # shellcheck source=tests/wake-helpers.sh

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Bounded Codex Stop watcher-cycle and attachment cases.
+FM_CODEX_STOP_FOCUSED_CASES='
+test_stalled_watcher_cannot_complete_quiet_window
+test_late_stopped_watcher_cannot_complete_quiet_window
+test_complete_watcher_cycle_can_deliver_actionable_wake
+test_attached_arm_uses_complete_cycle_grace
+test_attached_arm_rejects_unproven_bounded_mode
+test_attached_arm_rejects_mismatched_bounded_runtime
+test_sequential_checks_fit_complete_cycle_bound
+test_sequential_task_classification_fits_complete_cycle_bound
+'
+export FM_CODEX_STOP_FOCUSED_CASES
+. "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"

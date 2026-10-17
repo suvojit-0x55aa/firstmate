@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Bounded Codex Stop admission and failure-episode cases.
+FM_CODEX_STOP_FOCUSED_CASES='
+test_initial_fork_failure_blocks_stop
+test_python_bootstrap_failure_fails_closed
+test_python_launch_failure_fails_closed
+test_public_stop_dispatches_pending_queue
+test_quiet_renewal
+test_wedged_arm_cannot_report_quiet_renewal
+test_late_watcher_gets_full_quiet_window
+test_admission_time_preserves_arm_confirmation
+test_recurring_probe_honors_transport_deadline
+test_idle_probe_wins_at_terminal_reserve
+test_registry_turnover_refreshes_budget_refusal
+test_identity_and_cleanup_phases_preserve_transport_reserve
+test_registry_retirement_preserves_conclusive_generation_change
+test_persistent_identity_timeout_fails_closed
+test_terminal_error_generation_tristate
+test_current_generation_failure_episode_is_bounded
+'
+export FM_CODEX_STOP_FOCUSED_CASES
+. "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"
