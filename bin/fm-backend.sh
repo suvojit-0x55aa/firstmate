@@ -657,12 +657,32 @@ fm_backend_source() {  # <name>
 }
 
 fm_backend_list_live() {
-  local requested=${1-tmux herdr zellij cmux} backend live sessions session target label part raw status
-  for backend in $requested; do
-    case "$backend" in tmux|herdr|zellij|cmux) ;; *) return 1 ;; esac
+  local requested=${1-$'tmux\t-\nherdr\tdefault\nzellij\tdefault\ncmux\t-'}
+  local backend requested_backend scope extra scopes live sessions session target label part raw status
+  [ -n "$requested" ] || return 0
+  while IFS=$'\t' read -r requested_backend scope extra; do
+    [ -n "$requested_backend" ] && [ -n "$scope" ] && [ -z "$extra" ] || return 1
+    case "$requested_backend:$scope" in
+      tmux:-|cmux:-|herdr:?*|zellij:?*) ;;
+      *) return 1 ;;
+    esac
+    case "$scope" in *[$'\t\r\n']*) return 1 ;; esac
+  done <<EOF
+$requested
+EOF
+  for backend in tmux herdr zellij cmux; do
+    scopes=
+    while IFS=$'\t' read -r requested_backend scope extra; do
+      [ "$requested_backend" = "$backend" ] || continue
+      scopes="${scopes}${scopes:+$'\n'}$scope"
+    done <<EOF
+$requested
+EOF
+    [ -n "$scopes" ] || continue
     fm_backend_source "$backend" || return 1
     case "$backend" in
       tmux)
+        [ "$scopes" = - ] || return 1
         live=$(fm_backend_tmux_list_live) || return 1
         ;;
       herdr)
@@ -677,10 +697,16 @@ fm_backend_list_live() {
         while IFS= read -r session; do
           [ -n "$session" ] || continue
           case "$session" in *[$'\t\r\n']*) return 1 ;; esac
+        done <<EOF
+$sessions
+EOF
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          case $'\n'"$sessions"$'\n' in *$'\n'"$session"$'\n'*) ;; *) continue ;; esac
           part=$(fm_backend_herdr_list_live "$session") || return 1
           [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
         done <<EOF
-$sessions
+$scopes
 EOF
         ;;
       zellij)
@@ -697,13 +723,20 @@ EOF
         while IFS= read -r session; do
           [ -n "$session" ] || continue
           case "$session" in *[$'\t\r']*) return 1 ;; esac
-          part=$(fm_backend_zellij_list_live "$session") || return 1
-          [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
         done <<EOF
 $sessions
 EOF
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          case $'\n'"$sessions"$'\n' in *$'\n'"$session"$'\n'*) ;; *) continue ;; esac
+          part=$(fm_backend_zellij_list_live "$session") || return 1
+          [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
+        done <<EOF
+$scopes
+EOF
         ;;
       cmux)
+        [ "$scopes" = - ] || return 1
         live=$(fm_backend_cmux_list_live) || return 1
         ;;
     esac

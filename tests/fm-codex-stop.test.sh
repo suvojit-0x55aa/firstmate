@@ -2040,6 +2040,135 @@ SH
   pass 'Herdr bootstrap uses bounded session-wide bulk inventory'
 }
 
+test_bootstrap_inventory_scopes_backend_sessions() {
+  local backend mode dir target inventory rc
+  for backend in herdr zellij; do
+    for mode in complete incomplete; do
+      dir=$(fixture "bootstrap-$backend-scoped-sessions-$mode")
+      mkdir -p "$dir/fakebin"
+      case "$backend" in
+        herdr) target=bootstrap-target:pane-live ;;
+        zellij) target=bootstrap-target:8 ;;
+      esac
+      printf '%s\n' \
+        "window=$target" "worktree=$dir/worktree" "project=$dir" \
+        'kind=ship' 'harness=codex' "backend=$backend" 'spawn_gen=owner-1' \
+        > "$dir/state/live-owner.meta"
+      case "$backend" in
+        herdr)
+          cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+session=
+previous=
+for argument in "$@"; do
+  [ "$previous" = --session ] && session=$argument
+  previous=$argument
+done
+case "${1:-}:${2:-}" in
+  session:list)
+    printf '%s' '{"sessions":['
+    separator=
+    n=1
+    while [ "$n" -le 100 ]; do
+      printf '%s{"name":"unrelated-%s","running":true}' "$separator" "$n"
+      separator=,
+      n=$((n + 1))
+    done
+    printf '%s\n' ',{"name":"bootstrap-target","running":true}]}'
+    ;;
+  tab:list)
+    if [ "$session" != bootstrap-target ]; then
+      printf '%s\n' "$session" >> "$FM_TEST_UNRELATED_SESSION_LOG"
+      sleep 10
+      exit 71
+    fi
+    [ "$FM_TEST_SCOPED_SESSION_MODE" = complete ] || exit 71
+    printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-live","label":"fm-live-owner","workspace_id":"w-live"}]}}'
+    ;;
+  pane:list)
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-live","tab_id":"tab-live","agent_status":"working"}]}}'
+    ;;
+  *) exit 72 ;;
+esac
+SH
+          chmod 0700 "$dir/fakebin/herdr"
+          ;;
+        zellij)
+          cat > "$dir/fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-sessions ]; then
+  n=1
+  while [ "$n" -le 100 ]; do
+    printf 'unrelated-%s\n' "$n"
+    n=$((n + 1))
+  done
+  printf '%s\n' bootstrap-target
+  exit 0
+fi
+session=
+previous=
+for argument in "$@"; do
+  [ "$previous" = --session ] && session=$argument
+  previous=$argument
+done
+if [ "$session" != bootstrap-target ]; then
+  printf '%s\n' "$session" >> "$FM_TEST_UNRELATED_SESSION_LOG"
+  sleep 10
+  exit 71
+fi
+case "$*" in
+  *" action list-tabs --json"*)
+    [ "$FM_TEST_SCOPED_SESSION_MODE" = complete ] || { printf '%s\n' '{invalid'; exit 0; }
+    printf '%s\n' '[{"tab_id":7,"name":"fm-live-owner"}]'
+    ;;
+  *" action list-panes --json"*)
+    printf '%s\n' '[{"tab_id":7,"id":8,"is_plugin":false}]'
+    ;;
+  *) exit 72 ;;
+esac
+SH
+          chmod 0700 "$dir/fakebin/zellij"
+          ;;
+      esac
+      set +e
+      inventory=$(perl -e '
+        my $timeout=shift @ARGV;
+        my $pid=fork;
+        die unless defined $pid;
+        if (!$pid) { exec @ARGV }
+        local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 };
+        alarm $timeout;
+        waitpid $pid, 0;
+        alarm 0;
+        exit($? >> 8)
+      ' 4 env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_STATE_OVERRIDE="$dir/state" FM_TEST_SCOPED_SESSION_MODE="$mode" \
+        FM_TEST_UNRELATED_SESSION_LOG="$dir/unrelated-sessions" bash -c '
+          . "$1/fm-wake-lib.sh"
+          . "$1/fm-backend.sh"
+          . "$1/fm-supervision-registry-lib.sh"
+          fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+          fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+        ' _ "$ROOT/bin")
+      rc=$?
+      set -e
+      [ "$rc" -ne 124 ] || fail "$backend bootstrap read unrelated sessions until timeout"
+      [ ! -e "$dir/unrelated-sessions" ] \
+        || fail "$backend bootstrap inventoried unrelated sessions: $(cat "$dir/unrelated-sessions")"
+      if [ "$mode" = complete ]; then
+        [ "$rc" -eq 0 ] || fail "$backend scoped bootstrap inventory failed: $rc"
+        [ "$inventory" = "$dir/state/live-owner.meta" ] \
+          || fail "$backend scoped bootstrap lost its live owner: $inventory"
+      else
+        [ "$rc" -ne 0 ] || fail "$backend incomplete scoped inventory published a snapshot"
+        [ ! -e "$dir/state/.active-supervision-generation" ] \
+          || fail "$backend incomplete scoped inventory became authoritative"
+      fi
+    done
+  done
+  pass 'bootstrap inventory ignores unrelated backend sessions'
+}
+
 test_zellij_scoped_title_alias_bootstrap_is_conservative() {
   local mode dir home_tag legacy_task title inventory rc
   for mode in scoped legacy ambiguous; do
@@ -5811,6 +5940,7 @@ test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
 test_herdr_bulk_snapshot_bootstrap_is_conservative
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts
 test_herdr_bootstrap_uses_bounded_bulk_inventory
+test_bootstrap_inventory_scopes_backend_sessions
 test_zellij_scoped_title_alias_bootstrap_is_conservative
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision

@@ -1109,14 +1109,15 @@ fm_supervision_registry_bounded_migration_candidate() {
   return 1
 }
 
-fm_supervision_registry_bounded_backends() {
-  local state=$1 meta task backend route endpoint owner_kind seen=
+fm_supervision_registry_bounded_scopes() {
+  local state=$1 meta task backend target route endpoint owner_kind scope row seen=$'\n'
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     task=${meta##*/}; task=${task%.meta}
     fm_supervision_registry_task_valid "$task" || continue
     fm_supervision_registry_meta_load "$meta" "$task" || continue
     backend=$FM_SUPERVISION_FACT_BACKEND
+    target=$FM_SUPERVISION_FACT_TARGET
     route=$FM_SUPERVISION_FACT_ROUTE
     endpoint=$FM_SUPERVISION_FACT_ENDPOINT
     owner_kind=$FM_SUPERVISION_FACT_KIND
@@ -1125,9 +1126,16 @@ fm_supervision_registry_bounded_backends() {
       ship:tmux|ship:herdr|ship:zellij|ship:cmux|scout:tmux|scout:herdr|scout:zellij|scout:cmux) ;;
       *) continue ;;
     esac
-    case " $seen " in *" $backend "*) continue ;; esac
-    seen="$seen${seen:+ }$backend"
-    printf '%s\n' "$backend" || return 1
+    case "$backend" in
+      tmux|cmux) scope=- ;;
+      herdr|zellij)
+        case "$target" in ?*:?*) scope=${target%%:*} ;; *) continue ;; esac
+        ;;
+    esac
+    row="$backend"$'\t'"$scope"
+    case "$seen" in *$'\n'"$row"$'\n'*) continue ;; esac
+    seen="$seen$row"$'\n'
+    printf '%s\n' "$row" || return 1
   done
 }
 
@@ -1159,10 +1167,10 @@ fm_supervision_registry_zellij_live_task() {
 }
 
 fm_supervision_registry_bounded_live_index() {
-  local state=$1 index=$2 backend target label task live backends rc
+  local state=$1 index=$2 backend target label task live scopes rc
   mkdir "$index" || return 1
-  backends=$(fm_supervision_registry_bounded_backends "$state") || return 1
-  live=$(fm_backend_list_live "$backends") || return 1
+  scopes=$(fm_supervision_registry_bounded_scopes "$state") || return 1
+  live=$(fm_backend_list_live "$scopes") || return 1
   while IFS="$(printf '\t')" read -r backend target label; do
     fm_backend_is_known "$backend" || continue
     case "$target" in ''|*[$'\t\r\n']*) continue ;; esac
