@@ -1244,14 +1244,13 @@ fm_supervision_registry_normalize_live_target() {
 }
 
 fm_supervision_registry_bounded_scopes() {
-  local state=$1 meta task backend target route endpoint owner_kind scope row seen=$'\n'
+  local state=$1 meta task backend route endpoint owner_kind scope row seen=$'\n'
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     task=${meta##*/}; task=${task%.meta}
     fm_supervision_registry_task_valid "$task" || continue
     fm_supervision_registry_meta_load "$meta" "$task" || continue
     backend=$FM_SUPERVISION_FACT_BACKEND
-    target=$FM_SUPERVISION_FACT_TARGET
     route=$FM_SUPERVISION_FACT_ROUTE
     endpoint=$FM_SUPERVISION_FACT_ENDPOINT
     owner_kind=$FM_SUPERVISION_FACT_KIND
@@ -1260,15 +1259,20 @@ fm_supervision_registry_bounded_scopes() {
       ship:tmux|ship:herdr|ship:zellij|ship:cmux|scout:tmux|scout:herdr|scout:zellij|scout:cmux) ;;
       *) continue ;;
     esac
+    case "$seen" in *$'\n'"$backend"$'\n'*) continue ;; esac
+    seen="$seen$backend"$'\n'
     case "$backend" in
       tmux|cmux) scope=- ;;
-      herdr|zellij)
-        case "$target" in ?*:?*) scope=${target%%:*} ;; *) continue ;; esac
+      herdr)
+        fm_backend_source herdr || return 1
+        scope=$(fm_backend_herdr_session) || return 1
+        ;;
+      zellij)
+        fm_backend_source zellij || return 1
+        scope=$(fm_backend_zellij_session) || return 1
         ;;
     esac
     row="$backend"$'\t'"$scope"
-    case "$seen" in *$'\n'"$row"$'\n'*) continue ;; esac
-    seen="$seen$row"$'\n'
     printf '%s\n' "$row" || return 1
   done
 }

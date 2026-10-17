@@ -1864,17 +1864,19 @@ SH
 }
 
 test_herdr_bulk_snapshot_bootstrap_is_conservative() {
-  local mode dir target inventory rc
+  local mode dir target workspace tab inventory rc
   for mode in later-live partial; do
     dir=$(fixture "herdr-duplicate-workspace-$mode")
     mkdir -p "$dir/fakebin"
     case "$mode" in
-      later-live) target=pane-live ;;
-      partial) target=pane-first ;;
+      later-live) target=pane-live; workspace=w2; tab=tab-live ;;
+      partial) target=pane-first; workspace=w1; tab=tab-first ;;
     esac
     printf '%s\n' \
       "window=fmtest:$target" "worktree=$dir/worktree" "project=$dir" \
-      'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=owner-1' \
+      'kind=ship' 'harness=codex' 'backend=herdr' 'herdr_session=fmtest' \
+      "herdr_workspace_id=$workspace" "herdr_tab_id=$tab" "herdr_pane_id=$target" \
+      'spawn_gen=owner-1' \
       > "$dir/state/live-owner.meta"
     cat > "$dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -1905,6 +1907,7 @@ SH
     chmod 0700 "$dir/fakebin/herdr"
     set +e
     inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      HERDR_SESSION=fmtest \
       FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_DUPLICATE_MODE="$mode" bash -c '
         . "$1/fm-wake-lib.sh"
         . "$1/fm-backend.sh"
@@ -1936,11 +1939,15 @@ test_no_snapshot_bootstrap_covers_legacy_backend_layouts() {
       herdr)
         printf '%s\n' \
           'window=fmtest:pane-launcher-worker' "worktree=$dir/launcher-worktree" "project=$dir" \
-          'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=launcher-1' \
+          'kind=ship' 'harness=codex' 'backend=herdr' 'herdr_session=fmtest' \
+          'herdr_workspace_id=launcher' 'herdr_tab_id=tab-launcher' \
+          'herdr_pane_id=pane-launcher-worker' 'spawn_gen=launcher-1' \
           > "$dir/state/herdr-launcher.meta"
         printf '%s\n' \
           'window=fmtest:pane-presentation' "worktree=$dir/presentation-worktree" "project=$dir" \
-          'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=presentation-1' \
+          'kind=ship' 'harness=codex' 'backend=herdr' 'herdr_session=fmtest' \
+          'herdr_workspace_id=presentation' 'herdr_tab_id=tab-presentation' \
+          'herdr_pane_id=pane-presentation' 'spawn_gen=presentation-1' \
           > "$dir/state/herdr-presentation.meta"
         cat > "$dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -1975,6 +1982,7 @@ SH
         ;;
     esac
     inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      HERDR_SESSION=fmtest FM_ZELLIJ_SESSION=zsession \
       FM_STATE_OVERRIDE="$dir/state" bash -c '
         . "$1/fm-wake-lib.sh"
         . "$1/fm-backend.sh"
@@ -1997,7 +2005,9 @@ test_herdr_bootstrap_uses_bounded_bulk_inventory() {
   mkdir -p "$dir/fakebin"
   printf '%s\n' \
     'window=fmtest:pane-live' "worktree=$dir/worktree" "project=$dir" \
-    'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=owner-1' \
+    'kind=ship' 'harness=codex' 'backend=herdr' 'herdr_session=fmtest' \
+    'herdr_workspace_id=w-live' 'herdr_tab_id=tab-live' 'herdr_pane_id=pane-live' \
+    'spawn_gen=owner-1' \
     > "$dir/state/live-owner.meta"
   cat > "$dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -2025,6 +2035,7 @@ SH
     alarm 0;
     exit($? >> 8)
   ' 4 env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    HERDR_SESSION=fmtest \
     FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_WORKSPACE_SCAN="$dir/workspace-scan" \
     bash -c '
       . "$1/fm-wake-lib.sh"
@@ -2045,8 +2056,8 @@ SH
   pass 'Herdr bootstrap uses bounded session-wide bulk inventory'
 }
 
-test_bootstrap_inventory_scopes_backend_sessions() {
-  local backend mode dir target inventory rc
+test_bootstrap_inventory_uses_configured_backend_sessions() {
+  local backend mode dir target inventory rc id session_calls
   for backend in herdr zellij; do
     for mode in complete incomplete; do
       dir=$(fixture "bootstrap-$backend-scoped-sessions-$mode")
@@ -2059,6 +2070,11 @@ test_bootstrap_inventory_scopes_backend_sessions() {
         "window=$target" "worktree=$dir/worktree" "project=$dir" \
         'kind=ship' 'harness=codex' "backend=$backend" 'spawn_gen=owner-1' \
         > "$dir/state/live-owner.meta"
+      if [ "$backend" = herdr ]; then
+        printf '%s\n' 'herdr_session=bootstrap-target' 'herdr_workspace_id=w-live' \
+          'herdr_tab_id=tab-live' 'herdr_pane_id=pane-live' \
+          >> "$dir/state/live-owner.meta"
+      fi
       case "$backend" in
         herdr)
           cat > "$dir/fakebin/herdr" <<'SH'
@@ -2155,6 +2171,7 @@ SH
         alarm 0;
         exit($? >> 8)
       ' 4 env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+        HERDR_SESSION=bootstrap-target FM_ZELLIJ_SESSION=bootstrap-target \
         FM_STATE_OVERRIDE="$dir/state" FM_TEST_SCOPED_SESSION_MODE="$mode" \
         FM_TEST_UNRELATED_SESSION_LOG="$dir/unrelated-sessions" bash -c '
           . "$1/fm-wake-lib.sh"
@@ -2179,7 +2196,86 @@ SH
       fi
     done
   done
-  pass 'bootstrap inventory ignores unrelated backend sessions'
+  dir=$(fixture bootstrap-historical-running-sessions)
+  mkdir -p "$dir/fakebin"
+  id=1
+  while [ "$id" -le 5000 ]; do
+    printf '%s\n' \
+      "window=stale-herdr-$id:pane" "worktree=$dir/herdr-$id" "project=$dir" \
+      'kind=ship' 'harness=codex' 'backend=herdr' "spawn_gen=herdr-$id" \
+      > "$dir/state/herdr-$id.meta"
+    printf '%s\n' \
+      "window=stale-zellij-$id:8" "worktree=$dir/zellij-$id" "project=$dir" \
+      'kind=scout' 'harness=codex' 'backend=zellij' "spawn_gen=zellij-$id" \
+      > "$dir/state/zellij-$id.meta"
+    id=$((id + 1))
+  done
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}:${2:-}" = session:list ]; then
+  printf '%s' '{"sessions":['
+  separator=
+  n=1
+  while [ "$n" -le 5000 ]; do
+    printf '%s{"name":"stale-herdr-%s","running":true}' "$separator" "$n"
+    separator=,
+    n=$((n + 1))
+  done
+  printf '%s\n' ',{"name":"current-herdr","running":true}]}'
+  exit 0
+fi
+session=
+previous=
+for argument in "$@"; do
+  [ "$previous" = --session ] && session=$argument
+  previous=$argument
+done
+printf 'herdr\t%s\n' "$session" >> "$FM_TEST_SESSION_LOG"
+[ "$session" = current-herdr ] || exit 71
+case "${1:-}:${2:-}" in
+  tab:list) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+  *) exit 72 ;;
+esac
+SH
+  cat > "$dir/fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-sessions ]; then
+  n=1
+  while [ "$n" -le 5000 ]; do
+    printf 'stale-zellij-%s\n' "$n"
+    n=$((n + 1))
+  done
+  printf '%s\n' current-zellij
+  exit 0
+fi
+session=
+previous=
+for argument in "$@"; do
+  [ "$previous" = --session ] && session=$argument
+  previous=$argument
+done
+printf 'zellij\t%s\n' "$session" >> "$FM_TEST_SESSION_LOG"
+[ "$session" = current-zellij ] || exit 71
+case "$*" in
+  *" action list-tabs --json"*) printf '%s\n' '[]' ;;
+  *) exit 72 ;;
+esac
+SH
+  chmod 0700 "$dir/fakebin/herdr" "$dir/fakebin/zellij"
+  inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    HERDR_SESSION=current-herdr FM_ZELLIJ_SESSION=current-zellij \
+    FM_STATE_OVERRIDE="$dir/state" FM_TEST_SESSION_LOG="$dir/session-inventory" bash -c '
+      . "$1/fm-wake-lib.sh"
+      . "$1/fm-backend.sh"
+      . "$1/fm-supervision-registry-lib.sh"
+      fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+      fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+    ' _ "$ROOT/bin") || fail 'historical running sessions blocked bounded bootstrap'
+  [ -z "$inventory" ] || fail "historical running sessions entered active supervision: $inventory"
+  session_calls=$(LC_ALL=C sort -u "$dir/session-inventory")
+  [ "$session_calls" = $'herdr\tcurrent-herdr\nzellij\tcurrent-zellij' ] \
+    || fail "historical running sessions multiplied backend inventory: $session_calls"
+  pass 'bootstrap inventory uses configured backend sessions'
 }
 
 test_bounded_bootstrap_rebinds_unique_live_targets() {
@@ -2591,6 +2687,7 @@ SH
     chmod 0700 "$dir/fakebin/zellij"
     set +e
     inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_ZELLIJ_SESSION=zsession \
       FM_STATE_OVERRIDE="$dir/state" FM_TEST_ZELLIJ_ALIAS_TITLE="$title" bash -c '
         . "$1/fm-wake-lib.sh"
         . "$1/fm-backend.sh"
@@ -6320,7 +6417,7 @@ test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
 test_herdr_bulk_snapshot_bootstrap_is_conservative
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts
 test_herdr_bootstrap_uses_bounded_bulk_inventory
-test_bootstrap_inventory_scopes_backend_sessions
+test_bootstrap_inventory_uses_configured_backend_sessions
 test_bounded_bootstrap_rebinds_unique_live_targets
 test_zellij_scoped_title_alias_bootstrap_is_conservative
 test_bounded_event_wait_uses_active_registry
