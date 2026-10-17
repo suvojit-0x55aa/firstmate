@@ -2207,8 +2207,19 @@ test_bounded_bootstrap_rebinds_unique_live_targets() {
     cat > "$dir/fakebin/cmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
+  list-windows:*)
+    printf '%s\n' '[{"id":"11111111-6666-6666-6666-666666666666"},{"id":"22222222-7777-7777-7777-777777777777"}]'
+    ;;
   workspace:list)
-    if [ "$FM_TEST_CMUX_REMAP_MODE" = unique ]; then
+    window=
+    previous=
+    for argument in "$@"; do
+      [ "$previous" = --window ] && window=$argument
+      previous=$argument
+    done
+    if [ -z "$window" ] || [ "$window" = 11111111-6666-6666-6666-666666666666 ]; then
+      printf '%s\n' '{"workspaces":[{"id":"99999999-8888-8888-8888-888888888888","title":"zsh"}]}'
+    elif [ "$FM_TEST_CMUX_REMAP_MODE" = unique ]; then
       printf '{"workspaces":[{"id":"%s","title":"%s"}]}\n' \
         "$FM_TEST_CMUX_WORKSPACE" "$FM_TEST_CMUX_TITLE"
     else
@@ -2435,6 +2446,9 @@ SH
   cat > "$dir/fakebin/cmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
+  list-windows:*)
+    printf '%s\n' '[{"id":"11111111-6666-6666-6666-666666666666"}]'
+    ;;
   workspace:list)
     printf '{"workspaces":[{"id":"%s","title":"%s"}]}\n' \
       "$FM_TEST_CMUX_WORKSPACE" "$FM_TEST_CMUX_TITLE"

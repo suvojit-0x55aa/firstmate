@@ -1066,24 +1066,88 @@ test_kill_recovers_stale_target_by_label() {
 # --- list_live: label-based orphan discovery ---------------------------------
 
 test_list_live_filters_by_title_prefix() {
-  local dir fb out title other_title other_root
+  local dir fb out title other_title other_root status
   dir="$TMP_ROOT/list-live"; mkdir -p "$dir/responses"
   other_root="$dir/other-root"; mkdir -p "$other_root"
   title=$(cmux_expected_scoped_title fm-task1)
   other_title=$(cmux_expected_scoped_title fm-task2 "$ROOT" "$other_root")
-  # 1: workspace list --json --id-format uuids -> one in-home task, two unrelated
-  cmux_workspace_list_response "$dir" 1 \
-    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
-    "dddddddd-8888-8888-8888-888888888888" "$other_title" \
-    "cccccccc-9999-9999-9999-999999999999" "zsh"
-  # 2: list-panes for this home's task1 workspace
-  cmux_panes_response "$dir" 2 "bbbbbbbb-1111-1111-1111-111111111111"
-  fb=$(make_cmux_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/cmux" <<'SH'
+#!/usr/bin/env bash
+{
+  printf 'CMUX_SOCKET_PASSWORD=%s' "${CMUX_SOCKET_PASSWORD:-}"
+  for argument in "$@"; do printf '\x1f%s' "$argument"; done
+  printf '\n'
+} >> "$FM_CMUX_LOG"
+case "${1:-}:${2:-}" in
+  list-windows:*)
+    printf '%s\n' '[{"id":"e1111111-0000-0000-0000-000000000000","workspace_count":2},{"id":"e2222222-0000-0000-0000-000000000000","workspace_count":1}]'
+    ;;
+  workspace:list)
+    window=
+    previous=
+    for argument in "$@"; do
+      [ "$previous" = --window ] && window=$argument
+      previous=$argument
+    done
+    case "$window" in
+      ''|e1111111-0000-0000-0000-000000000000)
+        printf '{"workspaces":[{"id":"dddddddd-8888-8888-8888-888888888888","title":"%s"},{"id":"cccccccc-9999-9999-9999-999999999999","title":"zsh"}]}\n' "$FM_CMUX_OTHER_TITLE"
+        ;;
+      e2222222-0000-0000-0000-000000000000)
+        printf '{"workspaces":[{"id":"aaaaaaaa-0000-0000-0000-000000000000","title":"%s"}]}\n' "$FM_CMUX_TITLE"
+        ;;
+      *) exit 71 ;;
+    esac
+    ;;
+  list-panes:*)
+    printf '%s\n' '{"panes":[{"selected_surface_id":"bbbbbbbb-1111-1111-1111-111111111111","surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]}]}'
+    ;;
+  *) exit 72 ;;
+esac
+SH
+  chmod 0700 "$dir/fakebin/cmux"
+  fb="$dir/fakebin"
+  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_TITLE="$title" FM_CMUX_OTHER_TITLE="$other_title" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT" )
   [ "$out" = $'aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111\tfm-task1' ] \
-    || fail "list_live should list only the in-home task workspace with its plain label and surface id, got '$out'"
-  pass "fm_backend_cmux_list_live: lists only this home's scoped task workspaces using plain fm-<id> labels"
+    || fail "list_live should retain the in-home task from a non-current window, got '$out'"
+  cmux_assert_call_order "$dir/log" \
+    $'\x1f''list-windows' \
+    $'\x1f''workspace'$'\x1f''list'$'\x1f''--json'$'\x1f''--id-format'$'\x1f''uuids'$'\x1f''--window'$'\x1f''e1111111-0000-0000-0000-000000000000' \
+    "list_live did not enumerate windows before reading the first scoped workspace inventory"
+  assert_contains "$(cat "$dir/log")" \
+    $'\x1f''workspace'$'\x1f''list'$'\x1f''--json'$'\x1f''--id-format'$'\x1f''uuids'$'\x1f''--window'$'\x1f''e2222222-0000-0000-0000-000000000000' \
+    "list_live did not inspect the non-current window"
+
+  dir="$TMP_ROOT/list-live-incomplete"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 \
+    "e1111111-0000-0000-0000-000000000000" 1 \
+    "e2222222-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 \
+    "cccccccc-9999-9999-9999-999999999999" "zsh"
+  printf '1\n' > "$dir/responses/3.exit"
+  fb=$(make_cmux_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail 'list_live accepted an incomplete per-window inventory'
+
+  dir="$TMP_ROOT/list-live-malformed"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  printf '{"workspaces":"invalid"}\n' > "$dir/responses/2.out"
+  fb=$(make_cmux_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail 'list_live accepted a malformed per-window inventory'
+  pass "fm_backend_cmux_list_live: scans every window and fails closed on incomplete inventory"
 }
 
 # --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------
