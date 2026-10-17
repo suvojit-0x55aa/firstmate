@@ -3261,7 +3261,7 @@ test_remote_inbox_stays_owned_by_remote_delivery() {
 }
 
 test_herdr_endpoints_use_one_snapshot_per_cycle() {
-  local dir id calls states
+  local dir id calls states rc
   dir=$(fixture herdr-endpoint-inventory)
   install_endpoint_inventory_herdr "$dir"
   install_endpoint_inventory_tmux "$dir"
@@ -3282,20 +3282,24 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   printf '%s\n' 'window=fleet:w-live:p1' 'backend=herdr' > "$dir/state/live-herdr.meta"
   printf '%s\n' 'window=local:dead' 'backend=tmux' > "$dir/state/z-local-dead.meta"
   register_active_supervision_tasks "$dir" live-herdr z-local-dead
+  set +e
   PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_PROBE_LOG="$dir/herdr-probes" \
     FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-live:p1' \
     FM_TEST_HERDR_LIVE_TARGETS='fleet:w-live:p1' \
-    FM_TEST_EXISTING_TARGETS='local:dead' FM_SIGNAL_GRACE=0 run_stop "$dir" 10
-  wait_file "$dir/rc" 200
-  [ "$(cat "$dir/rc")" = 2 ] || fail 'Herdr endpoint inventory escaped Codex Stop supervision'
+    FM_TEST_EXISTING_TARGETS='local:dead' FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_TEST_BOUNDED_WATCH_TIMEOUT=6 run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+      > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "Herdr endpoint cycle did not deliver its terminal wake: rc=$rc $(cat "$dir/watch.err")"
   grep -R -qF "$(printf '\ttmux\tlocal:dead')" "$dir/state/.death-notified-v3" \
     || fail 'Herdr watcher phase did not finish before the local terminal wake'
   calls=$(wc -l < "$dir/herdr-probes" | tr -d '[:space:]')
-  [ "$calls" -ge 3 ] && [ "$calls" -le 8 ] \
-    || fail "Herdr admission and watcher used $calls snapshots for a 40-endpoint inventory"
+  [ "$calls" -eq 1 ] \
+    || fail "one watcher cycle used $calls Herdr snapshots for one live and 40 historical endpoints"
   [ "$(awk -F '\t' '$2 == "pane" && $3 == "list" { count++ } END { print count + 0 }' "$dir/herdr-probes")" = "$calls" ] \
     || fail 'Herdr batch classification issued a non-inventory endpoint probe'
-  finish "$dir"
   pass 'Herdr histories stay cold while live owners use bounded bulk snapshots'
 }
 
@@ -4578,8 +4582,10 @@ test_due_remote_recovery_fits_cycle_budget() {
   dir=$(fixture due-remote-recovery)
   cp -R "$ROOT/bin/." "$dir/bin/"
   install_controlled_watcher "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=remote:remote-task' 'remote_host=fixture.invalid' \
     'kind=secondmate' 'spawn_gen=remote-task-a' > "$dir/state/remote-task.meta"
+  register_active_supervision_tasks "$dir" remote-task
   corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 \
     FM_PENDING_REPLY_GRACE_SECS=0 bash -c '
       . "$1/fm-pending-reply-lib.sh"
@@ -4618,6 +4624,7 @@ test_codex_defers_remote_pending_reply_observation() {
   dir=$(fixture deferred-remote-observation)
   cp -R "$ROOT/bin/." "$dir/bin/"
   install_controlled_watcher "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   cat > "$dir/bin/fm-on.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_HOME/remote-observe-calls"
@@ -4625,7 +4632,9 @@ printf '%s\n' idle
 SH
   chmod +x "$dir/bin/fm-on.sh"
   printf '%s\n' 'remote_host=fixture.invalid' 'harness=claude' 'window=fm-remote:1.1' \
+    'kind=secondmate' 'spawn_gen=remote-task-a' \
     > "$dir/state/remote-task.meta"
+  register_active_supervision_tasks "$dir" remote-task
   corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 \
     bash -c '
       . "$1/fm-pending-reply-lib.sh"
