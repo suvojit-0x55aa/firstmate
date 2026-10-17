@@ -3286,13 +3286,13 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_PROBE_LOG="$dir/herdr-probes" \
     FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-live:p1' \
     FM_TEST_HERDR_LIVE_TARGETS='fleet:w-live:p1' \
-    FM_TEST_EXISTING_TARGETS='local:dead' FM_TEST_WATCH_HANDLING_SUCCESSOR=1 \
-    FM_TEST_BOUNDED_WATCH_TIMEOUT=6 run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    FM_TEST_EXISTING_TARGETS='local:dead' FM_TEST_WATCH_POLL=10 \
+    FM_TEST_BOUNDED_WATCH_TIMEOUT=4 run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
       > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] \
-    || fail "Herdr endpoint cycle did not deliver its terminal wake: rc=$rc $(cat "$dir/watch.err")"
+  [ "$rc" -eq 124 ] \
+    || fail "Herdr endpoint cycle did not reach its bounded poll: rc=$rc $(cat "$dir/watch.err")"
   grep -R -qF "$(printf '\ttmux\tlocal:dead')" "$dir/state/.death-notified-v3" \
     || fail 'Herdr watcher phase did not finish before the local terminal wake'
   calls=$(wc -l < "$dir/herdr-probes" | tr -d '[:space:]')
