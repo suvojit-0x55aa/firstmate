@@ -853,7 +853,10 @@ PY
     FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
     FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
-  wait_file "$dir/rc" 150
+  # The injected recurring probe itself sleeps for 16 seconds.  Give the
+  # harness enough time to observe its completion; the elapsed assertion below
+  # remains the stricter product deadline.
+  wait_file "$dir/rc" 300
   elapsed=$(( $(monotonic_seconds) - started ))
   [ -s "$dir/recurring-probe.done" ] || fail 'recurring cycle probe delay did not execute'
   [ "$(cat "$dir/rc")" = 2 ] || fail 'slow recurring cycle probe allowed Stop to fail open'
