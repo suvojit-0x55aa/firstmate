@@ -3265,6 +3265,7 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   dir=$(fixture herdr-endpoint-inventory)
   install_endpoint_inventory_herdr "$dir"
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   states=$(printf 'herdr\tfleet:w-dead:p1\tlocal\t\nherdr\tfleet:w-live:p1\tlocal\t\n' \
     | PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-dead:p1 fleet:w-live:p1' \
       FM_TEST_HERDR_LIVE_TARGETS='fleet:w-live:p1' bash -c '
@@ -3278,8 +3279,12 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   for id in $(seq 1 40); do
     printf 'window=fleet:w%s:p1\nbackend=herdr\n' "$id" > "$dir/state/dead-$id.meta"
   done
+  printf '%s\n' 'window=fleet:w-live:p1' 'backend=herdr' > "$dir/state/live-herdr.meta"
   printf '%s\n' 'window=local:dead' 'backend=tmux' > "$dir/state/z-local-dead.meta"
+  register_active_supervision_tasks "$dir" live-herdr z-local-dead
   PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_PROBE_LOG="$dir/herdr-probes" \
+    FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-live:p1' \
+    FM_TEST_HERDR_LIVE_TARGETS='fleet:w-live:p1' \
     FM_TEST_EXISTING_TARGETS='local:dead' FM_SIGNAL_GRACE=0 run_stop "$dir" 10
   wait_file "$dir/rc" 200
   [ "$(cat "$dir/rc")" = 2 ] || fail 'Herdr endpoint inventory escaped Codex Stop supervision'
@@ -3291,7 +3296,7 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   [ "$(awk -F '\t' '$2 == "pane" && $3 == "list" { count++ } END { print count + 0 }' "$dir/herdr-probes")" = "$calls" ] \
     || fail 'Herdr batch classification issued a non-inventory endpoint probe'
   finish "$dir"
-  pass 'Herdr histories use bounded bulk snapshots without endpoint probes'
+  pass 'Herdr histories stay cold while live owners use bounded bulk snapshots'
 }
 
 test_admission_timeout_reaps_probe_descendants() {
@@ -4422,10 +4427,20 @@ SH
 }
 
 test_check_sweep_order_is_canonical_across_locales() {
-  local locale_name locale_key dir state id cycle rc action_id expected_initial expected_next actual
+  local locale_name locale_key dir state id cycle rc action_id expected_initial expected_next actual locales candidate
   expected_initial=$'A-dash\nZ.dot\n_under\na_lower\nz-last'
   expected_next=$'A-dash\nB-late\nZ.dot\n_under\na_lower\nz-last\nzz-late'
-  for locale_name in ${FM_TEST_CHECK_ORDER_LOCALES:-C en_US.UTF-8 sv_SE.UTF-8}; do
+  if [ -n "${FM_TEST_CHECK_ORDER_LOCALES:-}" ]; then
+    locales=$FM_TEST_CHECK_ORDER_LOCALES
+  else
+    locales=C
+    for candidate in C.UTF-8 en_US.UTF-8 sv_SE.UTF-8 en_US.utf8 sv_SE.utf8; do
+      if locale -a | grep -Fxi "$candidate" >/dev/null; then
+        locales="$locales $candidate"
+      fi
+    done
+  fi
+  for locale_name in $locales; do
     locale -a | grep -Fx "$locale_name" >/dev/null \
       || fail "required locale is not installed: $locale_name"
     locale_key=$(printf '%s' "$locale_name" | tr '.-' '__')
