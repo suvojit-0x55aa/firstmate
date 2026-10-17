@@ -380,6 +380,11 @@ if [ "${1:-}" = list-windows ]; then
     shift
   done
   [ -z "${FM_TEST_INVENTORY_LOG:-}" ] || { [ "$all" -eq 1 ] && printf '%s\n' all || printf '%s\n' "$session"; } >> "$FM_TEST_INVENTORY_LOG"
+  if [ "$all" -eq 0 ]; then
+    case " ${FM_TEST_INVENTORY_FAILURES:-} " in
+      *" $session "*) printf '%s\n' 'inventory unavailable' >&2; exit 71 ;;
+    esac
+  fi
   for target in ${FM_TEST_EXISTING_TARGETS:-${FM_TEST_LIVE_TARGETS:-}}; do
     if [ "$all" -eq 1 ]; then
       printf '%s\t%s\n' "$target" "${target#*:}"
@@ -3173,21 +3178,23 @@ test_small_live_endpoint_inventory_remains_bounded() {
   pass 'small live endpoint inventories remain conservatively bounded'
 }
 
-test_failed_existence_probe_is_conservatively_budgeted() {
+test_failed_inventory_probe_is_conservatively_budgeted() {
   local dir
   dir=$(fixture uncertain-endpoint-inventory)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:uncertain' > "$dir/state/uncertain.meta"
+  register_active_supervision_tasks "$dir" uncertain
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:uncertain' \
-    FM_TEST_LIVE_TARGETS='fleet:uncertain' FM_TEST_EXISTENCE_PROBE_FAILURES='fleet:uncertain' \
+    FM_TEST_LIVE_TARGETS='fleet:uncertain' FM_TEST_INVENTORY_FAILURES=fleet \
     FM_SIGNAL_GRACE=0 FM_GUARD_GRACE=10 FM_CREW_STATE_NM_TIMEOUT=200 \
     FM_WORKTREE_WRITE_TIMEOUT=200 run_stop "$dir" 4
   wait_file "$dir/rc" 200
   [ "$(cat "$dir/rc")" = 2 ] || fail 'uncertain endpoint escaped the fixed Stop deadline'
-  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'failed existence probe was treated as authoritative death'
+  assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' 'failed inventory probe was treated as authoritative death'
   [ ! -e "$dir/state/.watch.lock/pid" ] || fail 'uncertain endpoint inventory started an under-budgeted watcher'
   finish "$dir"
-  pass 'failed existence probes remain conservatively budgeted'
+  pass 'failed inventory probes remain conservatively budgeted'
 }
 
 test_remote_endpoints_avoid_local_backend_probes() {
@@ -3744,12 +3751,14 @@ test_paused_and_captain_held_deaths_notify_once() {
   for mode in paused captain-held; do
     dir=$(fixture "dead-$mode-notification")
     install_endpoint_inventory_tmux "$dir"
+    initialize_empty_active_supervision_registry "$dir"
     case "$mode" in
       paused) status='paused: awaiting external dependency' ;;
       *) status='captain-held [key=route]: tracked by held-decision-route' ;;
     esac
     printf '%s\n' "window=fleet:dead-$mode" 'kind=ship' 'harness=grok' 'backend=tmux' \
       'spawn_gen=spawn-a' > "$dir/state/dead-$mode.meta"
+    register_active_supervision_tasks "$dir" "dead-$mode"
     printf '%s\n' "$status" > "$dir/state/dead-$mode.status"
     prime_status_seen "$dir/state" "$dir/state/dead-$mode.status"
 
@@ -3780,8 +3789,10 @@ test_local_secondmate_death_notifies_once() {
   local dir rc stale_rows
   dir=$(fixture local-secondmate-death)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:local-mate' 'kind=secondmate' 'harness=grok' 'backend=tmux' \
     'spawn_gen=mate-a' > "$dir/state/local-mate.meta"
+  register_active_supervision_tasks "$dir" local-mate
   printf '%s\n' 'working: waiting quietly for routed work' > "$dir/state/local-mate.status"
   prime_status_seen "$dir/state" "$dir/state/local-mate.status"
 
@@ -3808,8 +3819,10 @@ test_local_secondmate_death_notifies_once() {
 
   dir=$(fixture healthy-local-secondmate)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:idle-mate' 'kind=secondmate' 'harness=grok' 'backend=tmux' \
     'spawn_gen=mate-alive' > "$dir/state/idle-mate.meta"
+  register_active_supervision_tasks "$dir" idle-mate
   printf '%s\n' 'working: waiting quietly for routed work' > "$dir/state/idle-mate.status"
   prime_status_seen "$dir/state" "$dir/state/idle-mate.status"
   set +e
@@ -3825,8 +3838,10 @@ test_local_secondmate_death_notifies_once() {
 
   dir=$(fixture remote-secondmate-death-isolation)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=remote:mate' 'kind=secondmate' 'remote_host=remote.invalid' \
     'home=/remote/firstmate' 'spawn_gen=mate-remote' > "$dir/state/remote-mate.meta"
+  register_active_supervision_tasks "$dir" remote-mate
   printf '%s\n' 'working: remote owner remains authoritative' > "$dir/state/remote-mate.status"
   prime_status_seen "$dir/state" "$dir/state/remote-mate.status"
   set +e
@@ -3995,9 +4010,11 @@ test_resumed_worker_retires_death_generation() {
   local dir pane_hash rc receipt stale_rows
   dir=$(fixture resumed-worker-death-generation)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:resumed-worker' 'kind=ship' 'harness=grok' 'backend=tmux' \
     'spawn_gen=spawn-a' \
     > "$dir/state/resumed-worker.meta"
+  register_active_supervision_tasks "$dir" resumed-worker
   printf '%s\n' 'working: worker generation fixture' > "$dir/state/resumed-worker.status"
   prime_status_seen "$dir/state" "$dir/state/resumed-worker.status"
   pane_hash=$(hash_text 'Ctrl+c:cancel')
@@ -4054,6 +4071,7 @@ test_relaunch_generation_surfaces_death_before_alive_observation() {
   local dir rc receipt stale_rows
   dir=$(fixture relaunched-worker-death-generation)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:relaunched-worker' 'kind=ship' 'harness=grok' 'backend=tmux' \
     'spawn_gen=spawn-a' > "$dir/state/relaunched-worker.meta"
   printf '%s\n' 'working: original worker generation' > "$dir/state/relaunched-worker.status"
@@ -4064,6 +4082,7 @@ test_relaunch_generation_surfaces_death_before_alive_observation() {
   sed 's/spawn_gen=spawn-a/spawn_gen=spawn-b/' "$dir/state/relaunched-worker.meta" \
     > "$dir/state/relaunched-worker.meta.next"
   mv "$dir/state/relaunched-worker.meta.next" "$dir/state/relaunched-worker.meta"
+  register_active_supervision_tasks "$dir" relaunched-worker
 
   set +e
   FM_TEST_WATCH_HANDLING_SUCCESSOR=1 FM_TEST_EXISTING_TARGETS='fleet:relaunched-worker' \
@@ -4096,10 +4115,12 @@ test_colliding_endpoint_keys_keep_independent_death_receipts() {
   local dir rc dot_rows underscore_rows receipts
   dir=$(fixture colliding-death-receipts)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:fm-a.b' 'kind=ship' 'harness=grok' 'backend=tmux' \
     'spawn_gen=spawn-dot' > "$dir/state/collision-dot.meta"
   printf '%s\n' 'window=fleet:fm-a_b' 'kind=ship' 'harness=grok' 'backend=tmux' \
     'spawn_gen=spawn-underscore' > "$dir/state/collision-underscore.meta"
+  register_active_supervision_tasks "$dir" collision-dot collision-underscore
   printf '%s\n' 'working: previously surfaced dotted endpoint' > "$dir/state/collision-dot.status"
   printf '%s\n' 'working: new underscored endpoint death' > "$dir/state/collision-underscore.status"
   prime_status_seen "$dir/state" "$dir/state/collision-dot.status"
@@ -4159,8 +4180,10 @@ test_ambiguous_busy_resume_retires_death_receipt() {
   local dir rc stale_rows
   dir=$(fixture ambiguous-busy-resume)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:ambiguous-busy' 'kind=ship' 'harness=grok' 'backend=tmux' \
     'spawn_gen=spawn-a' > "$dir/state/ambiguous-busy.meta"
+  register_active_supervision_tasks "$dir" ambiguous-busy
   printf '%s\n' 'working: worker resumes with ambiguous attribution' \
     > "$dir/state/ambiguous-busy.status"
   prime_status_seen "$dir/state" "$dir/state/ambiguous-busy.status"
@@ -4790,7 +4813,13 @@ test_cleanup_cancellation_revokes_handling() {
     printf 'case - cancellation %s\n' "$kind"
     dir=$(fixture "cancel-$kind")
     : > "$dir/state/task.meta"
-    run_stop "$dir" 15
+    case "$kind" in
+      no-need)
+        install_controlled_watcher "$dir"
+        TEST_ROOT="$dir" run_stop "$dir" 15
+        ;;
+      *) run_stop "$dir" 15 ;;
+    esac
     wait_file "$dir/state/.watch.lock/pid"
     hook=$(cat "$dir/hook")
     case "$kind" in
@@ -6594,7 +6623,7 @@ test_active_only_pending_replies_exclude_archive
 test_mixed_active_owner_policy_surfaces_once
 test_shared_endpoint_fanout_consumes_cycle_lease
 test_small_live_endpoint_inventory_remains_bounded
-test_failed_existence_probe_is_conservatively_budgeted
+test_failed_inventory_probe_is_conservatively_budgeted
 test_remote_endpoints_avoid_local_backend_probes
 test_remote_inbox_stays_owned_by_remote_delivery
 test_herdr_endpoints_use_one_snapshot_per_cycle

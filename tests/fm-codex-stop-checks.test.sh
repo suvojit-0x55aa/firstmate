@@ -11,7 +11,7 @@ test_active_only_pending_replies_exclude_archive
 test_mixed_active_owner_policy_surfaces_once
 test_shared_endpoint_fanout_consumes_cycle_lease
 test_small_live_endpoint_inventory_remains_bounded
-test_failed_existence_probe_is_conservatively_budgeted
+test_failed_inventory_probe_is_conservatively_budgeted
 test_remote_endpoints_avoid_local_backend_probes
 test_remote_inbox_stays_owned_by_remote_delivery
 test_herdr_endpoints_use_one_snapshot_per_cycle
@@ -25,4 +25,5 @@ test_bounded_check_resume_requires_complete_cycle_budget
 test_duplicate_endpoint_owners_share_stale_pass
 '
 export FM_CODEX_STOP_FOCUSED_CASES
+# shellcheck source=tests/fm-codex-stop-suite.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"

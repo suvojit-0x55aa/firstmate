@@ -1166,6 +1166,18 @@ fm_supervision_registry_bounded_migration_candidate() {
           count=$((count + 1))
           ;;
         herdr)
+          # A legacy task tab can retain its launcher shell beside the worker.
+          # Accept the recorded pane only when the live inventory also proves
+          # its exact session, workspace, and tab; the pane id alone is never
+          # sufficient ownership evidence.
+          if [ "$live_target" = "$target" ] \
+            && fm_supervision_registry_herdr_remap_owned \
+              "$state" "$task" "$live_target" "$live_identity1" "$live_identity2"; then
+            FM_SUPERVISION_MIGRATION_IDENTITY1=$live_identity1
+            FM_SUPERVISION_MIGRATION_IDENTITY2=$live_identity2
+            FM_SUPERVISION_MIGRATION_IDENTITY3=$live_identity3
+            return 0
+          fi
           resolved=$live_target
           resolved_identity1=$live_identity1
           resolved_identity2=$live_identity2

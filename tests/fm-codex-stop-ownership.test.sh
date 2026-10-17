@@ -23,4 +23,5 @@ test_replacement_session_fails_closed_on_old_owner
 test_record_mutation_interruption_clears_ownership
 '
 export FM_CODEX_STOP_FOCUSED_CASES
+# shellcheck source=tests/fm-codex-stop-suite.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"

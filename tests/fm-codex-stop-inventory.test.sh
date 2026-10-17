@@ -32,4 +32,5 @@ test_planned_reservation_ignores_racing_canonical_endpoint
 test_planned_backend_discovery_uses_live_identity
 '
 export FM_CODEX_STOP_FOCUSED_CASES
+# shellcheck source=tests/fm-codex-stop-suite.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"

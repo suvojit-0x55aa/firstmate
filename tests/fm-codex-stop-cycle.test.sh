@@ -11,4 +11,5 @@ test_sequential_checks_fit_complete_cycle_bound
 test_sequential_task_classification_fits_complete_cycle_bound
 '
 export FM_CODEX_STOP_FOCUSED_CASES
+# shellcheck source=tests/fm-codex-stop-suite.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"

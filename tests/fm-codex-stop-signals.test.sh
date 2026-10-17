@@ -21,4 +21,5 @@ test_cycle_budget_scans_are_throttled
 test_large_check_inventory_is_batched_before_transport_deadline
 '
 export FM_CODEX_STOP_FOCUSED_CASES
+# shellcheck source=tests/fm-codex-stop-suite.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"

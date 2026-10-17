@@ -19,4 +19,5 @@ test_terminal_error_generation_tristate
 test_current_generation_failure_episode_is_bounded
 '
 export FM_CODEX_STOP_FOCUSED_CASES
+# shellcheck source=tests/fm-codex-stop-suite.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fm-codex-stop-suite.sh"
