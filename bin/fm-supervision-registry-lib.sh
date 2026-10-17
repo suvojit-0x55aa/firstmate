@@ -1119,7 +1119,7 @@ fm_supervision_registry_bounded_migration_candidate() {
     while IFS="$(printf '\t')" read -r live_backend live_target live_identity1 live_identity2 live_identity3 live_identity4 live_identity5; do
       [ "$live_backend" = "$backend" ] || continue
       case "$backend" in
-        cmux|herdr)
+        cmux)
           if [ "$live_target" = "$target" ]; then
             FM_SUPERVISION_MIGRATION_IDENTITY1=$live_identity1
             FM_SUPERVISION_MIGRATION_IDENTITY2=$live_identity2
@@ -1127,6 +1127,15 @@ fm_supervision_registry_bounded_migration_candidate() {
             return 0
           fi
           [ "$live_target" != "$resolved" ] || continue
+          resolved=$live_target
+          resolved_identity1=$live_identity1
+          resolved_identity2=$live_identity2
+          resolved_identity3=$live_identity3
+          resolved_identity4=$live_identity4
+          resolved_identity5=$live_identity5
+          count=$((count + 1))
+          ;;
+        herdr)
           resolved=$live_target
           resolved_identity1=$live_identity1
           resolved_identity2=$live_identity2

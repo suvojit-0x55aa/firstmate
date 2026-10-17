@@ -2184,7 +2184,7 @@ SH
 
 test_bounded_bootstrap_rebinds_unique_live_targets() {
   local mode dir title old_workspace old_surface new_workspace new_surface second_workspace second_surface
-  local inventory rc current_window current_workspace current_surface live_workspace workspace_label
+  local inventory rc current_window current_workspace current_surface live_workspace live_surface workspace_label
   local canonical_home token foreign_home owner_label foreign_label recovery promotion recovery_rc promotion_rc
   old_workspace=aaaaaaaa-0000-0000-0000-000000000000
   old_surface=bbbbbbbb-1111-1111-1111-111111111111
@@ -2288,11 +2288,21 @@ SH
   new_surface=new:pane
   second_workspace=second-workspace
   second_surface=second:pane
-  for mode in launcher foreign-primary foreign-secondmate copied-presentation sibling captain ambiguous; do
+  for mode in exact exact-mismatch exact-ambiguous launcher foreign-primary foreign-secondmate copied-presentation sibling captain ambiguous; do
     dir=$(fixture "bounded-bootstrap-herdr-remap-$mode")
     mkdir -p "$dir/fakebin"
     live_workspace=$new_workspace
+    live_surface=$new_surface
     case "$mode" in
+      exact|exact-ambiguous)
+        live_workspace=$old_workspace
+        live_surface=$old_surface
+        workspace_label=captain
+        ;;
+      exact-mismatch)
+        live_surface=$old_surface
+        workspace_label=captain
+        ;;
       launcher) live_workspace=$old_workspace; workspace_label=captain ;;
       foreign-secondmate)
         foreign_home="$dir/foreign-home"
@@ -2354,7 +2364,8 @@ SH
 case "${1:-}:${2:-}" in
   session:list) printf '%s\n' '{"sessions":[{"name":"default","running":true}]}' ;;
   workspace:list)
-    if [ "$FM_TEST_HERDR_REMAP_MODE" = ambiguous ]; then
+    if [ "$FM_TEST_HERDR_REMAP_MODE" = ambiguous ] \
+      || [ "$FM_TEST_HERDR_REMAP_MODE" = exact-ambiguous ]; then
       printf '{"result":{"workspaces":[{"workspace_id":"%s","label":"%s"},{"workspace_id":"%s","label":"%s"}]}}\n' \
         "$FM_TEST_HERDR_WORKSPACE" "$FM_TEST_HERDR_WORKSPACE_LABEL" \
         "$FM_TEST_HERDR_SECOND_WORKSPACE" "$FM_TEST_HERDR_WORKSPACE_LABEL"
@@ -2364,25 +2375,35 @@ case "${1:-}:${2:-}" in
     fi
     ;;
   tab:list)
-    if [ "$FM_TEST_HERDR_REMAP_MODE" != ambiguous ]; then
-      tab=new-tab
-      [ "$FM_TEST_HERDR_REMAP_MODE" != launcher ] || tab=old-tab
+    if [ "$FM_TEST_HERDR_REMAP_MODE" != ambiguous ] \
+      && [ "$FM_TEST_HERDR_REMAP_MODE" != exact-ambiguous ]; then
+      case "$FM_TEST_HERDR_REMAP_MODE" in
+        launcher|exact) tab=old-tab ;;
+        *) tab=new-tab ;;
+      esac
       printf '{"result":{"tabs":[{"tab_id":"%s","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
         "$tab" "$FM_TEST_HERDR_WORKSPACE"
     else
-      printf '{"result":{"tabs":[{"tab_id":"new-tab","label":"fm-live-owner","workspace_id":"%s"},{"tab_id":"second-tab","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
-        "$FM_TEST_HERDR_WORKSPACE" "$FM_TEST_HERDR_SECOND_WORKSPACE"
+      tab=new-tab
+      [ "$FM_TEST_HERDR_REMAP_MODE" != exact-ambiguous ] || tab=old-tab
+      printf '{"result":{"tabs":[{"tab_id":"%s","label":"fm-live-owner","workspace_id":"%s"},{"tab_id":"second-tab","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
+        "$tab" "$FM_TEST_HERDR_WORKSPACE" "$FM_TEST_HERDR_SECOND_WORKSPACE"
     fi
     ;;
   pane:list)
-    if [ "$FM_TEST_HERDR_REMAP_MODE" != ambiguous ]; then
-      tab=new-tab
-      [ "$FM_TEST_HERDR_REMAP_MODE" != launcher ] || tab=old-tab
+    if [ "$FM_TEST_HERDR_REMAP_MODE" != ambiguous ] \
+      && [ "$FM_TEST_HERDR_REMAP_MODE" != exact-ambiguous ]; then
+      case "$FM_TEST_HERDR_REMAP_MODE" in
+        launcher|exact) tab=old-tab ;;
+        *) tab=new-tab ;;
+      esac
       printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"%s","agent_status":"working"}]}}\n' \
         "$FM_TEST_HERDR_PANE" "$tab"
     else
-      printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"new-tab","agent_status":"working"},{"pane_id":"%s","tab_id":"second-tab","agent_status":"working"}]}}\n' \
-        "$FM_TEST_HERDR_PANE" "$FM_TEST_HERDR_SECOND_PANE"
+      tab=new-tab
+      [ "$FM_TEST_HERDR_REMAP_MODE" != exact-ambiguous ] || tab=old-tab
+      printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"%s","agent_status":"working"},{"pane_id":"%s","tab_id":"second-tab","agent_status":"working"}]}}\n' \
+        "$FM_TEST_HERDR_PANE" "$tab" "$FM_TEST_HERDR_SECOND_PANE"
     fi
     ;;
   *) exit 72 ;;
@@ -2393,7 +2414,7 @@ SH
     inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
       FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_REMAP_MODE="$mode" \
       FM_TEST_HERDR_WORKSPACE="$live_workspace" FM_TEST_HERDR_WORKSPACE_LABEL="$workspace_label" \
-      FM_TEST_HERDR_PANE="$new_surface" \
+      FM_TEST_HERDR_PANE="$live_surface" \
       FM_TEST_HERDR_SECOND_WORKSPACE="$second_workspace" \
       FM_TEST_HERDR_SECOND_PANE="$second_surface" bash -c '
         . "$1/fm-wake-lib.sh"
@@ -2408,6 +2429,15 @@ SH
     current_workspace=$(sed -n 's/^herdr_workspace_id=//p' "$dir/state/live-owner.meta")
     current_surface=$(sed -n 's/^herdr_pane_id=//p' "$dir/state/live-owner.meta")
     case "$mode" in
+      exact)
+        [ "$rc" -eq 0 ] || fail 'unique exact Herdr binding blocked bounded bootstrap'
+        [ "$inventory" = "$dir/state/live-owner.meta" ] \
+          || fail "unique exact Herdr binding lost its live owner: $inventory"
+        [ "$current_window" = "default:$old_surface" ] \
+          && [ "$current_workspace" = "$old_workspace" ] \
+          && [ "$current_surface" = "$old_surface" ] \
+          || fail 'unique exact Herdr binding rewrote durable endpoint identity'
+        ;;
       launcher)
         [ "$rc" -eq 0 ] || fail "$mode-owned Herdr target remap blocked bounded bootstrap"
         [ "$inventory" = "$dir/state/live-owner.meta" ] \
@@ -2417,7 +2447,7 @@ SH
           && [ "$current_surface" = "$new_surface" ] \
           || fail "$mode-owned Herdr target remap did not normalize durable endpoint identity"
         ;;
-      foreign-primary|foreign-secondmate|copied-presentation|sibling|captain|ambiguous)
+      exact-mismatch|exact-ambiguous|foreign-primary|foreign-secondmate|copied-presentation|sibling|captain|ambiguous)
         [ "$rc" -ne 0 ] || fail "$mode Herdr target remap published a snapshot"
         [ ! -e "$dir/state/.active-supervision-generation" ] \
           || fail "$mode Herdr target remap became authoritative"
