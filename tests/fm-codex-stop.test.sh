@@ -2185,7 +2185,7 @@ SH
 test_bounded_bootstrap_rebinds_unique_live_targets() {
   local mode dir title old_workspace old_surface new_workspace new_surface second_workspace second_surface
   local inventory rc current_window current_workspace current_surface live_workspace workspace_label
-  local canonical_home token foreign_home owner_label foreign_label
+  local canonical_home token foreign_home owner_label foreign_label recovery promotion recovery_rc promotion_rc
   old_workspace=aaaaaaaa-0000-0000-0000-000000000000
   old_surface=bbbbbbbb-1111-1111-1111-111111111111
   new_workspace=cccccccc-2222-2222-2222-222222222222
@@ -2417,7 +2417,92 @@ SH
         ;;
     esac
   done
-  pass 'bounded bootstrap requires Herdr ownership provenance for remapped endpoints'
+  dir=$(fixture bounded-bootstrap-remap-metadata-race)
+  mkdir -p "$dir/fakebin"
+  old_workspace=aaaaaaaa-0000-0000-0000-000000000000
+  old_surface=bbbbbbbb-1111-1111-1111-111111111111
+  new_workspace=cccccccc-2222-2222-2222-222222222222
+  new_surface=dddddddd-3333-3333-3333-333333333333
+  title=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$1/backends/cmux.sh"
+    fm_backend_cmux_scoped_title fm-live-owner
+  ' _ "$ROOT/bin") || fail 'could not derive the concurrent cmux bootstrap title'
+  printf '%s\n' \
+    "window=$old_workspace:$old_surface" 'endpoint_task_id=live-owner' \
+    "worktree=$dir/worktree" "project=$dir" 'kind=scout' 'harness=codex' \
+    'backend=cmux' "cmux_workspace_id=$old_workspace" "cmux_surface_id=$old_surface" \
+    'spawn_gen=owner-1' > "$dir/state/live-owner.meta"
+  cat > "$dir/fakebin/cmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  workspace:list)
+    printf '{"workspaces":[{"id":"%s","title":"%s"}]}\n' \
+      "$FM_TEST_CMUX_WORKSPACE" "$FM_TEST_CMUX_TITLE"
+    ;;
+  list-panes:*)
+    printf '{"panes":[{"selected_surface_id":"%s","surface_ids":["%s"]}]}\n' \
+      "$FM_TEST_CMUX_SURFACE" "$FM_TEST_CMUX_SURFACE"
+    ;;
+  *) exit 72 ;;
+esac
+SH
+  chmod 0700 "$dir/fakebin/cmux"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_TEST_CMUX_TITLE="$title" \
+    FM_TEST_CMUX_WORKSPACE="$new_workspace" FM_TEST_CMUX_SURFACE="$new_surface" bash -c '
+      . "$1/fm-wake-lib.sh"
+      . "$1/fm-backend.sh"
+      . "$1/fm-supervision-registry-lib.sh"
+      fm_backend_agent_state_batch() {
+        printf 'observing\n' > "$FM_HOME/recovery-observing"
+        while [ ! -e "$FM_HOME/release-recovery" ]; do sleep 0.01; done
+        while IFS="$(printf "\t")" read -r backend target route home; do
+          printf "%s\t%s\tunverified\t%s\t%s\n" "$backend" "$target" "$route" "$home"
+        done
+      }
+      fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
+    ' _ "$ROOT/bin" > "$dir/recovery.out" 2> "$dir/recovery.err" &
+  recovery=$!
+  wait_file "$dir/recovery-observing" 100
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_TEST_CMUX_TITLE="$title" \
+    FM_TEST_CMUX_WORKSPACE="$new_workspace" FM_TEST_CMUX_SURFACE="$new_surface" \
+    "$ROOT/bin/fm-promote.sh" live-owner --mode direct-PR --yolo off \
+    > "$dir/promotion.out" 2> "$dir/promotion.err" &
+  promotion=$!
+  for _ in $(seq 1 100); do
+    grep -qx 'kind=ship' "$dir/state/live-owner.meta" 2>/dev/null && break
+    sleep 0.01
+  done
+  grep -qx 'kind=ship' "$dir/state/live-owner.meta" \
+    || fail 'concurrent promotion did not publish its metadata update'
+  kill -0 "$promotion" 2>/dev/null \
+    || fail 'concurrent promotion did not wait for registry recovery'
+  : > "$dir/release-recovery"
+  set +e
+  wait "$recovery"
+  recovery_rc=$?
+  wait "$promotion"
+  promotion_rc=$?
+  set -e
+  [ "$recovery_rc" -ne 0 ] || fail 'contended bootstrap recovery did not fail closed'
+  [ "$promotion_rc" -eq 0 ] \
+    || fail "concurrent promotion failed after bootstrap contention: $(cat "$dir/promotion.err")"
+  grep -qx 'kind=ship' "$dir/state/live-owner.meta" \
+    && grep -qx 'mode=direct-PR' "$dir/state/live-owner.meta" \
+    && grep -qx 'yolo=off' "$dir/state/live-owner.meta" \
+    || fail 'live-target normalization lost the concurrent promotion contract'
+  [ "$(sed -n 's/^window=//p' "$dir/state/live-owner.meta")" = "$new_workspace:$new_surface" ] \
+    || fail 'promotion-owned recovery did not normalize the live target'
+  inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin") || fail 'concurrent promotion did not publish active supervision'
+  [ "$inventory" = "$dir/state/live-owner.meta" ] \
+    || fail 'concurrent promotion lost its active supervision entry'
+  pass 'bounded bootstrap safely rebinds proven live endpoints'
 }
 
 test_zellij_scoped_title_alias_bootstrap_is_conservative() {

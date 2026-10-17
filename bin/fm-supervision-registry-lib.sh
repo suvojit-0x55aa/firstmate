@@ -1174,7 +1174,7 @@ fm_supervision_registry_bounded_migration_candidate() {
   return 1
 }
 
-fm_supervision_registry_normalize_live_target() {
+fm_supervision_registry_normalize_live_target_locked() {
   local state=$1 task=$2 spawn_gen=$3 backend=$4 previous=$5 target=$6
   local identity1=$7 identity2=$8 identity3=$9 meta tmp session pane workspace surface
   meta="$state/$task.meta"
@@ -1217,6 +1217,21 @@ fm_supervision_registry_normalize_live_target() {
     return 1
   fi
   mv -f -- "$tmp" "$meta"
+}
+
+fm_supervision_registry_normalize_live_target() {
+  local state=$1 task=$2 meta lock holder acquired=0 rc=0
+  meta="$state/$task.meta"
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_current_pid || return 1
+  holder=$(cat "$lock/pid" 2>/dev/null || true)
+  if [ "$holder" != "$FM_LOCK_CURRENT_PID" ]; then
+    fm_lock_try_acquire "$lock" || return 1
+    acquired=1
+  fi
+  fm_supervision_registry_normalize_live_target_locked "$@" || rc=$?
+  [ "$acquired" -eq 0 ] || fm_lock_release "$lock" || rc=1
+  return "$rc"
 }
 
 fm_supervision_registry_bounded_scopes() {
