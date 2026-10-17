@@ -146,33 +146,48 @@ fm_supervision_registry_staged_meta_valid() { # <meta> <task> <spawn> <phase> <b
 
 fm_supervision_registry_transaction_write_locked() {  # <state> <task> <spawn> <owner-pid> <owner-identity> <phase> <backend> <target> <detail> [meta]
   local state=$1 task=$2 spawn_gen=$3 owner_pid=$4 owner_identity=$5 phase=$6
-  local backend=$7 target=$8 detail=$9 meta=${10:-} root dir record tmp staged_tmp
+  local backend=$7 target=$8 detail=$9 meta=${10:-} root dir record tmp staged_tmp metadata current_metadata
   root=$(fm_supervision_registry_transaction_root "$state")
   dir=$(fm_supervision_registry_transaction_dir "$state" "$task") || return 1
   mkdir -p "$root" "$dir" || return 1
   if [ -n "$meta" ]; then
     fm_supervision_registry_staged_meta_valid \
       "$meta" "$task" "$spawn_gen" "$phase" "$backend" "$target" "$detail" || return 1
-    staged_tmp="$dir/meta.tmp.${BASHPID:-$$}"
+    current_metadata=
+    if [ -f "$dir/record" ] && [ ! -L "$dir/record" ]; then
+      current_metadata=$(fm_meta_get "$dir/record" metadata 2>/dev/null || true)
+    fi
+    case "$current_metadata" in
+      meta.0) metadata=meta.1 ;;
+      *) metadata=meta.0 ;;
+    esac
+    staged_tmp="$dir/$metadata.tmp.${BASHPID:-$$}"
     if ! cp -p -- "$meta" "$staged_tmp" || ! chmod 0600 "$staged_tmp" \
-      || ! mv -f -- "$staged_tmp" "$dir/meta"; then
+      || ! mv -f -- "$staged_tmp" "$dir/$metadata"; then
       rm -f -- "$staged_tmp"
       return 1
     fi
+  else
+    metadata=none
   fi
   record="$dir/record"
   tmp="$dir/record.tmp.${BASHPID:-$$}"
   {
-    printf 'fm-supervision-transaction.v2\n'
+    printf 'fm-supervision-transaction.v3\n'
     printf 'task=%s\nspawn_gen=%s\nowner_pid=%s\n' "$task" "$spawn_gen" "$owner_pid"
     printf 'owner_identity=%s\nphase=%s\nbackend=%s\ntarget=%s\ndetail=%s\n' \
       "$owner_identity" "$phase" "$backend" "$target" "$detail"
-    if [ -f "$dir/meta" ] && [ ! -L "$dir/meta" ]; then printf 'metadata=staged\n'; else printf 'metadata=none\n'; fi
+    printf 'metadata=%s\n' "$metadata"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if ! chmod 0600 "$tmp" || ! mv -f -- "$tmp" "$record"; then
     rm -f -- "$tmp"
     return 1
   fi
+  case "$metadata" in
+    meta.0) rm -f -- "$dir/meta" "$dir/meta.1" ;;
+    meta.1) rm -f -- "$dir/meta" "$dir/meta.0" ;;
+    none) rm -f -- "$dir/meta" "$dir/meta.0" "$dir/meta.1" ;;
+  esac
 }
 
 fm_supervision_registry_transaction_remove_locked() {  # <state> <task>
@@ -180,7 +195,7 @@ fm_supervision_registry_transaction_remove_locked() {  # <state> <task>
   dir=$(fm_supervision_registry_transaction_dir "$1" "$2") || return 1
   [ ! -e "$dir" ] && [ ! -L "$dir" ] && return 0
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  rm -f -- "$dir/record" "$dir/meta" || return 1
+  rm -f -- "$dir/record" "$dir/meta" "$dir/meta.0" "$dir/meta.1" || return 1
   rmdir "$dir"
 }
 
@@ -190,16 +205,17 @@ fm_supervision_registry_transaction_meta_locked() {  # <state> <task> <spawn> <p
   record="$dir/record"
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   IFS= read -r protocol < "$record" || return 1
-  case "$protocol" in fm-supervision-transaction.v1|fm-supervision-transaction.v2) ;; *) return 1 ;; esac
+  case "$protocol" in fm-supervision-transaction.v1|fm-supervision-transaction.v2|fm-supervision-transaction.v3) ;; *) return 1 ;; esac
   task=$(fm_meta_get "$record" task); spawn=$(fm_meta_get "$record" spawn_gen)
   phase=$(fm_meta_get "$record" phase); backend=$(fm_meta_get "$record" backend)
   target=$(fm_meta_get "$record" target); metadata=$(fm_meta_get "$record" metadata)
   [ "$task" = "$2" ] && [ "$spawn" = "$3" ] && [ "$phase" = "$4" ] \
-    && [ "$backend" = "$5" ] && [ "$target" = "$6" ] && [ "$metadata" = staged ] || return 1
-  [ -f "$dir/meta" ] && [ ! -L "$dir/meta" ] || return 1
+    && [ "$backend" = "$5" ] && [ "$target" = "$6" ] || return 1
+  case "$metadata" in staged) metadata=meta ;; meta.0|meta.1) ;; *) return 1 ;; esac
+  [ -f "$dir/$metadata" ] && [ ! -L "$dir/$metadata" ] || return 1
   fm_supervision_registry_staged_meta_valid \
-    "$dir/meta" "$2" "$3" "$4" "$5" "$6" "$(fm_meta_get "$record" detail)" || return 1
-  printf '%s\n' "$dir/meta"
+    "$dir/$metadata" "$2" "$3" "$4" "$5" "$6" "$(fm_meta_get "$record" detail)" || return 1
+  printf '%s\n' "$dir/$metadata"
 }
 
 fm_supervision_registry_transaction_fields_locked() {  # <state> <task> <spawn>
@@ -208,7 +224,7 @@ fm_supervision_registry_transaction_fields_locked() {  # <state> <task> <spawn>
   record="$dir/record"
   [ -f "$record" ] && [ ! -L "$record" ] || return 1
   IFS= read -r protocol < "$record" || return 1
-  [ "$protocol" = fm-supervision-transaction.v2 ] || return 1
+  case "$protocol" in fm-supervision-transaction.v2|fm-supervision-transaction.v3) ;; *) return 1 ;; esac
   task=$(fm_meta_get "$record" task); spawn=$(fm_meta_get "$record" spawn_gen)
   owner_pid=$(fm_meta_get "$record" owner_pid); owner_identity=$(fm_meta_get "$record" owner_identity)
   phase=$(fm_meta_get "$record" phase); backend=$(fm_meta_get "$record" backend)
@@ -221,12 +237,26 @@ fm_supervision_registry_transaction_fields_locked() {  # <state> <task> <spawn>
   if [ "$phase" = reserved ]; then
     [ "$metadata" = none ] || return 1
   else
-    [ "$metadata" = staged ] || return 1
-    [ -f "$dir/meta" ] && [ ! -L "$dir/meta" ] || return 1
+    case "$metadata" in staged) metadata=meta ;; meta.0|meta.1) ;; *) return 1 ;; esac
+    [ -f "$dir/$metadata" ] && [ ! -L "$dir/$metadata" ] || return 1
     fm_supervision_registry_staged_meta_valid \
-      "$dir/meta" "$task" "$spawn" "$phase" "$backend" "$target" "$detail" || return 1
+      "$dir/$metadata" "$task" "$spawn" "$phase" "$backend" "$target" "$detail" || return 1
   fi
   fm_supervision_tsv_row "$owner_pid" "$owner_identity" "$phase" "$backend" "$target" "$detail"
+}
+
+fm_supervision_registry_transaction_meta_for_phase_locked() {  # <state> <task> <spawn> <phase> <backend> <target> <detail>
+  local dir candidate found=
+  dir=$(fm_supervision_registry_transaction_dir "$1" "$2") || return 1
+  for candidate in "$dir/meta" "$dir/meta.0" "$dir/meta.1"; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    fm_supervision_registry_staged_meta_valid \
+      "$candidate" "$2" "$3" "$4" "$5" "$6" "$7" || continue
+    [ -z "$found" ] || return 1
+    found=$candidate
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
 }
 
 fm_supervision_registry_phase_rank() {
@@ -395,12 +425,13 @@ fm_supervision_registry_remote_recovery() {
 fm_supervision_registry_publish_planned_locked() { # <state> <task> <spawn> <backend> <plan-meta> <phase> <target> <detail> <worktree> <id1> <id2> <id3> <id4> <owner-pid> <owner-identity>
   local state=$1 task=$2 spawn_gen=$3 backend=$4 plan_meta=$5 phase=$6 target=$7 detail=$8
   local worktree=$9 id1=${10} id2=${11} id3=${12} id4=${13} owner_pid=${14} owner_identity=${15}
-  local meta tmp project harness kind planned_worktree value
+  local meta tmp project harness kind planned_worktree provisional_endpoint value
   meta="$state/$task.meta"
   project=$(fm_backend_meta_exact_value "$plan_meta" project 2>/dev/null) || return 1
   harness=$(fm_backend_meta_exact_value "$plan_meta" harness 2>/dev/null) || return 1
   kind=$(fm_backend_meta_exact_value "$plan_meta" kind 2>/dev/null) || return 1
   planned_worktree=$(fm_backend_meta_exact_value "$plan_meta" worktree 2>/dev/null) || return 1
+  provisional_endpoint=$(fm_backend_meta_exact_value "$plan_meta" window 2>/dev/null) || return 1
   [ "$worktree" != - ] || worktree=$planned_worktree
   if [ "$backend" != orca ]; then
     phase=endpoint-only
@@ -439,6 +470,7 @@ fm_supervision_registry_publish_planned_locked() { # <state> <task> <spawn> <bac
     esac
     printf 'endpoint_task_id=%s\nworktree=%s\nproject=%s\n' "$task" "$worktree" "$project"
     printf 'harness=%s\nkind=%s\nspawn_gen=%s\n' "$harness" "$kind" "$spawn_gen"
+    printf 'provisional_endpoint=%s\n' "$provisional_endpoint"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if ! fm_supervision_registry_staged_meta_valid \
       "$tmp" "$task" "$spawn_gen" "$phase" "$backend" "$target" "$detail"; then
@@ -467,6 +499,13 @@ fm_supervision_registry_reconcile_endpoint_only_locked() { # <state> <task> <spa
   transaction_meta=$(fm_supervision_registry_transaction_meta_locked \
     "$state" "$task" "$spawn_gen" endpoint-only "$backend" "$target" 2>/dev/null || true)
   [ -n "$transaction_meta" ] || return 1
+  if [ -n "$(fm_backend_meta_exact_value "$transaction_meta" provisional_endpoint 2>/dev/null || true)" ]; then
+    case "$backend" in
+      tmux) fm_backend_finalize_reservation "$backend" "$target" "$task" "$spawn_gen" || return 0 ;;
+      herdr|zellij) fm_backend_finalize_reservation "$backend" "$target" "$detail" "$task" "$spawn_gen" || return 0 ;;
+      cmux) fm_backend_finalize_reservation "$backend" "$target" "$task" "$spawn_gen" || return 0 ;;
+    esac
+  fi
   query_target=$target
   [ "$backend" != tmux ] || query_target=$detail
   verdict=$(printf '%s\t%s\tlocal\t-\n' "$backend" "$query_target" \
@@ -539,20 +578,14 @@ EOF
         fm_supervision_registry_write_locked "$state" "$task" "$spawn_gen" '' reserve \
           "$owner_pid" "$owner_identity" "$reservation_phase" "$backend" "$target" "$detail" || return 1
       elif [ "$transaction_rank" -lt "$reservation_rank" ]; then
-        transaction_dir=$(fm_supervision_registry_transaction_dir "$state" "$task") || return 1
-        transaction_staged="$transaction_dir/meta"
-        [ -f "$transaction_staged" ] && [ ! -L "$transaction_staged" ] || return 1
-        fm_supervision_registry_staged_meta_valid \
-          "$transaction_staged" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+        transaction_staged=$(fm_supervision_registry_transaction_meta_for_phase_locked \
+          "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail") || return 1
         fm_supervision_registry_transaction_write_locked "$state" "$task" "$spawn_gen" \
           "$owner_pid" "$owner_identity" "$reservation_phase" "$backend" "$target" "$detail" "$transaction_staged" || return 1
       fi
     elif [ "$reservation_phase" != reserved ]; then
-      transaction_dir=$(fm_supervision_registry_transaction_dir "$state" "$task") || return 1
-      transaction_staged="$transaction_dir/meta"
-      [ -f "$transaction_staged" ] && [ ! -L "$transaction_staged" ] || return 1
-      fm_supervision_registry_staged_meta_valid \
-        "$transaction_staged" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+      transaction_staged=$(fm_supervision_registry_transaction_meta_for_phase_locked \
+        "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail") || return 1
       fm_supervision_registry_transaction_write_locked "$state" "$task" "$spawn_gen" \
         "$owner_pid" "$owner_identity" "$reservation_phase" "$backend" "$target" "$detail" "$transaction_staged" || return 1
     fi
@@ -566,7 +599,7 @@ EOF
           "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" 2>/dev/null || true)
         [ -n "$transaction_meta" ] || return 1
         planned_result=$(fm_backend_recover_planned \
-          "$backend" "$task" "$target" "$detail" 2>/dev/null) || continue
+          "$backend" "$task" "$target" "$detail" "$spawn_gen" 2>/dev/null) || continue
         IFS="$(printf '\t')" read -r planned_verdict planned_phase planned_target planned_detail \
           planned_worktree planned_id1 planned_id2 planned_id3 planned_id4 <<EOF
 $planned_result
@@ -609,6 +642,17 @@ EOF
         recovery_state=unverified
         recovery_path=-
         recovery_target=$target
+        if [ "$reservation_phase" = created ]; then
+          transaction_meta=$(fm_supervision_registry_transaction_meta_locked \
+            "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" 2>/dev/null || true)
+          if [ -n "$(fm_backend_meta_exact_value "$transaction_meta" provisional_endpoint 2>/dev/null || true)" ]; then
+            case "$backend" in
+              tmux) fm_backend_finalize_reservation "$backend" "$target" "$task" "$spawn_gen" || continue ;;
+              herdr|zellij) fm_backend_finalize_reservation "$backend" "$target" "$detail" "$task" "$spawn_gen" || continue ;;
+              cmux) fm_backend_finalize_reservation "$backend" "$target" "$task" "$spawn_gen" || continue ;;
+            esac
+          fi
+        fi
         case "$backend:$target" in
           remote:remote:*)
             transaction_meta=$(fm_supervision_registry_transaction_meta_locked \
@@ -822,13 +866,19 @@ fm_supervision_registry_mark_reservation() {
 
 fm_supervision_registry_plan_reservation() {
   local state=$1 task=$2 spawn_gen=$3 backend=$4 target=$5 detail=$6 staged_meta=$7
+  local discovery_target=${8:-} discovery_detail=${9:-}
   local discovery verdict
-  if [ "$backend" = orca ] && [ "$target" = "fm-$task--$spawn_gen" ]; then
+  if [ -z "$discovery_target" ] && { [ "$target" = "fm-$task--$spawn_gen" ] \
+      || [ "${target#*:}" = "fm-$task--$spawn_gen" ]; }; then
     fm_supervision_registry_mark_reservation \
       "$state" "$task" "$spawn_gen" planned "$backend" "$target" "$detail" "$staged_meta"
     return
   fi
-  discovery=$(fm_backend_recover_planned "$backend" "$task" "$target" "$detail" 2>/dev/null) || return 1
+  if [ -z "$discovery_target" ]; then
+    discovery_target=$target
+    discovery_detail=$detail
+  fi
+  discovery=$(fm_backend_recover_planned "$backend" "$task" "$discovery_target" "$discovery_detail" 2>/dev/null) || return 1
   IFS="$(printf '\t')" read -r verdict _rest <<EOF
 $discovery
 EOF

@@ -342,8 +342,10 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
 }
 
 fm_backend_cmux_recover_planned() {  # <task> <target> <detail>
-  local task=$1 target=$2 detail=$3 expected list workspaces count workspace surface
-  [ "$target" = "fm-$task" ] || return 1
+  local task=$1 target=$2 detail=$3 spawn_gen=${4:-} label expected list workspaces count workspace surface
+  label="fm-$task"
+  [ -z "$spawn_gen" ] || label="$label--$spawn_gen"
+  [ "$target" = "$label" ] || return 1
   expected=$(fm_backend_cmux_scoped_title "$target")
   [ "$detail" = "$expected" ] || return 1
   list=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
@@ -362,6 +364,22 @@ fm_backend_cmux_recover_planned() {  # <task> <target> <detail>
   case "$workspace$surface" in *[$'\t\r\n']*) return 1 ;; esac
   printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t-\t-\n' \
     "$workspace" "$surface" "$workspace" "$workspace" "$surface"
+}
+
+fm_backend_cmux_finalize_reservation() {  # <workspace:surface> <task> <spawn>
+  local target=$1 task=$2 spawn_gen=$3 workspace expected final expected_title final_title list live collision
+  workspace=${target%%:*}
+  expected="fm-$task--$spawn_gen"
+  final="fm-$task"
+  expected_title=$(fm_backend_cmux_scoped_title "$expected")
+  final_title=$(fm_backend_cmux_scoped_title "$final")
+  list=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  live=$(printf '%s' "$list" | jq -r --arg id "$workspace" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
+  [ "$live" = "$final_title" ] && return 0
+  [ "$live" = "$expected_title" ] || return 1
+  collision=$(printf '%s' "$list" | jq -r --arg want "$final_title" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null)
+  [ -z "$collision" ] || return 1
+  fm_backend_cmux_cli rename-workspace --workspace "$workspace" --name "$final_title" >/dev/null 2>&1
 }
 
 # fm_backend_cmux_create_task: create the task's workspace (one surface),

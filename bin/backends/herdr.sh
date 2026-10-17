@@ -3130,12 +3130,16 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
 }
 
 fm_backend_herdr_recover_planned() {  # <task> <target> <detail>
-  local task=$1 target=$2 detail=$3 session label workspace tabs tab_ids count tab pane
+  local task=$1 target=$2 detail=$3 spawn_gen=${4:-} session label expected workspace tabs tab_ids count tab pane
   local list token workspaces
   case "$target" in *:*) ;; *) return 1 ;; esac
   session=${target%%:*}
   label=${target#*:}
-  [ "$label" = "fm-$task" ] || return 1
+  expected="fm-$task"
+  if [ -n "$spawn_gen" ] && { [ ! -f "$detail" ] || [ -L "$detail" ]; }; then
+    expected="$expected--$spawn_gen"
+  fi
+  [ "$label" = "$expected" ] || return 1
   if [ -f "$detail" ] && [ ! -L "$detail" ]; then
     fm_backend_herdr_projection_journal_snapshot "$detail" "$task" || return 1
     if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
@@ -3184,6 +3188,24 @@ fm_backend_herdr_recover_planned() {  # <task> <target> <detail>
   case "$session$workspace$tab$pane" in *[$'\t\r\n']*) return 1 ;; esac
   printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t%s\t%s\n' \
     "$session" "$pane" "$tab" "$session" "$workspace" "$tab" "$pane"
+}
+
+fm_backend_herdr_finalize_reservation() {  # <session:pane> <tab-id> <task> <spawn>
+  local target=$1 tab=$2 task=$3 spawn_gen=$4 session pane pane_info workspace tabs expected final live collision
+  session=${target%%:*}
+  pane=${target#*:}
+  expected="fm-$task--$spawn_gen"
+  final="fm-$task"
+  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  workspace=$(printf '%s' "$pane_info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+  [ -n "$workspace" ] || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  live=$(printf '%s' "$tabs" | jq -r --arg tab "$tab" '.result.tabs[]? | select(.tab_id == $tab) | .label' 2>/dev/null)
+  [ "$live" = "$final" ] && return 0
+  [ "$live" = "$expected" ] || return 1
+  collision=$(printf '%s' "$tabs" | jq -r --arg want "$final" '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null)
+  [ -z "$collision" ] || return 1
+  fm_backend_herdr_cli "$session" tab rename "$tab" "$final" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an

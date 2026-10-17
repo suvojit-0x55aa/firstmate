@@ -377,11 +377,13 @@ EOF
 }
 
 fm_backend_tmux_recover_planned() {  # <task> <target> <detail>
-  local task=$1 target=$2 detail=$3 session name tab out status matches count stable live path
+  local task=$1 target=$2 detail=$3 spawn_gen=${4:-} session name expected tab out status matches count stable live path final_detail
   case "$target" in *:*) ;; *) return 1 ;; esac
   session=${target%%:*}
   name=${target#*:}
-  [ "$name" = "fm-$task" ] && [ "$detail" = "$target" ] || return 1
+  expected="fm-$task"
+  [ -z "$spawn_gen" ] || expected="$expected--$spawn_gen"
+  [ "$name" = "$expected" ] && [ "$detail" = "$target" ] || return 1
   tab=$(printf '\t')
   out=$(LC_ALL=C tmux list-windows -t "$session" \
     -F "#{window_id}${tab}#{session_name}:#{window_name}${tab}#{pane_current_path}" 2>&1)
@@ -407,8 +409,21 @@ $matches
 EOF
   [ -n "$stable" ] && [ "$live" = "$target" ] && [ -n "$path" ] || return 1
   case "$stable$live$path" in *[$'\t\r\n']*) return 1 ;; esac
+  final_detail="${target%%:*}:fm-$task"
   printf 'found\tcreated\t%s\t%s\t%s\t-\t-\t-\t-\n' \
-    "$stable" "$live" "$path"
+    "$stable" "$final_detail" "$path"
+}
+
+fm_backend_tmux_finalize_reservation() {  # <stable-id> <task> <spawn>
+  local stable=$1 task=$2 spawn_gen=$3 session live expected final
+  expected="fm-$task--$spawn_gen"
+  final="fm-$task"
+  live=$(tmux display-message -p -t "$stable" '#{session_name}:#{window_name}' 2>/dev/null) || return 1
+  session=${live%%:*}
+  [ "$live" = "$session:$final" ] && return 0
+  [ "$live" = "$session:$expected" ] || return 1
+  ! tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qxF "$final" || return 1
+  tmux rename-window -t "$stable" "$final" >/dev/null 2>&1
 }
 
 fm_backend_tmux_agent_state() {  # <target> [inventory-status] [inventory-directory]

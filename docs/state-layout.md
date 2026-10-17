@@ -54,6 +54,9 @@ state/               runtime records and signals; gitignored
   <id>.reconcile-nudged  epoch second of the last inventory-reconcile nudge sent to this secondmate; bin/fm-secondmate-reconcile.sh owns its per-home cooldown window
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
+  .active-supervision-generation .active-supervision-v1/  watcher-owned committed active-task snapshot and immutable generation payloads; fm-supervision-registry-lib.sh owns validation, reconciliation, and retirement
+  .active-supervision-transactions-v1/  private per-task reservation journals whose atomic record selects one immutable staged metadata slot; retained until exact task metadata commits or authoritative recovery cancels ownership
+  .active-supervision.lock .active-supervision-sequence .active-supervision-incarnation-sequence  registry serialization, snapshot-generation, and owner-incarnation counters; fm-supervision-registry-lib.sh owns them; never touch
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -63,6 +66,7 @@ state/               runtime records and signals; gitignored
   <id>.pr-poll-merge-notified  canonical PR identity of the last merge outcome delivered for this task; bin/fm-pr-lib.sh owns the marker format and identity mechanics, while bin/fm-merge-outcome-lib.sh owns locked publication, duplicate suppression, and replacement
   .check-sweep-cursor  watcher-owned basename of the last check completed in a bounded Codex sweep; retained across an actionable wake while later checks remain, then removed when the sweep completes
   .check-sweep-high-water  immutable lexical upper bound captured when a bounded Codex check sweep starts; removed with the cursor when that sweep completes
+  .registered-checks-v1/  watcher-owned active index of runnable custom and PR checks; fm-check-lib.sh reconciles valid artifacts into it and removes stale markers
   branch-outcomes.jsonl .branch-outcomes-cursor  Pi supervision-branch durable outcome store and its read cursor; bin/fm-branch-outcome.sh owns the format
   branch-session/ .branch-session .branch-mirror-cursor  the branch's persistent conversation, its pointer, and the dialog-mirror cursor; extension-owned (docs/pi-supervision-branch.md)
   .branch-eligible-rows .branch-eligible-owner .main-eligible-rows  per-actor wake-row claims and branch-owner evidence; docs/watcher-continuity.md owns the acknowledgement contract
@@ -73,6 +77,7 @@ state/               runtime records and signals; gitignored
   x-watch.check.sh   generated Relay poll shim; present only when opted in (AGENTS.md section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
+  .pending-reply-active-v1/  parent-owned bounded index and publication intents for still-open pending-reply records; fm-pending-reply-lib.sh reconciles it from the authoritative records in pending-replies/
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (AGENTS.md section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
   decision-bindings/ private records marking a captured-answer source as feeding the keyed-answer intake, with a legacy origin on pre-collapse records; written only by bin/fm-captain-hold.sh bind, dropped by unbind and by source retirement (AGENTS.md section 13; docs/captain-hold-lifecycle.md)
@@ -98,6 +103,7 @@ state/               runtime records and signals; gitignored
   .codex-stop.owner-lock  stable kernel-flock inode for the sole Codex Stop continuation owner; never remove or replace
   .codex-stop.json .codex-stop.sock  transient live-owner lease record and private local transport socket; existence alone is not health evidence, and the owner normally removes both on stand-down; never touch
   .codex-stop-error  latest recorded Codex Stop owner exception diagnostic; not health evidence, safe to delete
+  .codex-stop-failure-episode.json  bounded Codex Stop refusal episode keyed by the current failure signature; fm-codex-stop.sh replaces it on a new episode and clears it after successful arming
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .death-notified-v3/ .death-generation-v3/ .death-notified-* .death-generation-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete

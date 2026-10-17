@@ -1951,6 +1951,30 @@ test_registry_phase_transition_recovers_torn_publication() {
     fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" reverse reverse-gen \
       endpoint-only zellij zellij-main:10 9 "$FM_STATE_OVERRIDE/.reverse.endpoint" || exit 1
     cp "$FM_STATE_OVERRIDE/.reverse.planned-record" "$reverse_dir/record" || exit 1
+
+    printf "%s\n" "window=zellij-main:fm-internal--internal-gen" "endpoint_task_id=internal" \
+      "endpoint_state=planned" "worktree=-" "project=/project/internal" \
+      "harness=codex" "kind=ship" "backend=zellij" \
+      "recovery_detail=zellij-main" "spawn_gen=internal-gen" \
+      > "$FM_STATE_OVERRIDE/.internal.plan" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" internal internal-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" internal internal-gen \
+      planned zellij zellij-main:fm-internal--internal-gen zellij-main "$FM_STATE_OVERRIDE/.internal.plan" || exit 1
+    internal_dir=$(fm_supervision_registry_transaction_dir "$FM_STATE_OVERRIDE" internal) || exit 1
+    internal_slot=$(fm_meta_get "$internal_dir/record" metadata) || exit 1
+    cp "$internal_dir/record" "$FM_STATE_OVERRIDE/.internal.planned-record" || exit 1
+    cp "$internal_dir/$internal_slot" "$FM_STATE_OVERRIDE/.internal.planned-meta" || exit 1
+    cp "$FM_STATE_OVERRIDE/.active-supervision-generation" "$FM_STATE_OVERRIDE/.internal.planned-snapshot" || exit 1
+    printf "%s\n" "window=zellij-main:12" "endpoint_task_id=internal" \
+      "endpoint_state=endpoint-only" "worktree=-" "project=/project/internal" \
+      "harness=codex" "kind=ship" "backend=zellij" "zellij_session=zellij-main" \
+      "zellij_tab_id=11" "zellij_pane_id=12" "spawn_gen=internal-gen" \
+      > "$FM_STATE_OVERRIDE/.internal.endpoint" || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" internal internal-gen \
+      endpoint-only zellij zellij-main:12 11 "$FM_STATE_OVERRIDE/.internal.endpoint" || exit 1
+    cp "$FM_STATE_OVERRIDE/.internal.planned-record" "$internal_dir/record" || exit 1
+    cp "$FM_STATE_OVERRIDE/.internal.planned-meta" "$internal_dir/$internal_slot" || exit 1
+    cp "$FM_STATE_OVERRIDE/.internal.planned-snapshot" "$FM_STATE_OVERRIDE/.active-supervision-generation" || exit 1
   ' _ "$ROOT/bin" || fail 'could not construct torn reservation transition'
   inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
@@ -1961,6 +1985,7 @@ test_registry_phase_transition_recovers_torn_publication() {
         printf "%s\t%s\tunverified\t%s\t%s\n" "$backend" "$target" "$route" "$home"
       done
     }
+    fm_backend_recover_planned() { printf "missing\t-\t-\t-\t-\t-\t-\t-\t-\n"; }
     fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
   ' _ "$ROOT/bin") || fail 'torn reservation transition did not recover'
   [ "$inventory" = "$(printf '%s\n%s' "$dir/state/reverse.meta" "$dir/state/torn.meta")" ] \
@@ -1971,6 +1996,8 @@ test_registry_phase_transition_recovers_torn_publication() {
   grep -F "$(printf 'entry\treverse\treverse-gen\tpending')" \
     "$dir/state/.active-supervision-generation" >/dev/null \
     || fail 'reverse-order reservation transition did not converge to pending ownership'
+  ! grep -F "$(printf '\tinternal\t')" "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'record-first transaction interruption did not retain its coherent planned journal'
   txdir="$dir/state/.active-supervision-transactions-v1"
   [ -d "$txdir" ] && [ -z "$(find "$txdir" -mindepth 1 -print -quit)" ] \
     || fail 'recovered reservation transaction was not retired'
@@ -4812,6 +4839,48 @@ test_planned_reservation_rejects_preexisting_endpoint() {
   pass 'planned reservations reject pre-existing predictable endpoints'
 }
 
+test_planned_reservation_ignores_racing_canonical_endpoint() {
+  local dir inventory
+  dir=$(fixture planned-reservation-race)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" racing racing-gen || exit 1
+    printf "%s\n" "window=fleet:fm-racing--racing-gen" "endpoint_task_id=racing" \
+      "endpoint_state=planned" "worktree=-" "project=/project/racing" \
+      "harness=codex" "kind=ship" "backend=tmux" \
+      "recovery_detail=fleet:fm-racing--racing-gen" "spawn_gen=racing-gen" \
+      > "$FM_STATE_OVERRIDE/.racing.plan" || exit 1
+    fm_backend_recover_planned() {
+      [ "$3" = fleet:fm-racing ] || exit 3
+      printf "missing\t-\t-\t-\t-\t-\t-\t-\t-\n"
+    }
+    fm_supervision_registry_plan_reservation "$FM_STATE_OVERRIDE" racing racing-gen \
+      tmux fleet:fm-racing--racing-gen fleet:fm-racing--racing-gen \
+      "$FM_STATE_OVERRIDE/.racing.plan" fleet:fm-racing fleet:fm-racing
+  ' _ "$ROOT/bin" || fail 'could not publish transaction-bound racing plan'
+  inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_backend_recover_planned() {
+      if [ "$3" = fleet:fm-racing ]; then
+        printf "found\tcreated\t@99\tfleet:fm-racing\t/project/foreign\t-\t-\t-\t-\n"
+      else
+        [ "$3" = fleet:fm-racing--racing-gen ] || return 1
+        printf "missing\t-\t-\t-\t-\t-\t-\t-\t-\n"
+      fi
+    }
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin") || fail 'transaction-bound racing plan did not reconcile'
+  [ -z "$inventory" ] || fail "racing canonical endpoint was adopted: $inventory"
+  ! grep -F "$(printf '\tracing\t')" "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'missing provisional endpoint retained or adopted canonical ownership'
+  pass 'planned reservations ignore racing canonical endpoints'
+}
+
 test_planned_backend_discovery_uses_live_identity() {
   local dir
   dir=$(fixture planned-backend-discovery)
@@ -5350,6 +5419,7 @@ test_remote_recovery_protocol_reports_exact_endpoint
 test_transaction_journals_recover_every_backend
 test_planned_reservations_converge_after_backend_creation_crashes
 test_planned_reservation_rejects_preexisting_endpoint
+test_planned_reservation_ignores_racing_canonical_endpoint
 test_planned_backend_discovery_uses_live_identity
 test_registered_check_kills_term_ignoring_process_group
 test_registered_check_preserves_grace_for_orphan_descendant

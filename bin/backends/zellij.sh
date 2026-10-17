@@ -271,11 +271,13 @@ fm_backend_zellij_pane_for_tab() {  # <session> <tab_id>
 }
 
 fm_backend_zellij_recover_planned() {  # <task> <target> <detail>
-  local task=$1 target=$2 detail=$3 session label title tabs tab_ids count tab pane
+  local task=$1 target=$2 detail=$3 spawn_gen=${4:-} session label expected title tabs tab_ids count tab pane
   case "$target" in *:*) ;; *) return 1 ;; esac
   session=${target%%:*}
   label=${target#*:}
-  [ "$session" = "$detail" ] && [ "$label" = "fm-$task" ] || return 1
+  expected="fm-$task"
+  [ -z "$spawn_gen" ] || expected="$expected--$spawn_gen"
+  [ "$session" = "$detail" ] && [ "$label" = "$expected" ] || return 1
   title=$(fm_backend_zellij_scoped_title "$label")
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
@@ -293,6 +295,26 @@ fm_backend_zellij_recover_planned() {  # <task> <target> <detail>
   [ -n "$pane" ] || return 1
   printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t%s\t-\n' \
     "$session" "$pane" "$tab" "$session" "$tab" "$pane"
+}
+
+fm_backend_zellij_finalize_reservation() {  # <session:pane> <tab-id> <task> <spawn>
+  local target=$1 tab=$2 task=$3 spawn_gen=$4 session tabs expected final expected_title final_title live prev_active collision
+  session=${target%%:*}
+  expected="fm-$task--$spawn_gen"
+  final="fm-$task"
+  expected_title=$(fm_backend_zellij_scoped_title "$expected")
+  final_title=$(fm_backend_zellij_scoped_title "$final")
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  live=$(printf '%s' "$tabs" | jq -r --argjson tab "$tab" '.[]? | select(.tab_id == $tab) | .name' 2>/dev/null)
+  [ "$live" = "$final_title" ] && return 0
+  [ "$live" = "$expected_title" ] || return 1
+  collision=$(printf '%s' "$tabs" | jq -r --arg want "$final_title" '.[]? | select(.name == $want) | .tab_id' 2>/dev/null)
+  [ -z "$collision" ] || return 1
+  prev_active=$(printf '%s' "$tabs" | jq -r '.[]? | select(.active == true) | .tab_id' 2>/dev/null | head -1)
+  fm_backend_zellij_cli "$session" action go-to-tab-by-id "$tab" >/dev/null 2>&1 || return 1
+  fm_backend_zellij_cli "$session" action rename-tab "$final_title" >/dev/null 2>&1 || return 1
+  [ -z "$prev_active" ] || [ "$prev_active" = "$tab" ] \
+    || fm_backend_zellij_cli "$session" action go-to-tab-by-id "$prev_active" >/dev/null 2>&1 || true
 }
 
 # fm_backend_zellij_tab_for_pane: the owning tab id for <pane_id> in

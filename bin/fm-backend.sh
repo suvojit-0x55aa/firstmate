@@ -918,6 +918,19 @@ fm_backend_recover_planned() {
   esac
 }
 
+fm_backend_finalize_reservation() {
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_finalize_reservation "$@" ;;
+    herdr) fm_backend_herdr_finalize_reservation "$@" ;;
+    zellij) fm_backend_zellij_finalize_reservation "$@" ;;
+    cmux) fm_backend_cmux_finalize_reservation "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
 fm_backend_retire_reservation() {
   local backend=$1
   shift

@@ -797,7 +797,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_plan_endpoint() {
-  local backend=$1 target=$2 detail=$3 plan
+  local backend=$1 target=$2 detail=$3 discovery_target=${4:-} discovery_detail=${5:-} plan
   plan="$STATE/.$ID.meta.plan.${BASHPID:-$$}"
   {
     printf 'window=%s\n' "$target"
@@ -810,7 +810,8 @@ spawn_plan_endpoint() {
       "$backend" "$detail" "$SPAWN_GEN"
   } > "$plan" || { rm -f -- "$plan"; return 1; }
   if ! fm_supervision_registry_plan_reservation \
-      "$STATE" "$ID" "$SPAWN_GEN" "$backend" "$target" "$detail" "$plan"; then
+      "$STATE" "$ID" "$SPAWN_GEN" "$backend" "$target" "$detail" "$plan" \
+      "$discovery_target" "$discovery_detail"; then
     rm -f -- "$plan"
     echo "error: backend endpoint for $ID already exists or is ambiguous; refusing duplicate launch" >&2
     return 1
@@ -2100,6 +2101,8 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+SPAWN_ENDPOINT_LABEL="$W--$SPAWN_GEN"
+SPAWN_ENDPOINT_PROVISIONAL=0
 if ! fm_supervision_registry_reserve "$STATE" "$ID" "$SPAWN_GEN"; then
   echo "error: $ID supervision ownership could not be reserved before endpoint creation" >&2
   exit 1
@@ -2128,8 +2131,9 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    spawn_plan_endpoint tmux "$T" "$T" || exit 1
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_plan_endpoint tmux "$SES:$SPAWN_ENDPOINT_LABEL" "$SES:$SPAWN_ENDPOINT_LABEL" "$T" "$T" || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS") || exit 1
+    SPAWN_ENDPOINT_PROVISIONAL=1
     WT_TARGET="$WID"
     SPAWN_RESERVATION_TARGET=$WID
     SPAWN_RESERVATION_DETAIL=$T
@@ -2291,8 +2295,10 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      spawn_plan_endpoint herdr "$HERDR_SES:$W" "$HERDR_WORKSPACE_ID" || exit 1
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      spawn_plan_endpoint herdr "$HERDR_SES:$SPAWN_ENDPOINT_LABEL" "$HERDR_WORKSPACE_ID" \
+        "$HERDR_SES:$W" "$HERDR_WORKSPACE_ID" || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      SPAWN_ENDPOINT_PROVISIONAL=1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2307,8 +2313,10 @@ EOF
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    spawn_plan_endpoint zellij "$ZELLIJ_SES:$W" "$ZELLIJ_SES" || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_plan_endpoint zellij "$ZELLIJ_SES:$SPAWN_ENDPOINT_LABEL" "$ZELLIJ_SES" \
+      "$ZELLIJ_SES:$W" "$ZELLIJ_SES" || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS") || exit 1
+    SPAWN_ENDPOINT_PROVISIONAL=1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2322,8 +2330,10 @@ EOF
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    spawn_plan_endpoint cmux "$W" "$(fm_backend_cmux_scoped_title "$W")" || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    spawn_plan_endpoint cmux "$SPAWN_ENDPOINT_LABEL" "$(fm_backend_cmux_scoped_title "$SPAWN_ENDPOINT_LABEL")" \
+      "$W" "$(fm_backend_cmux_scoped_title "$W")" || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS") || exit 1
+    SPAWN_ENDPOINT_PROVISIONAL=1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2389,6 +2399,7 @@ if [ "$RELAUNCH" -ne 1 ]; then
     echo "model=${MODEL:-default}"
     echo "effort=${EFFORT:-default}"
     echo "spawn_gen=$SPAWN_GEN"
+    [ "$SPAWN_ENDPOINT_PROVISIONAL" -ne 1 ] || echo "provisional_endpoint=$SPAWN_ENDPOINT_LABEL"
     [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
     if [ "$BACKEND" = herdr ]; then
       echo "herdr_session=$HERDR_SES"
@@ -2420,6 +2431,13 @@ if [ "$RELAUNCH" -ne 1 ]; then
       "$STATE" "$ID" "$SPAWN_GEN" "$SPAWN_PROVISIONAL_PHASE" "$BACKEND" \
       "$SPAWN_RESERVATION_TARGET" "$SPAWN_RESERVATION_DETAIL" "$SPAWN_PROVISIONAL_META"; then
     SPAWN_RESERVATION_MARKED=0
+  fi
+  if [ "$SPAWN_RESERVATION_MARKED" -eq 1 ] && [ "$SPAWN_ENDPOINT_PROVISIONAL" -eq 1 ]; then
+    case "$BACKEND" in
+      tmux) fm_backend_finalize_reservation "$BACKEND" "$SPAWN_RESERVATION_TARGET" "$ID" "$SPAWN_GEN" || SPAWN_RESERVATION_MARKED=0 ;;
+      herdr|zellij) fm_backend_finalize_reservation "$BACKEND" "$SPAWN_RESERVATION_TARGET" "$SPAWN_RESERVATION_DETAIL" "$ID" "$SPAWN_GEN" || SPAWN_RESERVATION_MARKED=0 ;;
+      cmux) fm_backend_finalize_reservation "$BACKEND" "$SPAWN_RESERVATION_TARGET" "$ID" "$SPAWN_GEN" || SPAWN_RESERVATION_MARKED=0 ;;
+    esac
   fi
   if [ "$SPAWN_PROVISIONAL_PHASE" = created ]; then
     if ! spawn_publish_meta_file "$SPAWN_PROVISIONAL_META" "$STATE/$ID.meta"; then
