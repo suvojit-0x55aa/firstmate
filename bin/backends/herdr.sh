@@ -3236,13 +3236,13 @@ EOF
   return 1
 }
 
-# fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (fm-<id>) across <session>, including
-# home, launcher, and presentation workspaces. Never trusts a stored pane id,
-# since ids are not guaranteed stable across every server lifecycle (see
-# herdr-verification-p2.md "ID stability"). Read-only: a session that does not
-# exist yet simply lists nothing. The public wrapper emits one
-# "<session>:<pane_id>\t<label>" line per live task pane.
+# fm_backend_herdr_list_live_details: session-wide recovery inventory. Lists
+# every tab whose label looks like a firstmate task window (fm-<id>) across
+# <session>, including home, launcher, and presentation workspaces. The shared
+# registry consumes the retained workspace identity to assign each pane to the
+# right home. Never trusts a stored pane id, since ids are not guaranteed stable
+# across every server lifecycle (see herdr-verification-p2.md "ID stability").
+# Read-only: a session that does not exist yet simply lists nothing.
 fm_backend_herdr_list_live_details() {  # <session>
   local session=$1 tabs tab_rows workspaces panes tab_id label pane_id pane_ids workspace
   local workspace_label workspace_label_count
@@ -3306,11 +3306,17 @@ $tab_rows
 EOF_TABS
 }
 
+# The legacy public wrapper remains home-scoped even when several Firstmate
+# homes share one Herdr session. Cross-home registry recovery calls the detail
+# helper directly and classifies its explicit workspace identity.
 fm_backend_herdr_list_live() {  # <session>
-  local details target label workspace tab pane workspace_label workspace_label_count
+  local details target label workspace tab pane workspace_label workspace_label_count home_workspace
+  home_workspace=$(fm_backend_herdr_workspace_find "$1") || return 0
+  [ -n "$home_workspace" ] || return 0
   details=$(fm_backend_herdr_list_live_details "$1") || return 1
   while IFS=$'\t' read -r target label workspace tab pane workspace_label workspace_label_count; do
     [ -n "$target" ] && [ -n "$label" ] || continue
+    [ "$workspace" = "$home_workspace" ] || continue
     printf '%s\t%s\n' "$target" "$label"
   done <<EOF
 $details

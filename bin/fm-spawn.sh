@@ -1791,6 +1791,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ]; then
+  : "${SECONDMATE_PROJECTS:=}"
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
@@ -2947,7 +2948,6 @@ fi
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
-  : "${SECONDMATE_PROJECTS:=}"
 elif [ "$KIND" = scout ]; then
   MODE=
   YOLO=

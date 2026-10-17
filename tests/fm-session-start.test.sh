@@ -333,6 +333,7 @@ mode=${FM_FAKE_TMUX_MODE:?}
 log=${FM_FAKE_TMUX_LOG:?}
 spawned=${FM_FAKE_TMUX_SPAWNED:?}
 killed=${spawned}.killed
+window_name=${spawned}.window
 mate_home=${FM_FAKE_SECOND_MATE_HOME:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 mate_window="fm-$mate_id"
@@ -350,6 +351,7 @@ case "${1:-}" in
       case "$format" in
         *pane_current_path*) printf '%s\n' "$mate_home" ;;
         *pane_current_command*) printf '%s\n' node ;;
+        *session_name*window_name*) printf 'firstmate:%s\n' "$(cat "$window_name")" ;;
         *) printf '%s\n' "$target" ;;
       esac
       exit 0
@@ -378,16 +380,26 @@ case "${1:-}" in
     esac
     ;;
   list-windows)
+    format=
+    for arg in "$@"; do case "$arg" in '#{'*) format=$arg ;; esac; done
     if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then
       exit 1
     fi
     if [ -e "$spawned" ]; then
-      printf '%s\n' "$mate_window"
+      name=$mate_window
+      command=node
     elif [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
-      printf '%s\n' "$mate_window"
+      name=$mate_window
+      case "$mode" in shell) command=zsh ;; *) command=node ;; esac
     else
-      printf '%s\n' main
+      name=main
+      command=zsh
     fi
+    case "$format" in
+      *session_name*window_name*) printf 'firstmate:%s\t%s\n' "$name" "$name" ;;
+      *pane_tty*pane_current_command*) printf '%s\t/dev/ttys999\t%s\n' "$name" "$command" ;;
+      *) printf '%s\n' "$name" ;;
+    esac
     exit 0
     ;;
   has-session) exit 0 ;;
@@ -399,7 +411,16 @@ case "${1:-}" in
   new-window)
     printf '%s\n' "$*" >> "$log"
     : > "$spawned"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then shift; printf '%s\n' "$1" > "$window_name"; break; fi
+      shift
+    done
     printf '%%1\n'
+    exit 0
+    ;;
+  rename-window)
+    printf '%s\n' "$*" >> "$log"
+    printf '%s\n' "${4:-}" > "$window_name"
     exit 0
     ;;
   set-window-option|send-keys) exit 0 ;;

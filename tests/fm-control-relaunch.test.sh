@@ -110,7 +110,26 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  list-windows)
+    format=
+    while [ $# -gt 0 ]; do
+      [ "$1" != -F ] || { format=${2:-}; break; }
+      shift
+    done
+    case "$format" in
+      *session_name*window_name*)
+        while IFS= read -r name; do
+          [ -n "$name" ] && printf 'fmses:%s\t%s\n' "$name" "$name"
+        done < "$D/windows"
+        ;;
+      *pane_tty*pane_current_command*)
+        while IFS= read -r name; do
+          [ -n "$name" ] && printf '%s\t/dev/ttys999\t%s\n' "$name" "$(cat "$D/command")"
+        done < "$D/windows"
+        ;;
+      *) [ -f "$D/windows" ] && cat "$D/windows" ;;
+    esac
+    exit 0 ;;
 esac
 exit 0
 SH

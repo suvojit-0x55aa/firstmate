@@ -40,9 +40,24 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#{session_name}:#{window_name}'*) printf 'firstmate:%s\n' "$(cat "${FM_FAKE_PANE_PATH}.tmux-window")" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then shift; printf '%s\n' "$1" > "${FM_FAKE_PANE_PATH}.tmux-window"; break; fi
+      shift
+    done
+    printf '@101\n'
+    exit 0
+    ;;
+  rename-window) printf '%s\n' "${4:-}" > "${FM_FAKE_PANE_PATH}.tmux-window"; exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

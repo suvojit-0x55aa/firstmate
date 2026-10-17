@@ -25,12 +25,27 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#{session_name}:#{window_name}'*) printf 'firstmate:%s\n' "$(cat "${FM_FAKE_PANE_PATH}.tmux-window")" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   list-windows)
     [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then shift; printf '%s\n' "$1" > "${FM_FAKE_PANE_PATH}.tmux-window"; break; fi
+      shift
+    done
+    printf '@101\n'
+    exit 0
+    ;;
+  rename-window) printf '%s\n' "${4:-}" > "${FM_FAKE_PANE_PATH}.tmux-window"; exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
@@ -199,7 +214,7 @@ run_two_level() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
-    FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$sm" CLAUDECODE=1 TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$smlog" PATH="$smfake:$PATH" \
     "$SPAWN" "$sm_id" "$sm" --secondmate >/dev/null 2>&1 || true
 
@@ -365,7 +380,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
-    FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$sm" CLAUDECODE=1 TMUX="fake,1,0" \
     FM_FAKE_DUPLICATE_WINDOW="fm-$id" FM_FAKE_LAUNCH_LOG="$log" \
     PATH="$fake:$PATH" "$SPAWN" "$id" "$sm" --secondmate 2>&1)
   status=$?

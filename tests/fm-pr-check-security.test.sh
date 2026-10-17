@@ -2530,7 +2530,10 @@ SH
     > "$dir/watch.out" 2> "$dir/watch.err" &
   pid=$!
   i=0
-  while [ "$i" -lt 100 ]; do
+  # Loaded serial CI can spend more than two seconds in watcher startup before
+  # the due custom-check child is forked. Keep the assertion bounded, but wait
+  # for the observable child (or an early watcher exit) rather than racing it.
+  while [ "$i" -lt 500 ]; do
     [ -s "$child_pid_file" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.02

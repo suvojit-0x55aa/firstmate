@@ -770,17 +770,27 @@ test_peek_conformance_old_vs_new() {
 # --- old vs new: fm-spawn.sh --------------------------------------------------
 
 make_spawn_fakebin() {  # <dir> <fake-worktree-path> -> echoes fakebin dir
-  local dir=$1 wt=$2 fb="$1/fakebin"
+  local dir=$1 wt=$2 fb="$1/fakebin" window_name="$1/window-name"
   mkdir -p "$fb"
+  : > "$window_name"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
-  new-window) printf '@101\n'; exit 0 ;;
+  new-window)
+    while [ \$# -gt 0 ]; do
+      [ "\$1" != -n ] || { printf '%s' "\$2" > "$window_name"; break; }
+      shift
+    done
+    printf '@101\n'; exit 0 ;;
   display-message)
-    for a in "\$@"; do case "\$a" in *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;; esac; done
+    for a in "\$@"; do case "\$a" in
+      *pane_current_path*) printf '%s\\n' "$wt"; exit 0 ;;
+      *session_name*window_name*) printf 'firstmate:%s\\n' "\$(cat "$window_name")"; exit 0 ;;
+    esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  rename-window) printf '%s' "\${4:-}" > "$window_name"; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0
@@ -832,15 +842,21 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 # onward, so this test fails loudly if the PROJ_ABS/PROJ_ABS_REAL
 # canonicalization in bin/fm-spawn.sh ever regresses.
 make_spawn_symlink_fakebin() {  # <dir> <initial-project-path> <worktree-path> -> echoes fakebin dir
-  local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count"
+  local dir=$1 initial_path=$2 wt=$3 fb="$1/fakebin" counter="$1/poll-count" window_name="$1/window-name"
   mkdir -p "$fb"
   : > "$counter"
+  : > "$window_name"
   cat > "$fb/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 { printf 'tmux'; for a in "\$@"; do printf '\\x1f%s' "\$a"; done; printf '\\n'; } >> "\${FM_TMUX_LOG:?}"
 case "\${1:-}" in
-  new-window) printf '@102\n'; exit 0 ;;
+  new-window)
+    while [ \$# -gt 0 ]; do
+      [ "\$1" != -n ] || { printf '%s' "\$2" > "$window_name"; break; }
+      shift
+    done
+    printf '@102\n'; exit 0 ;;
   display-message)
     for a in "\$@"; do case "\$a" in *pane_current_path*)
       printf x >> "$counter"
@@ -850,8 +866,12 @@ case "\${1:-}" in
         printf '%s\\n' "$wt"
       fi
       exit 0
+    ;; *session_name*window_name*)
+      printf 'firstmate:%s\\n' "\$(cat "$window_name")"
+      exit 0
     ;; esac; done
     printf 'firstmate\\n'; exit 0 ;;
+  rename-window) printf '%s' "\${4:-}" > "$window_name"; exit 0 ;;
   list-windows) exit 0 ;;
 esac
 exit 0

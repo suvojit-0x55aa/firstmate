@@ -2799,25 +2799,26 @@ test_workspace_find_matches_only_this_homes_own_label() {
   pass "fm_backend_herdr_workspace_find: matches only THIS home's own label among several coexisting workspaces"
 }
 
-# --- list_live: session-wide task discovery ----------------------------------
+# --- list_live: this home's task discovery -----------------------------------
 
-test_list_live_covers_every_workspace() {
+test_list_live_is_scoped_to_this_homes_workspace() {
   local dir log resp fb out home
   dir="$TMP_ROOT/list-live-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   home="$TMP_ROOT/list-live-scoped-home"; mkdir -p "$home"; printf 'bravo-b2\n' > "$home/.fm-secondmate-home"
-  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-primarytask","workspace_id":"w1"},{"tab_id":"w2:t1","label":"fm-secondmatetask","workspace_id":"w2"},{"tab_id":"w3:t1","label":"shell","workspace_id":"w3"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"},{"workspace_id":"w3","label":"captain"}]}}\n' > "$resp/2.out"
-  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w2:p1","tab_id":"w2:t1"},{"pane_id":"w3:p1","tab_id":"w3:t1"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"},{"workspace_id":"w3","label":"captain"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-primarytask","workspace_id":"w1"},{"tab_id":"w2:t1","label":"fm-secondmatetask","workspace_id":"w2"},{"tab_id":"w3:t1","label":"shell","workspace_id":"w3"}]}}\n' > "$resp/2.out"
+  cp "$resp/1.out" "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w2:p1","tab_id":"w2:t1"},{"pane_id":"w3:p1","tab_id":"w3:t1"}]}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
-  [ "$out" = $'fmtest:w1:p1\tfm-primarytask\nfmtest:w2:p1\tfm-secondmatetask' ] \
-    || fail "list_live should report tasks from every workspace, got '$out'"
-  [ "$(grep -c $'\x1f''workspace'$'\x1f''list' "$log")" = 1 ] \
-    || fail "list_live should take one session-wide workspace snapshot"
+  [ "$out" = $'fmtest:w2:p1\tfm-secondmatetask' ] \
+    || fail "list_live should report only this secondmate home's task, got '$out'"
+  [ "$(grep -c $'\x1f''workspace'$'\x1f''list' "$log")" = 2 ] \
+    || fail "list_live should resolve this home and then take one session-wide identity snapshot"
   assert_not_contains "$(cat "$log")" $'\x1f''--workspace' \
     "list_live should use session-wide snapshots"
-  pass "fm_backend_herdr_list_live: discovers task tabs through bounded session-wide snapshots"
+  pass "fm_backend_herdr_list_live: excludes task tabs owned by other homes in the shared session"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -4522,7 +4523,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
-test_list_live_covers_every_workspace
+test_list_live_is_scoped_to_this_homes_workspace
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

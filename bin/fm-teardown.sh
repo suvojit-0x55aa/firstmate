@@ -673,7 +673,6 @@ fi
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-fm_supervision_registry_recover "$STATE" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)
@@ -694,6 +693,7 @@ if [ -z "$BUSY_GEN" ]; then
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+SUPERVISION_REGISTRY_READY=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -2567,6 +2567,11 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  # Forced child cleanup is the first irreversible secondmate operation.
+  # Bootstrap the active index only after every descendant target has passed
+  # its fail-closed preflight, while all cleanup remains retryable.
+  fm_supervision_registry_recover "$STATE" || exit 1
+  SUPERVISION_REGISTRY_READY=1
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
@@ -2645,6 +2650,15 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# Legacy homes may not have an active-index snapshot yet. Bootstrap it after
+# every refusal-only validation above, but before the first process, worktree,
+# endpoint, route, or durable-record cleanup. Forced secondmate teardown did
+# this immediately before descendant cleanup, its earlier destructive edge.
+if [ "$SUPERVISION_REGISTRY_READY" -ne 1 ]; then
+  fm_supervision_registry_recover "$STATE" || exit 1
+  SUPERVISION_REGISTRY_READY=1
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
