@@ -434,7 +434,7 @@ fm_supervision_registry_publish_planned_locked() { # <state> <task> <spawn> <bac
   provisional_endpoint=$(fm_backend_meta_exact_value "$plan_meta" window 2>/dev/null) || return 1
   [ "$worktree" != - ] || worktree=$planned_worktree
   if [ "$backend" != orca ]; then
-    phase=endpoint-only
+    phase='endpoint-only'
     worktree=-
   fi
   for value in "$project" "$harness" "$kind" "$worktree" "$target" "$detail" \
@@ -442,6 +442,13 @@ fm_supervision_registry_publish_planned_locked() { # <state> <task> <spawn> <bac
     case "$value" in ''|*[$'\t\r\n']*) return 1 ;; esac
   done
   tmp=$(umask 077; mktemp "$state/.$task.meta.planned-recovery.XXXXXX") || return 1
+  case "$backend" in
+    orca)
+      [ "$phase" = worktree-only ] || { rm -f -- "$tmp"; return 1; }
+      ;;
+    tmux|herdr|zellij|cmux) ;;
+    *) rm -f -- "$tmp"; return 1 ;;
+  esac
   {
     case "$backend" in
       tmux)
@@ -462,11 +469,10 @@ fm_supervision_registry_publish_planned_locked() { # <state> <task> <spawn> <bac
         printf 'cmux_workspace_id=%s\ncmux_surface_id=%s\n' "$id1" "$id2"
         ;;
       orca)
-        [ "$phase" = worktree-only ] || { rm -f -- "$tmp"; return 1; }
         printf 'window=fm-%s\nendpoint_state=worktree-only\nbackend=orca\n' "$task"
         printf 'orca_worktree_id=%s\n' "$id1"
         ;;
-      *) rm -f -- "$tmp"; return 1 ;;
+      *) return 1 ;;
     esac
     printf 'endpoint_task_id=%s\nworktree=%s\nproject=%s\n' "$task" "$worktree" "$project"
     printf 'harness=%s\nkind=%s\nspawn_gen=%s\n' "$harness" "$kind" "$spawn_gen"
@@ -543,7 +549,7 @@ fm_supervision_registry_reconcile_locked() {
   local recovery_identity recovery_state recovery_path recovery_target transaction_meta recovery_result recovery_tmp
   local recovery_harness expected_harness planned_result planned_verdict planned_phase transaction_fields
   local transaction_owner_pid transaction_owner_identity transaction_phase transaction_backend transaction_target transaction_detail
-  local reservation_rank transaction_rank transaction_dir transaction_staged
+  local reservation_rank transaction_rank transaction_staged
   local planned_target planned_detail planned_worktree planned_id1 planned_id2 planned_id3 planned_id4
   path=$(fm_supervision_registry_generation_path "$state")
   fm_supervision_registry_snapshot_valid "$path" || return 1
@@ -1011,8 +1017,8 @@ fm_supervision_registry_death_surfaced_values() { # <state> <task> <backend> <ta
 # missing columns; endpoint presence and spawn incarnation are explicit to
 # distinguish legitimate '-' values from absent metadata.
 fm_supervision_registry_meta_load() { # <meta> <task>
-  local meta=$1 task=$2 line key value backend= terminal= window= remote_host= home= kind=
-  local spawn= spawn_seen=0 endpoint_state= worktree= target endpoint route incarnation field
+  local meta=$1 task=$2 line key value backend='' terminal='' window='' remote_host='' home='' kind=''
+  local spawn='' spawn_seen=0 endpoint_state='' worktree='' target endpoint route incarnation field
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   fm_supervision_registry_task_valid "$task" || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -1102,9 +1108,8 @@ fm_supervision_registry_herdr_remap_owned() {
 
 fm_supervision_registry_bounded_migration_candidate() {
   local state=$1 task=$2 backend=$3 target=$4 home=$5 worktree=$6 owner_kind=$7 live_index=$8
-  local record live_backend live_target live_identity1 live_identity2 live_identity3 live_identity4 live_identity5
-  local resolved= resolved_identity1=- resolved_identity2=- resolved_identity3=-
-  local resolved_identity4=- resolved_identity5=- count=0
+  local record live_backend live_target live_identity1 live_identity2 live_identity3
+  local resolved='' resolved_identity1=- resolved_identity2=- resolved_identity3=- count=0
   FM_SUPERVISION_MIGRATION_TARGET=$target
   FM_SUPERVISION_MIGRATION_IDENTITY1=-
   FM_SUPERVISION_MIGRATION_IDENTITY2=-
@@ -1116,7 +1121,7 @@ fm_supervision_registry_bounded_migration_candidate() {
   case "$owner_kind" in ship|scout) ;; *) return 1 ;; esac
   record="$live_index/$task"
   if [ -f "$record" ] && [ ! -L "$record" ]; then
-    while IFS="$(printf '\t')" read -r live_backend live_target live_identity1 live_identity2 live_identity3 live_identity4 live_identity5; do
+    while IFS="$(printf '\t')" read -r live_backend live_target live_identity1 live_identity2 live_identity3 _; do
       [ "$live_backend" = "$backend" ] || continue
       case "$backend" in
         cmux)
@@ -1131,8 +1136,6 @@ fm_supervision_registry_bounded_migration_candidate() {
           resolved_identity1=$live_identity1
           resolved_identity2=$live_identity2
           resolved_identity3=$live_identity3
-          resolved_identity4=$live_identity4
-          resolved_identity5=$live_identity5
           count=$((count + 1))
           ;;
         herdr)
@@ -1140,8 +1143,6 @@ fm_supervision_registry_bounded_migration_candidate() {
           resolved_identity1=$live_identity1
           resolved_identity2=$live_identity2
           resolved_identity3=$live_identity3
-          resolved_identity4=$live_identity4
-          resolved_identity5=$live_identity5
           count=$((count + 1))
           ;;
         *)
@@ -1298,7 +1299,7 @@ fm_supervision_registry_bounded_scopes() {
 }
 
 fm_supervision_registry_zellij_live_task() {
-  local state=$1 target=$2 label=$3 prefix raw scoped candidate match= matches=0
+  local state=$1 target=$2 label=$3 prefix raw scoped candidate match='' matches=0
   case "$label" in fm-?*) raw=${label#fm-} ;; *) return 1 ;; esac
   fm_backend_source zellij || return 2
   prefix="fm-$(fm_backend_zellij_home_label)-"
@@ -1361,7 +1362,7 @@ fm_supervision_registry_recovery_cleanup() {
 
 fm_supervision_registry_recover_mode() {
   local state=$1 mode=$2 path lock candidates states endpoints meta task target backend route home verdict tmp spawn_gen rc
-  local endpoint owner_kind incarnation candidate_task worktree surfaced filtered live_index= previous_target
+  local endpoint owner_kind incarnation candidate_task worktree surfaced filtered live_index='' previous_target
   local migration_rc migration_identity1 migration_identity2 migration_identity3
   case "$mode" in legacy|bounded) ;; *) return 1 ;; esac
   path=$(fm_supervision_registry_generation_path "$state")

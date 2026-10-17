@@ -597,6 +597,7 @@ remote_secondmate_teardown() {
       }
     done
   fi
+  fm_supervision_registry_recover "$STATE" || return 1
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
     echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
     return 1
@@ -672,6 +673,7 @@ fi
 # complete before fm-guard, a backend command, file removal, branch deletion,
 # worktree return, registry change, or process termination can run.
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
+fm_supervision_registry_recover "$STATE" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 WT=$(fm_meta_get "$META" worktree)

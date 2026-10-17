@@ -657,7 +657,7 @@ fm_backend_source() {  # <name>
 }
 
 fm_backend_bounded_running_scopes() {
-  local requested=$1 running=$2 scope selected= seen=$'\n' count=0
+  local requested=$1 running=$2 scope selected='' seen=$'\n' count=0
   while IFS= read -r scope; do
     [ -n "$scope" ] || continue
     case "$seen" in *$'\n'"$scope"$'\n'*) continue ;; esac

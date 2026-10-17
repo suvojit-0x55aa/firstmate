@@ -37,7 +37,7 @@ fixture() {
   printf '%s\n' "$dir"
 }
 run_stop() { # <home> [checkpoint]
-  local home=$1 fixture_tasks= fixture_task snapshot
+  local home=$1 fixture_tasks='' fixture_task snapshot
   # Legacy fixtures used an empty .meta merely as a boolean.  The production
   # predicate now (correctly) treats a valid empty active snapshot as idle, so
   # make those fixtures real recoverable task records instead of relying on the
@@ -1869,8 +1869,8 @@ test_herdr_bulk_snapshot_bootstrap_is_conservative() {
     dir=$(fixture "herdr-duplicate-workspace-$mode")
     mkdir -p "$dir/fakebin"
     case "$mode" in
-      later-live) target=pane-live; workspace=w2; tab=tab-live ;;
-      partial) target=pane-first; workspace=w1; tab=tab-first ;;
+      later-live) target=pane-live; workspace=w2; tab='tab-live' ;;
+      partial) target=pane-first; workspace=w1; tab='tab-first' ;;
     esac
     printf '%s\n' \
       "window=fmtest:$target" "worktree=$dir/worktree" "project=$dir" \
@@ -2470,7 +2470,7 @@ SH
   old_surface=old:pane
   new_workspace=new-workspace
   new_surface=new:pane
-  second_workspace=second-workspace
+  second_workspace='second-workspace'
   second_surface=second:pane
   for mode in exact exact-mismatch exact-ambiguous launcher foreign-primary foreign-secondmate copied-presentation sibling captain ambiguous; do
     dir=$(fixture "bounded-bootstrap-herdr-remap-$mode")
@@ -2682,7 +2682,7 @@ SH
       . "$1/fm-backend.sh"
       . "$1/fm-supervision-registry-lib.sh"
       fm_backend_agent_state_batch() {
-        printf 'observing\n' > "$FM_HOME/recovery-observing"
+        printf "%s\n" observing > "$FM_HOME/recovery-observing"
         while [ ! -e "$FM_HOME/release-recovery" ]; do sleep 0.01; done
         while IFS="$(printf "\t")" read -r backend target route home; do
           printf "%s\t%s\tunverified\t%s\t%s\n" "$backend" "$target" "$route" "$home"
@@ -2718,10 +2718,13 @@ SH
   [ "$recovery_rc" -eq 0 ] || fail 'registry recovery failed while promotion waited to commit'
   [ "$promotion_rc" -eq 0 ] \
     || fail "concurrent promotion failed after bootstrap contention: $(cat "$dir/promotion.err")"
-  grep -qx 'kind=ship' "$dir/state/live-owner.meta" \
+  if grep -qx 'kind=ship' "$dir/state/live-owner.meta" \
     && grep -qx 'mode=direct-PR' "$dir/state/live-owner.meta" \
-    && grep -qx 'yolo=off' "$dir/state/live-owner.meta" \
-    || fail 'live-target normalization lost the concurrent promotion contract'
+    && grep -qx 'yolo=off' "$dir/state/live-owner.meta"; then
+    :
+  else
+    fail 'live-target normalization lost the concurrent promotion contract'
+  fi
   [ "$(sed -n 's/^window=//p' "$dir/state/live-owner.meta")" = "$new_workspace:$new_surface" ] \
     || fail 'pre-promotion recovery did not normalize the live target'
   inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -5599,10 +5602,13 @@ EOF
   inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/remote-missing")
   [ "$inventory" = $'live\nremote\nuncertain' ] \
     || fail "remote absence changed the wrong inventory: $inventory"
-  [ ! -e "$dir/state/remote-missing.meta" ] \
+  if [ ! -e "$dir/state/remote-missing.meta" ] \
     && ! grep -F "$(printf 'reservation\tremote-missing\t')" \
-      "$dir/state/.active-supervision-generation" >/dev/null \
-    || fail 'proven remote absence retained lifecycle ownership'
+      "$dir/state/.active-supervision-generation" >/dev/null; then
+    :
+  else
+    fail 'proven remote absence retained lifecycle ownership'
+  fi
 
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -5813,7 +5819,7 @@ SH
 }
 
 test_planned_reservations_converge_after_backend_creation_crashes() {
-  local dir rc backend task target detail facts
+  local dir rc backend task target facts
   dir=$(fixture planned-reservation-crashes)
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -5882,10 +5888,13 @@ EOF
   done
   grep -F 'tmux:@41' "$dir/state/retired-plans" >/dev/null \
     || fail 'tmux endpoint-only recovery did not retire its stable endpoint'
-  grep -F 'herdr:default:pane-2' "$dir/state/retired-plans" >/dev/null \
+  if grep -F 'herdr:default:pane-2' "$dir/state/retired-plans" >/dev/null \
     && grep -F 'zellij:zellij-main:8' "$dir/state/retired-plans" >/dev/null \
-    && grep -F 'cmux:workspace-3:surface-3' "$dir/state/retired-plans" >/dev/null \
-    || fail 'non-tmux endpoint-only recovery did not retire exact endpoints'
+    && grep -F 'cmux:workspace-3:surface-3' "$dir/state/retired-plans" >/dev/null; then
+    :
+  else
+    fail 'non-tmux endpoint-only recovery did not retire exact endpoints'
+  fi
   grep -F "$(printf 'entry\tplanned-orca\tplanned-orca-gen\tpending')" \
     "$dir/state/.active-supervision-generation" >/dev/null \
     || fail 'Orca worktree recovery did not publish lifecycle ownership'

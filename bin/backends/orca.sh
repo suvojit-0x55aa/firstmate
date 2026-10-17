@@ -220,6 +220,7 @@ fm_backend_orca_recover_planned() {  # <task> <target> <project>
   fi
   repo_id=$(printf '%s' "$repo_out" | fm_backend_orca_json_get repo-id 2>/dev/null) || return 1
   list=$(orca worktree list --repo "id:$repo_id" --limit 1000 --json 2>/dev/null) || return 1
+  # shellcheck disable=SC2016 # JavaScript is intentionally literal shell input.
   parsed=$(printf '%s' "$list" | node -e '
     const fs=require("fs");
     const want=process.argv[1];

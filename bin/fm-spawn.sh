@@ -843,7 +843,7 @@ spawn_mark_orca_worktree_only() {
     return 1
   fi
   rm -f -- "$staged"
-  SPAWN_RESERVATION_PHASE=worktree-only
+  SPAWN_RESERVATION_PHASE='worktree-only'
 }
 
 spawn_abort_cleanup() {
@@ -2425,7 +2425,7 @@ if [ "$RELAUNCH" -ne 1 ]; then
   SPAWN_RESERVATION_MARKED=1
   SPAWN_PROVISIONAL_PHASE=created
   if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-    SPAWN_PROVISIONAL_PHASE=endpoint-only
+    SPAWN_PROVISIONAL_PHASE='endpoint-only'
   fi
   if ! fm_supervision_registry_mark_reservation \
       "$STATE" "$ID" "$SPAWN_GEN" "$SPAWN_PROVISIONAL_PHASE" "$BACKEND" \
