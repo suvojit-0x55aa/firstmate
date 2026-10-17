@@ -767,7 +767,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   printf '%s' "$open"
 }
 
-# Incremental sibling of scan_open_decisions: same fleet-wide directory walk and
+# Incremental sibling of scan_open_decisions: same legacy fleet-wide directory walk and
 # output shape ("<task>\t<key>\t<verb>\t<note>" per open decision), but folds
 # each task's status log through status_open_decisions_incremental instead of
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
@@ -789,8 +789,27 @@ EOF
   return 0
 }
 
-status_presentation_snapshot() {  # <state>
-  local state=$1 f task size ident
+status_presentation_snapshot() {  # <state> [<newline-separated-task-ids>]
+  local state=$1 task_scope=${2-} scoped=false f task size ident
+  [ "$#" -lt 2 ] || scoped=true
+  if [ "$scoped" = true ]; then
+    while IFS= read -r task; do
+      [ -n "$task" ] || continue
+      case "$task" in ''|.*|*/*|*[$'\t\r\n']*) return 1 ;; esac
+      f="$state/$task.status"
+      [ -e "$f" ] || continue
+      [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ -n "$ident" ] || return 1
+      printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
+    done <<EOF
+$task_scope
+EOF
+    return 0
+  fi
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue

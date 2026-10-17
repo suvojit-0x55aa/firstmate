@@ -471,18 +471,22 @@ The motivating primary-home inventory was measured read-only: 92 distinct record
 The recorded green run below exercised the then-current 96-case Codex Stop driver, covering atomic active-supervision snapshots, monotonic generation-bound owner indexes, pre-launch, post-creation, metadata-publication, and remote-unknown reservation crash recovery, pending ownership, owner-addressed exact and legacy death-receipt recovery without tree scans, post-upgrade death recovery, registration, retirement, and generation revocation; 100 historical tmux endpoints and 40 historical Herdr endpoints, including absent targets and ambiguous agent-status rows, beside three live endpoints; a production-shaped 59-record stale inventory beside one overdue registered check; one process-complete backend snapshot per scope and cycle with no per-target probes; active-only keyed pending-reply reuse of exact-dead and missing classifications across duplicate endpoint owners with archived records excluded; paused remote endpoint and durable remote-inbox isolation from colliding local state; linear metadata resolution with duplicate endpoints; collision-free durable spawn-bound death receipts without backend capture; relaunch death before alive observation; paused and captain-held death notification before long cadence; local secondmate death notification with healthy-idle and remote isolation; active-owner busy and mixed-policy folding over one observation; timed-probe descendant cleanup; registered-check TERM/KILL/reap enforcement; recurring-probe and identity/cleanup transport-reserve enforcement including near-reserve owned cleanup and persistent uncertainty; terminal-error generation triage; exact attached-watcher runtime capability matching including the admission guard, active registry, per-owner fan-out accounting, and owner-bound full-cycle resumable batch-handoff mode; bounded-check parking with live-owner authorization and immutable lexical high-water fairness; production fork-to-publication launcher ownership retirement; pre-lock descendant cleanup for a cancelled running arm; bounded handoff from a retiring prior-session owner to the current Stop owner; a deliberately oversized two-endpoint live inventory; due authenticated custom and PR checks; unseen signals; due remote reply recovery; watcher ownership; and cancellation.
 The current driver invokes 113 top-level cases, including seventeen additions not represented by that recorded run.
 The unchanged Claude boundary and generated harness instructions also passed their focused suites.
+The same date's focused wake-drain regression used one active task beside 100 retained status logs and proved that only the active status was folded, while a separately queued status signal remained readable after lifecycle retirement.
 
 ```sh
 bash tests/fm-codex-stop.test.sh
 bash tests/fm-claude-stop-autoarm.test.sh
 bash tests/fm-turnend-guard.test.sh
 bash tests/fm-supervision-instructions.test.sh
+FM_SUPERVISION_MODEL=autoarm bin/fm-test-run.sh tests/fm-wake-drain-open-decisions.test.sh
 bin/fm-lint.sh
 ```
 
 Exact relevant output:
 
 ```text
+ok - a large retired decision inventory does not multiply the active drain cost
+ok - a queued status signal remains covered after its task leaves the active registry
 ok - large stale endpoint history does not consume the live cycle budget
 ok - 59 stale task records and one overdue check preserve live-only Stop admission
 ok - paused remote endpoints stay isolated from local stale handling

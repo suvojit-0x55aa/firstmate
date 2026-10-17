@@ -15,6 +15,17 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-tests)
 
+publish_active_snapshot() {  # <state> [<task>...]
+  local state=$1 task
+  shift
+  {
+    printf 'fm-active-supervision.v6\tg1\n'
+    for task in "$@"; do
+      printf 'entry\t%s\t-\tactive\n' "$task"
+    done
+  } > "$state/.active-supervision-generation"
+}
+
 test_buried_decision_still_surfaces() {
   local dir state out
   dir=$(make_case buried)
@@ -124,9 +135,10 @@ test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
   dir=$(make_case fleet-wide)
   state="$dir/state"
   out="$dir/drain.out"
-  # task6 has a buried, still-open decision but generates NO new queue record
-  # this turn; task7 is what actually wakes the drain. The fleet-wide scan
-  # must still catch task6's decision alongside task7's own raw row.
+  # On a pre-registry compatibility home, task6 has a buried, still-open
+  # decision but generates NO new queue record this turn; task7 is what actually
+  # wakes the drain. The legacy fleet-wide fallback must still catch task6's
+  # decision alongside task7's own raw row.
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$state/task6.status"
   printf 'working: continuing\n' >> "$state/task6.status"
   printf 'blocked: waiting on credentials\n' > "$state/task7.status"
@@ -138,7 +150,7 @@ test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
   grep "$(printf '\tsignal\ttask7.status\t')" "$out" >/dev/null || fail "task7's own raw row is missing"
   grep -F 'task6' "$out" | grep -F '[key=migration]' >/dev/null \
     || fail "task6's buried decision was not surfaced even though only task7 queued a wake"
-  pass "the open-decision section is fleet-wide, not scoped to this drain's own queued records"
+  pass "the pre-registry open-decision fallback remains fleet-wide, not queue-only"
 }
 
 test_buried_decision_surfaces_on_the_empty_queue_fast_path() {
@@ -175,7 +187,68 @@ test_status_symlink_is_not_followed() {
   if grep -F 'do not expose this' "$out" >/dev/null; then
     fail "the fleet scan followed a status symlink outside the state directory"
   fi
-  pass "the fleet-wide decision scan does not follow status symlinks"
+  pass "the legacy fleet-wide decision scan does not follow status symlinks"
+}
+
+test_active_snapshot_excludes_large_retired_decision_history() {
+  local dir state out err probe id probe_lines
+  dir=$(make_case active-snapshot-retired-history)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  probe="$dir/read-probe.tsv"
+  : > "$probe"
+
+  for id in $(seq 1 100); do
+    printf 'needs-decision [key=retired-%s]: historical decision %s\n' "$id" "$id" \
+      > "$state/retired-$id.status"
+  done
+  printf 'needs-decision [key=live]: live decision remains visible\n' > "$state/live.status"
+  publish_active_snapshot "$state" live
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" \
+    "$DRAIN" > "$out" 2> "$err" \
+    || fail "drain failed with a large retired decision inventory"
+
+  grep -F 'live [key=live] needs-decision: live decision remains visible' "$out" >/dev/null \
+    || fail "the lifecycle-active decision was omitted: $(cat "$out")"
+  if grep -F 'historical decision' "$out" >/dev/null; then
+    fail "retired decision history crossed the active lifecycle boundary: $(cat "$out")"
+  fi
+  probe_lines=$(wc -l < "$probe" | tr -d '[:space:]')
+  [ "$probe_lines" -eq 1 ] \
+    || fail "the drain folded $probe_lines status logs instead of the one active log"
+  grep -F "$(printf '%s\t' "$state/live.status")" "$probe" >/dev/null \
+    || fail "the read probe did not record the lifecycle-active status log"
+  [ ! -e "$state/.retired-1.open-decisions-cursor" ] \
+    || fail "the drain created fold state for retired decision history"
+  pass "a large retired decision inventory does not multiply the active drain cost"
+}
+
+test_queued_signal_status_survives_registry_retirement() {
+  local dir state out err probe
+  dir=$(make_case queued-signal-after-retirement)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  probe="$dir/read-probe.tsv"
+  : > "$probe"
+  printf 'blocked [key=delivery]: queued signal still needs handling\n' > "$state/retired.status"
+  publish_active_snapshot "$state"
+  append_wake "$state" signal retired.status 'signal: retired.status' \
+    || fail "queueing the retired task signal failed"
+
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" \
+    "$DRAIN" > "$out" 2> "$err" \
+    || fail "drain failed for a queued signal after lifecycle retirement"
+
+  grep "$(printf '\tsignal\tretired.status\t')" "$out" >/dev/null \
+    || fail "the queued signal row was not presented"
+  grep -F 'retired [key=delivery] blocked: queued signal still needs handling' "$out" >/dev/null \
+    || fail "lifecycle retirement hid the status attached to a queued signal: $(cat "$out")"
+  [ "$(wc -l < "$probe" | tr -d '[:space:]')" -eq 1 ] \
+    || fail "the queued-signal exception read more than its one status log"
+  pass "a queued status signal remains covered after its task leaves the active registry"
 }
 
 # The per-item cut now comes from bin/fm-line-cap-lib.sh, shared with the
@@ -224,3 +297,5 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_active_snapshot_excludes_large_retired_decision_history
+test_queued_signal_status_survives_registry_retirement

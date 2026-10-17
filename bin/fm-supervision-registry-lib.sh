@@ -298,10 +298,9 @@ fm_supervision_registry_snapshot_header() {
   printf 'fm-active-supervision.v6\tg%s\n' "$current"
 }
 
-fm_supervision_registry_snapshot_valid() {
-  local path=$1 protocol generation generation_sequence kind task field3 field4 field5 field6 field7 field8 field9
-  [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  IFS="$(printf '\t')" read -r protocol generation < "$path" || return 1
+_fm_supervision_registry_snapshot_stream_valid() {
+  local protocol generation generation_sequence kind task field3 field4 field5 field6 field7 field8 field9
+  IFS="$(printf '\t')" read -r protocol generation || return 1
   case "$protocol" in fm-active-supervision.v2|fm-active-supervision.v3|fm-active-supervision.v4|fm-active-supervision.v5|fm-active-supervision.v6) ;; *) return 1 ;; esac
   [ -n "$generation" ] || return 1
   if [ "$protocol" = fm-active-supervision.v5 ] || [ "$protocol" = fm-active-supervision.v6 ]; then
@@ -334,7 +333,35 @@ fm_supervision_registry_snapshot_valid() {
         ;;
       *) return 1 ;;
     esac
-  done < <(sed '1d' "$path")
+  done
+}
+
+fm_supervision_registry_snapshot_valid() {
+  local path=$1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  _fm_supervision_registry_snapshot_stream_valid < "$path"
+}
+
+# Print the task ids in one committed active-supervision snapshot without
+# reconciling reservations or reading any endpoint. The atomic generation file
+# is captured once before validation so a concurrent registry replacement
+# cannot make validation and enumeration observe different generations. A
+# valid empty snapshot succeeds with no output; missing or malformed snapshots
+# fail so compatibility callers can choose their conservative legacy fallback.
+fm_supervision_registry_active_tasks() {  # <state>
+  local state=$1 path snapshot kind task field3 field4 field5 field6 field7 field8 field9
+  [ "$#" -eq 1 ] || return 1
+  path=$(fm_supervision_registry_generation_path "$state")
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  snapshot=$(LC_ALL=C command cat "$path" 2>/dev/null) || return 1
+  printf '%s\n' "$snapshot" | _fm_supervision_registry_snapshot_stream_valid || return 1
+  while IFS="$(printf '\t')" read -r kind task field3 field4 field5 field6 field7 field8 field9; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+      entry|reservation) printf '%s\n' "$task" || return 1 ;;
+      *) return 1 ;;
+    esac
+  done < <(printf '%s\n' "$snapshot" | sed '1d')
 }
 
 fm_supervision_registry_recover_reservation_meta_locked() {
