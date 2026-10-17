@@ -2185,7 +2185,7 @@ SH
 test_bounded_bootstrap_rebinds_unique_live_targets() {
   local mode dir title old_workspace old_surface new_workspace new_surface second_workspace second_surface
   local inventory rc current_window current_workspace current_surface live_workspace workspace_label
-  local expected_workspace canonical_home token
+  local expected_workspace canonical_home token foreign_home owner_label foreign_label
   old_workspace=aaaaaaaa-0000-0000-0000-000000000000
   old_surface=bbbbbbbb-1111-1111-1111-111111111111
   new_workspace=cccccccc-2222-2222-2222-222222222222
@@ -2277,13 +2277,19 @@ SH
   new_surface=new:pane
   second_workspace=second-workspace
   second_surface=second:pane
-  for mode in launcher home journal sibling captain ambiguous; do
+  for mode in launcher secondmate journal foreign-primary sibling captain ambiguous; do
     dir=$(fixture "bounded-bootstrap-herdr-remap-$mode")
     mkdir -p "$dir/fakebin"
     live_workspace=$new_workspace
     case "$mode" in
       launcher) live_workspace=$old_workspace; workspace_label=captain ;;
-      home|ambiguous) workspace_label=firstmate ;;
+      secondmate)
+        printf '%s\n' alpha > "$dir/.fm-secondmate-home"
+        workspace_label=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+          . "$1/backends/herdr.sh"
+          fm_backend_herdr_workspace_label
+        ' _ "$ROOT/bin") || fail 'could not derive the secondmate Herdr workspace label'
+        ;;
       journal)
         token=abcdefghijklmnopqrstuv
         workspace_label="└ live-owner · p:$token"
@@ -2295,6 +2301,22 @@ SH
           'parent_label=firstmate' "workspace_label=$workspace_label" 'task_label=fm-live-owner' \
           > "$dir/state/live-owner.herdr-presentation"
         ;;
+      foreign-primary)
+        foreign_home="$dir/foreign-home"
+        mkdir -p "$foreign_home/state"
+        owner_label=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+          . "$1/backends/herdr.sh"
+          fm_backend_herdr_workspace_label
+        ' _ "$ROOT/bin") || fail 'could not derive the owner Herdr workspace label'
+        foreign_label=$(FM_HOME="$foreign_home" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+          . "$1/backends/herdr.sh"
+          fm_backend_herdr_workspace_label
+        ' _ "$ROOT/bin") || fail 'could not derive the foreign Herdr workspace label'
+        [ "$owner_label" = firstmate ] && [ "$foreign_label" = firstmate ] \
+          || fail 'primary Herdr homes did not reproduce the shared workspace label'
+        workspace_label=$foreign_label
+        ;;
+      ambiguous) workspace_label=firstmate ;;
       sibling) workspace_label=2ndmate-sibling ;;
       captain) workspace_label=captain ;;
     esac
@@ -2363,7 +2385,7 @@ SH
     current_workspace=$(sed -n 's/^herdr_workspace_id=//p' "$dir/state/live-owner.meta")
     current_surface=$(sed -n 's/^herdr_pane_id=//p' "$dir/state/live-owner.meta")
     case "$mode" in
-      launcher|home|journal)
+      launcher|secondmate|journal)
         [ "$rc" -eq 0 ] || fail "$mode-owned Herdr target remap blocked bounded bootstrap"
         [ "$inventory" = "$dir/state/live-owner.meta" ] \
           || fail "$mode-owned Herdr target remap lost its live owner: $inventory"
@@ -2374,7 +2396,7 @@ SH
           && [ "$current_surface" = "$new_surface" ] \
           || fail "$mode-owned Herdr target remap did not normalize durable endpoint identity"
         ;;
-      sibling|captain|ambiguous)
+      foreign-primary|sibling|captain|ambiguous)
         [ "$rc" -ne 0 ] || fail "$mode Herdr target remap published a snapshot"
         [ ! -e "$dir/state/.active-supervision-generation" ] \
           || fail "$mode Herdr target remap became authoritative"

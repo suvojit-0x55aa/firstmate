@@ -1104,7 +1104,9 @@ fm_supervision_registry_herdr_remap_owned() {
   [ "$workspace_label_count" -eq 1 ] || return 1
   fm_backend_source herdr || return 1
   expected_home_label=$(fm_backend_herdr_workspace_label) || return 1
-  [ "$workspace_label" != "$expected_home_label" ] || return 0
+  case "$expected_home_label" in
+    2ndmate-?*) [ "$workspace_label" != "$expected_home_label" ] || return 0 ;;
+  esac
   journal=$(fm_backend_herdr_projection_journal_path "$state" "$task")
   fm_backend_herdr_projection_journal_snapshot "$journal" "$task" || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 1
