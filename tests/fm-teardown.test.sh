@@ -208,6 +208,8 @@ write_meta() {
     "project=$case_dir/project" \
     "kind=$kind" \
     "mode=$mode"
+  printf 'fm-active-supervision.v6\tg1\nentry\ttask-x1\t-\tactive\n' \
+    > "$case_dir/state/.active-supervision-generation"
 }
 
 # Commit something on the worktree's task branch. Args: case_dir [message]

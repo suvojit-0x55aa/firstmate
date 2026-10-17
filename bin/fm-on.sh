@@ -24,6 +24,9 @@
 # This command explicitly disables agent forwarding, forwarding setup, and
 # configured SendEnv patterns. The remote entrypoint executes the selected
 # command under an empty environment with only its fixed runtime values.
+# Lifecycle recovery may bind the resolved route with
+# FM_ON_EXPECTED_REMOTE_HOST, FM_ON_EXPECTED_REMOTE_ROOT, and
+# FM_ON_EXPECTED_REMOTE_HOME.
 #
 # ServerAliveInterval/ServerAliveCountMax arm dead-peer detection so a vanished
 # peer (a reboot, a dropped link) becomes a bounded ssh failure (exit 255)
@@ -99,6 +102,14 @@ for configured_path in "$ROOT" "$HOME_PATH"; do
   case "/$configured_path/" in */../*|*/./*) die "configured remote root or home contains traversal components" ;; esac
   case "$configured_path" in *'//'*) die "configured remote root or home contains an empty path component" ;; esac
 done
+if { [ -n "${FM_ON_EXPECTED_REMOTE_HOST:-}" ] \
+    && [ "$HOST" != "$FM_ON_EXPECTED_REMOTE_HOST" ]; } \
+  || { [ -n "${FM_ON_EXPECTED_REMOTE_ROOT:-}" ] \
+    && [ "$ROOT" != "$FM_ON_EXPECTED_REMOTE_ROOT" ]; } \
+  || { [ -n "${FM_ON_EXPECTED_REMOTE_HOME:-}" ] \
+    && [ "$HOME_PATH" != "$FM_ON_EXPECTED_REMOTE_HOME" ]; }; then
+  die "remote route '$ROUTE' changed during lifecycle recovery"
+fi
 
 ROOT_B64=$(printf '%s' "$ROOT" | encode_base64)
 HOME_B64=$(printf '%s' "$HOME_PATH" | encode_base64)

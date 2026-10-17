@@ -58,6 +58,10 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# When a nested remote teardown keeps its supervision registry beneath the
+# secondmate home, successful home removal retires that in-home registry too;
+# teardown must not recreate or lock it afterward. The parent home's distinct
+# registry is still retired only after the remote teardown succeeds.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -174,6 +178,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-supervision-registry-lib.sh
+. "$SCRIPT_DIR/fm-supervision-registry-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -595,6 +601,7 @@ remote_secondmate_teardown() {
       }
     done
   fi
+  fm_supervision_registry_recover "$STATE" || return 1
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
     echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
     return 1
@@ -633,6 +640,7 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
+  fm_supervision_registry_retire "$STATE" "$ID" || return 1
   rm -f -- "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
@@ -689,6 +697,9 @@ if [ -z "$BUSY_GEN" ]; then
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+SUPERVISION_REGISTRY_READY=0
+SUPERVISION_REGISTRY_OWNED_BY_HOME=0
+SUPERVISION_REGISTRY_RETIRED_WITH_HOME=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -985,6 +996,7 @@ remove_pr_poll_artifacts() {
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.check-trust" || return 1
+  fm_check_index_remove "$state_dir" "$id" || return 1
   if fm_task_id_path_safe "$id"; then
     quarantine="$state_dir/.pr-check-quarantine"
     if [ -d "$quarantine" ] && [ ! -L "$quarantine" ]; then
@@ -1214,6 +1226,16 @@ canonical_existing_dir() {
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
   ( cd "$target" && pwd -P )
+}
+
+# Return 0 when a supervision state directory is canonically contained by the
+# home that teardown will remove, 1 when it is outside, and 2 when either path
+# cannot be resolved while both are still expected to exist.
+supervision_registry_owned_by_home() {  # <state-dir> <home-dir>
+  local state_abs home_abs
+  state_abs=$(canonical_existing_dir "$1") || return 2
+  home_abs=$(canonical_existing_dir "$2") || return 2
+  [ "$state_abs" = "$home_abs" ] || path_is_ancestor_of "$home_abs" "$state_abs"
 }
 
 retry_wait_secs_is_valid() {
@@ -2533,6 +2555,15 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_stage_recover "$HOME_PATH" || exit 1
   handoff_wake_retire_validate || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+  if supervision_registry_owned_by_home "$STATE" "$HOME_PATH"; then
+    SUPERVISION_REGISTRY_OWNED_BY_HOME=1
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      echo "error: cannot resolve secondmate home and supervision state containment before teardown" >&2
+      exit 1
+    fi
+  fi
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
@@ -2561,6 +2592,11 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  # Forced child cleanup is the first irreversible secondmate operation.
+  # Bootstrap the active index only after every descendant target has passed
+  # its fail-closed preflight, while all cleanup remains retryable.
+  fm_supervision_registry_recover "$STATE" || exit 1
+  SUPERVISION_REGISTRY_READY=1
   cleanup_firstmate_home_children "$HOME_PATH" || exit $?
 fi
 
@@ -2639,6 +2675,15 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+# Legacy homes may not have an active-index snapshot yet. Bootstrap it after
+# every refusal-only validation above, but before the first process, worktree,
+# endpoint, route, or durable-record cleanup. Forced secondmate teardown did
+# this immediately before descendant cleanup, its earlier destructive edge.
+if [ "$SUPERVISION_REGISTRY_READY" -ne 1 ]; then
+  fm_supervision_registry_recover "$STATE" || exit 1
+  SUPERVISION_REGISTRY_READY=1
 fi
 
 # Every landed/discard-work refusal above has now passed (or --force skipped
@@ -2795,7 +2840,9 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
-    :
+    if [ "$SUPERVISION_REGISTRY_OWNED_BY_HOME" -eq 1 ]; then
+      SUPERVISION_REGISTRY_RETIRED_WITH_HOME=1
+    fi
   else
     rc=$?
     handoff_wake_retire_stage_restore \
@@ -2815,6 +2862,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+if [ "$SUPERVISION_REGISTRY_RETIRED_WITH_HOME" -ne 1 ]; then
+  fm_supervision_registry_retire "$STATE" "$ID" || exit 1
+fi
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

@@ -398,8 +398,14 @@ reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
 # first visit, such a scan would return 3 having examined no child at all while
 # write_scan_marker had already advanced the cursor past the skipped child.
 scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
-  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc first
-  for meta in "$STATE"/*.meta; do
+  local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc first metas
+  if [ -n "${FM_INACTIVE_ACTIVE_INVENTORY:-}" ]; then
+    [ -f "$FM_INACTIVE_ACTIVE_INVENTORY" ] && [ ! -L "$FM_INACTIVE_ACTIVE_INVENTORY" ] || return 1
+    metas=$(cat "$FM_INACTIVE_ACTIVE_INVENTORY") || return 1
+  else
+    metas=$(printf '%s\n' "$STATE"/*.meta)
+  fi
+  while IFS= read -r meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     valid_id "$id" || continue
@@ -426,7 +432,9 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
       [ "$rc" -eq 3 ] && return 3
       return "$rc"
     }
-  done
+  done <<EOF
+$metas
+EOF
 }
 
 scan() {

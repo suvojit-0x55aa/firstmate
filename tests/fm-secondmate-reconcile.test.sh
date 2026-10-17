@@ -52,8 +52,8 @@ write_snapshot() {  # <path> <mate-id> <invalidity-json> [state]
       provenance:{selected:"structured-home", trust:"partial-structured"}}]}}' > "$1"
 }
 
-# The same shape, but for a persistent REMOTE secondmate: no spawn_gen (its
-# parent metadata never carries one), host instead.
+# The compatibility shape for a legacy markerless remote secondmate uses its
+# parent-side host as the identity instead.
 write_remote_snapshot() {  # <path> <mate-id> <host> <invalidity-json> [state]
   jq -n --arg id "$2" --arg host "$3" --argjson inv "$4" --arg state "${5:-captain_decision}" '{
     schema:"fm-fleet-snapshot.v1", generated:"2026-08-26T00:00:00Z",
@@ -117,8 +117,8 @@ META
   printf '%s\n' "$rh"
 }
 
-# A parent home whose secondmate is a persistent REMOTE route (as
-# spawn_remote_secondmate() writes it: no spawn_gen, remote_host instead).
+# A parent home with legacy markerless remote-route metadata records
+# remote_host instead of spawn_gen.
 make_remote_parent_home() {  # <name> <mate-id> <remote-home> <host> -> echoes home dir
   local home="$TMP_ROOT/$1" id=$2 rhome host=$4
   mkdir -p "$home/data" "$home/state"
@@ -564,11 +564,10 @@ META
   pass "teardown retires the cooldown before a replacement can inherit it"
 }
 
-# A persistent REMOTE secondmate's parent metadata never carries spawn_gen
-# (bin/fm-spawn.sh's spawn_remote_secondmate() never writes one). This is the
-# proven marker-bearing path's counterpart: same durable fire-and-forget
-# delivery and cooldown behavior, driven end to end through the real remote
-# transport, for a mate that legitimately has no generation marker at all.
+# A legacy markerless remote secondmate uses remote_host as its compatibility
+# identity. This is the proven marker-bearing path's counterpart: same durable
+# fire-and-forget delivery and cooldown behavior, driven end to end through the
+# real remote transport.
 test_a_markerless_remote_secondmate_is_nudged_once_per_window() {
   local home rhome fakebin snap out
   fakebin=$(make_remote_ssh_stub "$TMP_ROOT/remote-once")

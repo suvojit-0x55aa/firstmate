@@ -249,6 +249,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervision-registry-lib.sh
+. "$SCRIPT_DIR/fm-supervision-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -566,6 +568,50 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  tmp="$STATE/.$id.meta.remote-launch.${BASHPID:-$$}"
+  {
+    echo "window=remote:$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$home"
+    echo "project=$root"
+    echo "harness=$harness"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "tasktmp="
+    echo "model=${model#-}"
+    echo "effort=${effort#-}"
+    echo "home=$home"
+    echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
+    echo "remote_host=$host"
+    echo "remote_root=$root"
+    echo "remote_backend=herdr"
+    echo "remote_herdr_session=fm-remote"
+    echo "remote_target=unknown"
+    echo "spawn_gen=$SPAWN_GEN"
+    [ -z "$remote_traceparent" ] || echo "traceparent=$remote_traceparent"
+  } > "$tmp" || return 1
+  if ! fm_supervision_registry_reserve "$STATE" "$id" "$SPAWN_GEN"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id supervision ownership could not be reserved before launch" >&2
+    return 1
+  fi
+  SPAWN_REGISTRY_RESERVED=1
+  if ! fm_supervision_registry_mark_reservation \
+      "$STATE" "$id" "$SPAWN_GEN" remote-unknown remote "remote:$id" "$host" "$tmp"; then
+    rm -f -- "$tmp"
+    fm_supervision_registry_cancel_reservation "$STATE" "$id" "$SPAWN_GEN" || true
+    SPAWN_REGISTRY_RESERVED=0
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id supervision launch phase could not be published" >&2
+    return 1
+  fi
+  rm -f -- "$tmp"
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" < /dev/null 2>&1); then
     rc=0
@@ -577,11 +623,11 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    if [ "$rc" -eq 255 ]; then
-      echo "error: remote secondmate $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
-    fi
+    SPAWN_REGISTRY_RESERVED=0
+    echo "error: remote secondmate $id launch completion is unknown; preserved route $host:$home" >&2
     return "$rc"
   fi
+  SPAWN_REGISTRY_RESERVED=0
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
@@ -635,9 +681,33 @@ spawn_remote_secondmate() {
     echo "remote_backend=$remote_backend"
     echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
+    echo "spawn_gen=$SPAWN_GEN"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } > "$tmp"
-  mv -f -- "$tmp" "$meta"
+  if ! fm_supervision_registry_mark_reservation \
+      "$STATE" "$id" "$SPAWN_GEN" created remote-herdr "$remote_target" "$host" "$tmp"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id exact supervision endpoint could not be published" >&2
+    return 1
+  fi
+  if ! spawn_publish_meta_file "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id metadata could not be published" >&2
+    return 1
+  fi
+  fm_supervision_registry_prepare "$STATE" "$id" "$meta" || {
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote secondmate $id metadata was published, but pending supervision ownership could not be recorded" >&2
+    return 1
+  }
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK"
@@ -649,6 +719,10 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
+  fm_supervision_registry_register "$STATE" "$id" "$meta" || {
+    echo "error: remote secondmate $id launched, but active supervision registration failed" >&2
+    return 1
+  }
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
@@ -674,6 +748,9 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SPAWN_GEN=
+SPAWN_REGISTRY_RESERVED=0
+SPAWN_RESERVATION_PHASE=reserved
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -681,6 +758,26 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+
+# Publish one fully validated metadata image at its exact pathname. Plain
+# `mv source target` treats an existing target directory as a container and
+# silently moves source underneath it, which can turn a deliberate metadata
+# publication failure into a later failure after endpoint cleanup authority
+# has already been released. Lifecycle locks serialize Firstmate writers; the
+# type checks make non-regular/symlink targets fail closed at this boundary.
+spawn_publish_meta_file() {  # <source> <target>
+  local source=$1 target=$2
+  if [ -d "$target" ]; then
+    echo "$target: Is a directory" >&2
+    return 1
+  fi
+  if [ -L "$target" ] || { [ -e "$target" ] && [ ! -f "$target" ]; }; then
+    echo "error: refusing to replace non-regular metadata target $target" >&2
+    return 1
+  fi
+  mv -f -- "$source" "$target" || return 1
+  [ -f "$target" ] && [ ! -L "$target" ]
+}
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -697,6 +794,56 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+spawn_plan_endpoint() {
+  local backend=$1 target=$2 detail=$3 discovery_target=${4:-} discovery_detail=${5:-} plan
+  plan="$STATE/.$ID.meta.plan.${BASHPID:-$$}"
+  {
+    printf 'window=%s\n' "$target"
+    printf 'endpoint_task_id=%s\n' "$ID"
+    printf 'endpoint_state=planned\n'
+    printf 'worktree=-\n'
+    printf 'project=%s\n' "$PROJ_ABS"
+    printf 'harness=%s\nkind=%s\n' "$HARNESS" "$KIND"
+    printf 'backend=%s\nrecovery_detail=%s\nspawn_gen=%s\n' \
+      "$backend" "$detail" "$SPAWN_GEN"
+  } > "$plan" || { rm -f -- "$plan"; return 1; }
+  if ! fm_supervision_registry_plan_reservation \
+      "$STATE" "$ID" "$SPAWN_GEN" "$backend" "$target" "$detail" "$plan" \
+      "$discovery_target" "$discovery_detail"; then
+    rm -f -- "$plan"
+    echo "error: backend endpoint for $ID already exists or is ambiguous; refusing duplicate launch" >&2
+    return 1
+  fi
+  rm -f -- "$plan"
+  SPAWN_RESERVATION_PHASE=planned
+}
+
+spawn_mark_orca_worktree_only() {
+  local staged
+  staged="$STATE/.$ID.meta.worktree.${BASHPID:-$$}"
+  {
+    printf 'window=%s\n' "$W"
+    printf 'endpoint_task_id=%s\n' "$ID"
+    printf 'endpoint_state=worktree-only\n'
+    printf 'worktree=%s\nproject=%s\n' "$WT" "$PROJ_ABS"
+    printf 'harness=%s\nkind=%s\n' "$HARNESS" "$KIND"
+    [ -z "${MODE:-}" ] || printf 'mode=%s\n' "$MODE"
+    [ -z "${YOLO:-}" ] || printf 'yolo=%s\n' "$YOLO"
+    printf 'tasktmp=%s\nmodel=%s\neffort=%s\n' \
+      "${TASK_TMP:-}" "${MODEL:-default}" "${EFFORT:-default}"
+    printf 'backend=orca\norca_worktree_id=%s\nspawn_gen=%s\n' \
+      "$ORCA_WORKTREE_ID" "$SPAWN_GEN"
+  } > "$staged" || { rm -f -- "$staged"; return 1; }
+  if ! fm_supervision_registry_mark_reservation \
+      "$STATE" "$ID" "$SPAWN_GEN" worktree-only orca "$W" \
+      "$ORCA_WORKTREE_ID" "$staged"; then
+    rm -f -- "$staged"
+    return 1
+  fi
+  rm -f -- "$staged"
+  SPAWN_RESERVATION_PHASE='worktree-only'
 }
 
 spawn_abort_cleanup() {
@@ -744,16 +891,20 @@ spawn_abort_cleanup() {
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    local orca_cleanup_proven=0
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        orca_cleanup_proven=1
+      else
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
-          {
+          if {
             echo "window=$W"
+            echo "endpoint_task_id=$ID"
             echo "worktree=${WT:-}"
             echo "project=$PROJ_ABS"
             echo "harness=$HARNESS"
@@ -765,10 +916,32 @@ spawn_abort_cleanup() {
             echo "effort=${EFFORT:-default}"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-          } > "$STATE/$ID.meta" 2>/dev/null || true
+            if [ -n "${ORCA_TERMINAL:-}" ]; then
+              echo "terminal=$ORCA_TERMINAL"
+            else
+              echo "endpoint_state=worktree-only"
+            fi
+            echo "spawn_gen=$SPAWN_GEN"
+          } > "$STATE/$ID.meta" 2>/dev/null \
+            && fm_supervision_registry_prepare "$STATE" "$ID" "$STATE/$ID.meta"; then
+            SPAWN_REGISTRY_RESERVED=0
+          fi
         fi
       fi
+    fi
+    if [ "$orca_cleanup_proven" = 1 ]; then
+      if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" = "$SPAWN_GEN" ]; then
+        rm -f -- "$STATE/$ID.meta" || true
+      fi
+      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" any || true
+      SPAWN_REGISTRY_RESERVED=0
+    fi
+  fi
+  if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ] \
+     && [ "$SPAWN_RESERVATION_PHASE" = reserved ]; then
+    SPAWN_REGISTRY_RESERVED=0
+    if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" != "$SPAWN_GEN" ]; then
+      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" any || true
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -896,6 +1069,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_GEN=
 # Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
 # task is legitimate branch recovery (fm-control drives it through this same
 # entrypoint), so only a fresh spawn refuses the branch actor (contract:
@@ -953,6 +1127,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
 fi
+SPAWN_GEN=$(fm_supervision_registry_allocate_incarnation "$STATE" "$ID") || {
+  echo "error: could not allocate a unique supervision incarnation for task $ID" >&2
+  exit 1
+}
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
     exit 0
@@ -1613,6 +1791,7 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 if [ "$KIND" = secondmate ]; then
+  : "${SECONDMATE_PROJECTS:=}"
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
@@ -1923,6 +2102,14 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+SPAWN_ENDPOINT_LABEL="$W--$SPAWN_GEN"
+SPAWN_ENDPOINT_PROVISIONAL=0
+if ! fm_supervision_registry_reserve "$STATE" "$ID" "$SPAWN_GEN"; then
+  echo "error: $ID supervision ownership could not be reserved before endpoint creation" >&2
+  exit 1
+fi
+SPAWN_REGISTRY_RESERVED=1
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # Adopt the recorded endpoint instead of creating one. This is what keeps a
   # relaunch a REPLACEMENT rather than a second copy of the task: no new
@@ -1945,8 +2132,12 @@ case "$BACKEND" in
     # treehouse cd's into the worktree. WT_TARGET carries that stable id for the
     # rename-critical worktree-detection steps below; the persisted window= handle
     # stays $T (the name form), which is safe now that rename is disabled.
-    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_plan_endpoint tmux "$SES:$SPAWN_ENDPOINT_LABEL" "$SES:$SPAWN_ENDPOINT_LABEL" "$T" "$T" || exit 1
+    WID=$(fm_backend_tmux_create_task "$SES" "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS") || exit 1
+    SPAWN_ENDPOINT_PROVISIONAL=1
     WT_TARGET="$WID"
+    SPAWN_RESERVATION_TARGET=$WID
+    SPAWN_RESERVATION_DETAIL=$T
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -2050,6 +2241,7 @@ case "$BACKEND" in
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            spawn_plan_endpoint herdr "$HERDR_SES:$W" "$HERDR_PRESENTATION_JOURNAL" || exit 1
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
@@ -2104,7 +2296,10 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      spawn_plan_endpoint herdr "$HERDR_SES:$SPAWN_ENDPOINT_LABEL" "$HERDR_WORKSPACE_ID" \
+        "$HERDR_SES:$W" "$HERDR_WORKSPACE_ID" || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      SPAWN_ENDPOINT_PROVISIONAL=1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -2114,10 +2309,15 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    SPAWN_RESERVATION_TARGET=$T
+    SPAWN_RESERVATION_DETAIL=$HERDR_TAB_ID
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
-    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$W" "$PROJ_ABS") || exit 1
+    spawn_plan_endpoint zellij "$ZELLIJ_SES:$SPAWN_ENDPOINT_LABEL" "$ZELLIJ_SES" \
+      "$ZELLIJ_SES:$W" "$ZELLIJ_SES" || exit 1
+    ZELLIJ_TASK_IDS=$(fm_backend_zellij_create_task "$ZELLIJ_SES" "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS") || exit 1
+    SPAWN_ENDPOINT_PROVISIONAL=1
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
@@ -2126,10 +2326,15 @@ EOF
       exit 1
     fi
     T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
+    SPAWN_RESERVATION_TARGET=$T
+    SPAWN_RESERVATION_DETAIL=$ZELLIJ_TAB_ID
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
-    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$W" "$PROJ_ABS") || exit 1
+    spawn_plan_endpoint cmux "$SPAWN_ENDPOINT_LABEL" "$(fm_backend_cmux_scoped_title "$SPAWN_ENDPOINT_LABEL")" \
+      "$W" "$(fm_backend_cmux_scoped_title "$W")" || exit 1
+    CMUX_TASK_IDS=$(fm_backend_cmux_create_task "$SPAWN_ENDPOINT_LABEL" "$PROJ_ABS") || exit 1
+    SPAWN_ENDPOINT_PROVISIONAL=1
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
@@ -2138,10 +2343,14 @@ EOF
       exit 1
     fi
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+    SPAWN_RESERVATION_TARGET=$T
+    SPAWN_RESERVATION_DETAIL=$CMUX_WORKSPACE_ID
     ;;
   orca)
+    ORCA_PLAN_LABEL="$W--$SPAWN_GEN"
+    spawn_plan_endpoint orca "$ORCA_PLAN_LABEL" "$PROJ_ABS" || exit 1
     set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$ORCA_PLAN_LABEL")
     ORCA_WT_STATUS=$?
     set -e
     if [ "$ORCA_WT_STATUS" -ne 0 ]; then
@@ -2159,12 +2368,91 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    spawn_mark_orca_worktree_only || exit 1
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
     T="$ORCA_TERMINAL"
+    SPAWN_RESERVATION_TARGET=$T
+    SPAWN_RESERVATION_DETAIL=$ORCA_WORKTREE_ID
     ;;
 esac
+fi
+if [ "$RELAUNCH" -ne 1 ]; then
+  SPAWN_PROVISIONAL_META="$STATE/.$ID.meta.launch.${BASHPID:-$$}"
+  SPAWN_PROVISIONAL_WINDOW=$T
+  [ "$BACKEND" = orca ] && SPAWN_PROVISIONAL_WINDOW=$W
+  {
+    echo "window=$SPAWN_PROVISIONAL_WINDOW"
+    echo "endpoint_task_id=$ID"
+    if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+      echo "endpoint_state=endpoint-only"
+      echo "worktree=-"
+    else
+      echo "worktree=${WT:-$PROJ_ABS}"
+    fi
+    echo "project=$PROJ_ABS"
+    echo "harness=$HARNESS"
+    echo "kind=$KIND"
+    [ -z "${MODE:-}" ] || echo "mode=$MODE"
+    [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+    echo "tasktmp=${TASK_TMP:-}"
+    echo "model=${MODEL:-default}"
+    echo "effort=${EFFORT:-default}"
+    echo "spawn_gen=$SPAWN_GEN"
+    [ "$SPAWN_ENDPOINT_PROVISIONAL" -ne 1 ] || echo "provisional_endpoint=$SPAWN_ENDPOINT_LABEL"
+    [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+    if [ "$BACKEND" = herdr ]; then
+      echo "herdr_session=$HERDR_SES"
+      echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
+      echo "herdr_tab_id=$HERDR_TAB_ID"
+      echo "herdr_pane_id=$HERDR_PANE_ID"
+    elif [ "$BACKEND" = zellij ]; then
+      echo "zellij_session=$ZELLIJ_SES"
+      echo "zellij_tab_id=$ZELLIJ_TAB_ID"
+      echo "zellij_pane_id=$ZELLIJ_PANE_ID"
+    elif [ "$BACKEND" = orca ]; then
+      echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+      echo "terminal=$ORCA_TERMINAL"
+    elif [ "$BACKEND" = cmux ]; then
+      echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
+      echo "cmux_surface_id=$CMUX_SURFACE_ID"
+    fi
+    if [ "$KIND" = secondmate ]; then
+      echo "home=$PROJ_ABS"
+      echo "projects=$SECONDMATE_PROJECTS"
+    fi
+  } > "$SPAWN_PROVISIONAL_META"
+  SPAWN_RESERVATION_MARKED=1
+  SPAWN_PROVISIONAL_PHASE=created
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+    SPAWN_PROVISIONAL_PHASE='endpoint-only'
+  fi
+  if ! fm_supervision_registry_mark_reservation \
+      "$STATE" "$ID" "$SPAWN_GEN" "$SPAWN_PROVISIONAL_PHASE" "$BACKEND" \
+      "$SPAWN_RESERVATION_TARGET" "$SPAWN_RESERVATION_DETAIL" "$SPAWN_PROVISIONAL_META"; then
+    SPAWN_RESERVATION_MARKED=0
+  fi
+  if [ "$SPAWN_RESERVATION_MARKED" -eq 1 ] && [ "$SPAWN_ENDPOINT_PROVISIONAL" -eq 1 ]; then
+    case "$BACKEND" in
+      tmux) fm_backend_finalize_reservation "$BACKEND" "$SPAWN_RESERVATION_TARGET" "$ID" "$SPAWN_GEN" || SPAWN_RESERVATION_MARKED=0 ;;
+      herdr|zellij) fm_backend_finalize_reservation "$BACKEND" "$SPAWN_RESERVATION_TARGET" "$SPAWN_RESERVATION_DETAIL" "$ID" "$SPAWN_GEN" || SPAWN_RESERVATION_MARKED=0 ;;
+      cmux) fm_backend_finalize_reservation "$BACKEND" "$SPAWN_RESERVATION_TARGET" "$ID" "$SPAWN_GEN" || SPAWN_RESERVATION_MARKED=0 ;;
+    esac
+  fi
+  if [ "$SPAWN_PROVISIONAL_PHASE" = created ]; then
+    if ! spawn_publish_meta_file "$SPAWN_PROVISIONAL_META" "$STATE/$ID.meta"; then
+      rm -f -- "$SPAWN_PROVISIONAL_META"
+      exit 1
+    fi
+  else
+    rm -f -- "$SPAWN_PROVISIONAL_META"
+  fi
+  if [ "$SPAWN_RESERVATION_MARKED" -ne 1 ]; then
+    echo "error: $ID exact supervision endpoint could not be published" >&2
+    exit 1
+  fi
+  SPAWN_RESERVATION_PHASE=$SPAWN_PROVISIONAL_PHASE
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
@@ -2660,7 +2948,6 @@ fi
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
   YOLO=off
-  : "${SECONDMATE_PROJECTS:=}"
 elif [ "$KIND" = scout ]; then
   MODE=
   YOLO=
@@ -2697,7 +2984,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2766,7 +3052,7 @@ preserve_relaunch_meta() {
 } > "$SPAWN_META_PATH"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
-  mv -f "$SPAWN_META_TMP" "$STATE/$ID.meta"
+  spawn_publish_meta_file "$SPAWN_META_TMP" "$STATE/$ID.meta"
   RELAUNCH_REPLACEMENT_PENDING=0
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
@@ -2781,6 +3067,12 @@ if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+
+fm_supervision_registry_prepare "$STATE" "$ID" "$STATE/$ID.meta" || {
+  echo "error: $ID metadata was published, but pending supervision ownership could not be recorded" >&2
+  exit 1
+}
+SPAWN_REGISTRY_RESERVED=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -2924,6 +3216,11 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     fi
   fi
 fi
+
+fm_supervision_registry_register "$STATE" "$ID" "$STATE/$ID.meta" || {
+  echo "error: $ID launched, but active supervision registration failed" >&2
+  exit 1
+}
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

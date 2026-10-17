@@ -1937,6 +1937,58 @@ fm_backend_herdr_agent_state() {  # <target>
   esac
 }
 
+fm_backend_herdr_agent_inventory_snapshot() {  # <session> <snapshot-dir>
+  local session=$1 snapshot_dir=$2 out pane_rows pane_id agent_status state key
+  mkdir -p "$snapshot_dir/panes" || return 1
+  out=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || {
+    printf 'unverified\n' > "$snapshot_dir/status"
+    return 0
+  }
+  if ! printf '%s' "$out" | jq -e '
+    (.result.panes | type) == "array"
+    and all(.result.panes[];
+      (.pane_id | type) == "string"
+      and (.pane_id | test("^[^[:space:]]+$"))
+      and (.agent_status == "unknown" or .agent_status == "working" or .agent_status == "idle"
+        or .agent_status == "done" or .agent_status == "blocked"))
+  ' >/dev/null 2>&1; then
+    printf 'unverified\n' > "$snapshot_dir/status"
+    return 0
+  fi
+  pane_rows=$(printf '%s' "$out" | jq -r '.result.panes[] | [.pane_id, .agent_status] | @tsv' 2>/dev/null) || {
+    printf 'unverified\n' > "$snapshot_dir/status"
+    return 0
+  }
+  while IFS="$(printf '\t')" read -r pane_id agent_status; do
+    [ -n "$pane_id" ] || continue
+    key=$(fm_backend_agent_state_cache_key "$pane_id") || return 1
+    case "$agent_status" in
+      unknown) state=unverified ;;
+      working|idle|done|blocked) state=alive ;;
+      *) return 1 ;;
+    esac
+    printf '%s\n' "$state" > "$snapshot_dir/panes/$key" || return 1
+  done <<EOF
+$pane_rows
+EOF
+  printf 'ok\n' > "$snapshot_dir/status"
+}
+
+fm_backend_herdr_agent_state_from_snapshot() {  # <target> <snapshot-status> <snapshot-dir>
+  local target=$1 snapshot_status=$2 snapshot_dir=$3 key
+  [ "$snapshot_status" = ok ] || { printf 'unverified'; return 0; }
+  fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
+  key=$(fm_backend_agent_state_cache_key "$FM_BACKEND_HERDR_PANE") || {
+    printf 'unreadable'
+    return 0
+  }
+  if [ -f "$snapshot_dir/panes/$key" ]; then
+    cat "$snapshot_dir/panes/$key"
+  else
+    printf 'missing'
+  fi
+}
+
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
 fm_backend_herdr_agent_alive() {  # <target>
@@ -3077,6 +3129,85 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
     '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
 }
 
+fm_backend_herdr_recover_planned() {  # <task> <target> <detail>
+  local task=$1 target=$2 detail=$3 spawn_gen=${4:-} session label expected workspace tabs tab_ids count tab pane
+  local list token workspaces
+  case "$target" in *:*) ;; *) return 1 ;; esac
+  session=${target%%:*}
+  label=${target#*:}
+  expected="fm-$task"
+  if [ -n "$spawn_gen" ] && { [ ! -f "$detail" ] || [ -L "$detail" ]; }; then
+    expected="$expected--$spawn_gen"
+  fi
+  [ "$label" = "$expected" ] || return 1
+  if [ -f "$detail" ] && [ ! -L "$detail" ]; then
+    fm_backend_herdr_projection_journal_snapshot "$detail" "$task" || return 1
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+      [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || return 1
+      workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+      tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+    else
+      token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+      list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+      printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+      workspaces=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
+        '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null) || return 1
+      count=$(printf '%s\n' "$workspaces" | awk 'NF { n++ } END { print n + 0 }')
+      [ "$count" -le 1 ] || return 1
+      if [ "$count" -eq 0 ]; then
+        printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+        return 0
+      fi
+      workspace=$workspaces
+      tab=
+    fi
+  else
+    workspace=$detail
+    tab=
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+  tab_ids=$(printf '%s' "$tabs" | jq -r --arg want "$label" \
+    '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null) || return 1
+  if [ -n "$tab" ]; then
+    printf '%s\n' "$tab_ids" | grep -Fqx "$tab" || {
+      printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+      return 0
+    }
+  else
+    count=$(printf '%s\n' "$tab_ids" | awk 'NF { n++ } END { print n + 0 }')
+    [ "$count" -le 1 ] || return 1
+    if [ "$count" -eq 0 ]; then
+      printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+      return 0
+    fi
+    tab=$tab_ids
+  fi
+  pane=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$tab") || return 1
+  [ -n "$pane" ] || return 1
+  case "$session$workspace$tab$pane" in *[$'\t\r\n']*) return 1 ;; esac
+  printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t%s\t%s\n' \
+    "$session" "$pane" "$tab" "$session" "$workspace" "$tab" "$pane"
+}
+
+fm_backend_herdr_finalize_reservation() {  # <session:pane> <tab-id> <task> <spawn>
+  local target=$1 tab=$2 task=$3 spawn_gen=$4 session pane pane_info workspace tabs expected final live collision
+  session=${target%%:*}
+  pane=${target#*:}
+  expected="fm-$task--$spawn_gen"
+  final="fm-$task"
+  pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  workspace=$(printf '%s' "$pane_info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
+  [ -n "$workspace" ] || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  live=$(printf '%s' "$tabs" | jq -r --arg tab "$tab" '.result.tabs[]? | select(.tab_id == $tab) | .label' 2>/dev/null)
+  [ "$live" = "$final" ] && return 0
+  [ "$live" = "$expected" ] || return 1
+  collision=$(printf '%s' "$tabs" | jq -r --arg want "$final" '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null)
+  [ -z "$collision" ] || return 1
+  fm_backend_herdr_cli "$session" tab rename "$tab" "$final" >/dev/null 2>&1
+}
+
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an
 # ad hoc selector with no meta (mirrors tmux's list-windows grep). Searches
 # every RUNNING named herdr session (herdr session list) for a tab whose label
@@ -3105,28 +3236,91 @@ EOF
   return 1
 }
 
-# fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
-# label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
-# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
-# home's), by LABEL - never by trusting a stored pane id, since ids are not
-# guaranteed stable across every server lifecycle (see herdr-verification-p2.md
-# "ID stability"). A caller running as a given home (e.g. a secondmate
-# recovering its own in-flight work) naturally scopes to that home's own
-# workspace because FM_HOME already names it - no glue needed, unlike the
-# primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
-# workspace that does not exist yet simply lists nothing. One
-# "<session>:<pane_id>\t<label>" line per live task tab.
-fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid tabs tab_id label pane_id
-  wsid=$(fm_backend_herdr_workspace_find "$session") || return 0
-  [ -n "$wsid" ] || return 0
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
+# fm_backend_herdr_list_live_details: session-wide recovery inventory. Lists
+# every tab whose label looks like a firstmate task window (fm-<id>) across
+# <session>, including home, launcher, and presentation workspaces. The shared
+# registry consumes the retained workspace identity to assign each pane to the
+# right home. Never trusts a stored pane id, since ids are not guaranteed stable
+# across every server lifecycle (see herdr-verification-p2.md "ID stability").
+# Read-only: a session that does not exist yet simply lists nothing.
+fm_backend_herdr_list_live_details() {  # <session>
+  local session=$1 tabs tab_rows workspaces panes tab_id label pane_id pane_ids workspace
+  local workspace_label workspace_label_count
+  tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[];
+      (.tab_id | type) == "string"
+      and (.tab_id | test("^[^[:space:]]+$"))
+      and (.label | type) == "string"
+      and (.label | test("^[^\\t\\r\\n]+$"))
+      and (.workspace_id | type) == "string"
+      and (.workspace_id | test("^[^[:space:]]+$")))
+    and (([.result.tabs[].tab_id] | length) == ([.result.tabs[].tab_id] | unique | length))
+  ' >/dev/null 2>&1 || return 1
+  tab_rows=$(printf '%s' "$tabs" \
+    | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null) || return 1
+  [ -n "$tab_rows" ] || return 0
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$workspaces" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[];
+      (.workspace_id | type) == "string"
+      and (.workspace_id | test("^[^[:space:]]+$"))
+      and (.label | type) == "string"
+      and (.label | test("^[^\\t\\r\\n]+$")))
+    and (([.result.workspaces[].workspace_id] | length) == ([.result.workspaces[].workspace_id] | unique | length))
+  ' >/dev/null 2>&1 || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '
+    (.result.panes | type) == "array"
+    and all(.result.panes[];
+      (.tab_id | type) == "string"
+      and (.pane_id | type) == "string"
+      and (.pane_id | test("^[^[:space:]]+$")))
+  ' >/dev/null 2>&1 || return 1
   while IFS=$'\t' read -r tab_id label; do
-    [ -n "$tab_id" ] || continue
-    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
-    [ -n "$pane_id" ] || continue
-    printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+    [ -n "$tab_id" ] && [ -n "$label" ] || return 1
+    workspace=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" \
+      '.result.tabs[]? | select(.tab_id == $tab) | .workspace_id' 2>/dev/null) || return 1
+    [ -n "$workspace" ] || return 1
+    workspace_label=$(printf '%s' "$workspaces" | jq -r --arg workspace "$workspace" \
+      '.result.workspaces[]? | select(.workspace_id == $workspace) | .label' 2>/dev/null) || return 1
+    [ -n "$workspace_label" ] || return 1
+    workspace_label_count=$(printf '%s' "$workspaces" | jq -r --arg label "$workspace_label" \
+      '[.result.workspaces[]? | select(.label == $label)] | length' 2>/dev/null) || return 1
+    case "$workspace_label_count" in ''|*[!0-9]*|0) return 1 ;; esac
+    pane_ids=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
+      '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || return 1
+    [ -n "$pane_ids" ] || return 1
+    while IFS= read -r pane_id; do
+      [ -n "$pane_id" ] || return 1
+      printf '%s:%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$session" "$pane_id" "$label" "$workspace" "$tab_id" "$pane_id" \
+        "$workspace_label" "$workspace_label_count"
+    done <<EOF_PANES
+$pane_ids
+EOF_PANES
+  done <<EOF_TABS
+$tab_rows
+EOF_TABS
+}
+
+# The legacy public wrapper remains home-scoped even when several Firstmate
+# homes share one Herdr session. Cross-home registry recovery calls the detail
+# helper directly and classifies its explicit workspace identity.
+fm_backend_herdr_list_live() {  # <session>
+  local details target label workspace tab pane workspace_label workspace_label_count home_workspace
+  home_workspace=$(fm_backend_herdr_workspace_find "$1") || return 0
+  [ -n "$home_workspace" ] || return 0
+  details=$(fm_backend_herdr_list_live_details "$1") || return 1
+  while IFS=$'\t' read -r target label workspace tab pane workspace_label workspace_label_count; do
+    [ -n "$target" ] && [ -n "$label" ] || continue
+    [ "$workspace" = "$home_workspace" ] || continue
+    printf '%s\t%s\n' "$target" "$label"
+  done <<EOF
+$details
+EOF
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

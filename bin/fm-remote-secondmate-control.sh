@@ -4,6 +4,7 @@
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
 #   fm-remote-secondmate-control.sh state <id>
+#   fm-remote-secondmate-control.sh recovery <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
 #   fm-remote-secondmate-control.sh key <id> <key>
@@ -108,6 +109,27 @@ state_value() { # <id>; prints recovery-grade state
     return 0
   fi
   fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n'
+}
+
+recovery_value() {
+  local id=$1 meta state harness
+  meta=$(meta_path "$id")
+  printf 'schema=fm-remote-secondmate-recovery.v1\n'
+  if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+    printf 'state=missing\n'
+    return 0
+  fi
+  if ! remote_endpoint_load "$id"; then
+    printf 'state=unverified\n'
+    return 0
+  fi
+  state=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
+    || printf 'unreadable\n')
+  case "$state" in alive|dead|missing|unreadable|unverified) ;; *) state=unreadable ;; esac
+  harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
+  printf 'state=%s\nbackend=%s\ntarget=%s\nherdr_session=%s\nharness=%s\n' \
+    "$state" "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" \
+    "$REMOTE_HERDR_SESSION" "$harness"
 }
 
 print_route() { # <id>
@@ -327,6 +349,7 @@ cmd_retire() {
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
+  recovery) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; recovery_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;

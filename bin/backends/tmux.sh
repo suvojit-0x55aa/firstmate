@@ -105,6 +105,28 @@ fm_backend_tmux_current_path() {  # <target>
   tmux display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null
 }
 
+fm_backend_tmux_reservation_identity() {
+  local stable=$1 detail=$2 observed tab observed_id observed_detail observed_path
+  case "$stable" in @*[!0-9]*|@|'') printf 'unverified\t-\n'; return 0 ;; esac
+  case "$detail" in *:*:*|'':*|*:'') printf 'unverified\t-\n'; return 0 ;; *:*) ;; *) printf 'unverified\t-\n'; return 0 ;; esac
+  tab=$(printf '\t')
+  observed=$(tmux display-message -p -t "$stable" \
+    "#{window_id}${tab}#{session_name}:#{window_name}${tab}#{pane_current_path}" 2>/dev/null) \
+    || { printf 'unverified\t-\n'; return 0; }
+  IFS="$tab" read -r observed_id observed_detail observed_path <<EOF
+$observed
+EOF
+  [ "$observed_id" = "$stable" ] && [ "$observed_detail" = "$detail" ] \
+    || { printf 'mismatch\t-\n'; return 0; }
+  case "$observed_path" in ''|*[$'\t\r\n']*) printf 'match\t-\n' ;; *) printf 'match\t%s\n' "$observed_path" ;; esac
+}
+
+fm_backend_tmux_retire_reservation() {
+  local stable=$1
+  case "$stable" in @*[!0-9]*|@|'') return 1 ;; esac
+  tmux kill-window -t "$stable" >/dev/null 2>&1
+}
+
 # fm_backend_tmux_send_text_line: send one line of TEXT then Enter, with no
 # composer verification - used for the fixed spawn-time commands
 # (`treehouse get`, the GOTMPDIR export) that already ran this exact sequence
@@ -262,8 +284,176 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # live worktree, while the foreground process group - when it is readable - is
 # authoritative for the negative verdicts, since it is the only source that can
 # distinguish a truly idle pane from a rewritten process title.
-fm_backend_tmux_agent_state() {  # <target>
-  local target=$1 comm session window windows inventory_status
+fm_backend_tmux_snapshot_state() {  # <current-command> <process-evidence-file>
+  local comm=$1 process_file=$2 name argv0
+  local fg_seen=0 fg_shell=0 fg_other=0
+  if [ -f "$process_file" ]; then
+    while IFS="$(printf '\t')" read -r name argv0; do
+      [ -n "$name" ] || continue
+      fg_seen=1
+      case "$(fm_backend_tmux_classify_process_name "$name" "$argv0")" in
+        agent) printf 'alive'; return 0 ;;
+        shell) fg_shell=1 ;;
+        *) fg_other=1 ;;
+      esac
+    done < "$process_file"
+  fi
+  if [ "$(fm_backend_tmux_classify_process_name "$comm")" = agent ]; then
+    printf 'alive'
+    return 0
+  fi
+  if [ "$fg_seen" -eq 1 ]; then
+    if [ "$fg_other" -eq 0 ] && [ "$fg_shell" -eq 1 ]; then
+      printf 'dead'
+    else
+      printf 'ambiguous'
+    fi
+    return 0
+  fi
+  case "$comm" in
+    '') printf 'unreadable' ;;
+    *)
+      case "$(fm_backend_tmux_classify_process_name "$comm")" in
+        shell) printf 'dead' ;;
+        *) printf 'ambiguous' ;;
+      esac
+      ;;
+  esac
+}
+
+fm_backend_tmux_agent_inventory_snapshot() {
+  local session=$1 snapshot_dir=$2 windows processes inventory_status process_status
+  local name tty comm membership_key tty_key process_file state
+  local pid pgid tpgid args argv0 tab
+  mkdir -p "$snapshot_dir/windows" "$snapshot_dir/states" "$snapshot_dir/processes" || return 1
+  tab=$(printf '\t')
+  if windows=$(LC_ALL=C tmux list-windows -t "$session" \
+      -F "#{window_name}${tab}#{pane_tty}${tab}#{pane_current_command}" 2>&1); then
+    inventory_status=ok
+  else
+    case "$windows" in
+      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        inventory_status=missing
+        ;;
+      *) inventory_status=unreadable ;;
+    esac
+  fi
+  printf '%s\n' "$inventory_status" > "$snapshot_dir/status" || return 1
+  [ "$inventory_status" = ok ] || return 0
+  if processes=$(LC_ALL=C ps -axo pid=,pgid=,tpgid=,tty=,comm=,args= 2>/dev/null); then
+    process_status=ok
+    while read -r pid pgid tpgid tty comm args; do
+      [ -n "$comm" ] && [ "$pgid" = "$tpgid" ] || continue
+      case "$tty" in ''|'?'|'??') continue ;; esac
+      tty=${tty#/dev/}
+      tty_key=${tty//%/%25}
+      tty_key=${tty_key//\//%2F}
+      args=${args#"${args%%[![:space:]]*}"}
+      argv0=${args%%[[:space:]]*}
+      printf '%s\t%s\n' "$comm" "$argv0" >> "$snapshot_dir/processes/$tty_key" || return 1
+    done <<EOF
+$processes
+EOF
+  else
+    process_status=unreadable
+  fi
+  while IFS="$tab" read -r name tty comm; do
+    [ -n "$name" ] || continue
+    membership_key=$(fm_backend_agent_state_cache_key "$name") || return 1
+    : > "$snapshot_dir/windows/$membership_key" || return 1
+    if [ "$process_status" != ok ] || [ -z "$tty" ]; then
+      state=unreadable
+    else
+      tty=${tty#/dev/}
+      tty_key=${tty//%/%25}
+      tty_key=${tty_key//\//%2F}
+      process_file="$snapshot_dir/processes/$tty_key"
+      state=$(fm_backend_tmux_snapshot_state "$comm" "$process_file") || return 1
+    fi
+    printf '%s\n' "$state" > "$snapshot_dir/states/$membership_key" || return 1
+  done <<EOF
+$windows
+EOF
+}
+
+fm_backend_tmux_list_live() {
+  local windows target label extra tab status
+  tab=$(printf '\t')
+  windows=$(LC_ALL=C tmux list-windows -a \
+    -F '#{session_name}:#{window_name}' 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    case "$windows" in
+      *"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)") return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  while IFS="$tab" read -r target label extra; do
+    [ -n "$target" ] || { [ -z "$target$label$extra" ] && continue; return 1; }
+    [ -z "$extra" ] || return 1
+    case "$target" in *:*) ;; *) return 1 ;; esac
+    [ -n "$label" ] || label=${target#*:}
+    [ -n "$label" ] || return 1
+    case "$target$label" in *[$'\t\r\n']*) return 1 ;; esac
+    case "$label" in fm-?*) printf '%s\t%s\n' "$target" "$label" ;; esac
+  done <<EOF
+$windows
+EOF
+}
+
+fm_backend_tmux_recover_planned() {  # <task> <target> <detail>
+  local task=$1 target=$2 detail=$3 spawn_gen=${4:-} session name expected tab out status matches count stable live path final_detail
+  case "$target" in *:*) ;; *) return 1 ;; esac
+  session=${target%%:*}
+  name=${target#*:}
+  expected="fm-$task"
+  [ -z "$spawn_gen" ] || expected="$expected--$spawn_gen"
+  [ "$name" = "$expected" ] && [ "$detail" = "$target" ] || return 1
+  tab=$(printf '\t')
+  out=$(LC_ALL=C tmux list-windows -t "$session" \
+    -F "#{window_id}${tab}#{session_name}:#{window_name}${tab}#{pane_current_path}" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    case "$out" in
+      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  matches=$(printf '%s\n' "$out" | awk -F '\t' -v want="$target" '$2 == want { print }')
+  count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n + 0 }')
+  [ "$count" -le 1 ] || return 1
+  if [ "$count" -eq 0 ]; then
+    printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+    return 0
+  fi
+  IFS="$tab" read -r stable live path <<EOF
+$matches
+EOF
+  [ -n "$stable" ] && [ "$live" = "$target" ] && [ -n "$path" ] || return 1
+  case "$stable$live$path" in *[$'\t\r\n']*) return 1 ;; esac
+  final_detail="${target%%:*}:fm-$task"
+  printf 'found\tcreated\t%s\t%s\t%s\t-\t-\t-\t-\n' \
+    "$stable" "$final_detail" "$path"
+}
+
+fm_backend_tmux_finalize_reservation() {  # <stable-id> <task> <spawn>
+  local stable=$1 task=$2 spawn_gen=$3 session live expected final
+  expected="fm-$task--$spawn_gen"
+  final="fm-$task"
+  live=$(tmux display-message -p -t "$stable" '#{session_name}:#{window_name}' 2>/dev/null) || return 1
+  session=${live%%:*}
+  [ "$live" = "$session:$final" ] && return 0
+  [ "$live" = "$session:$expected" ] || return 1
+  ! tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qxF "$final" || return 1
+  tmux rename-window -t "$stable" "$final" >/dev/null 2>&1
+}
+
+fm_backend_tmux_agent_state() {  # <target> [inventory-status] [inventory-directory]
+  local target=$1 snapshot_status=${2:-} snapshot_dir=${3:-}
+  local comm session window windows inventory_status membership_key snapshot_state
   local foreground argv0s name fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
@@ -272,25 +462,51 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
-  if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
-    inventory_status=0
-  else
-    inventory_status=$?
-  fi
-  if [ "$inventory_status" -ne 0 ]; then
-    case "$windows" in
-      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
-        printf 'missing'
-        ;;
-      *)
-        printf 'unreadable'
-        ;;
+  if [ -n "$snapshot_status" ]; then
+    case "$snapshot_status" in
+      missing) printf 'missing'; return 0 ;;
+      unreadable) printf 'unreadable'; return 0 ;;
+      ok) ;;
+      *) printf 'unreadable'; return 0 ;;
+    esac
+    membership_key=$(fm_backend_agent_state_cache_key "$window") || {
+      printf 'unreadable'
+      return 0
+    }
+    if [ ! -e "$snapshot_dir/windows/$membership_key" ]; then
+      printf 'missing'
+      return 0
+    fi
+    if ! IFS= read -r snapshot_state < "$snapshot_dir/states/$membership_key"; then
+      printf 'unreadable'
+      return 0
+    fi
+    case "$snapshot_state" in
+      alive|dead|ambiguous|unreadable) printf '%s' "$snapshot_state" ;;
+      *) printf 'unreadable' ;;
     esac
     return 0
-  fi
-  if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
-    printf 'missing'
-    return 0
+  else
+    if windows=$(LC_ALL=C tmux list-windows -t "$session" -F '#{window_name}' 2>&1); then
+      inventory_status=0
+    else
+      inventory_status=$?
+    fi
+    if [ "$inventory_status" -ne 0 ]; then
+      case "$windows" in
+        *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+          printf 'missing'
+          ;;
+        *)
+          printf 'unreadable'
+          ;;
+      esac
+      return 0
+    fi
+    if ! printf '%s\n' "$windows" | grep -Fqx "$window"; then
+      printf 'missing'
+      return 0
+    fi
   fi
 
   foreground=$(fm_backend_tmux_foreground_comms "$target")

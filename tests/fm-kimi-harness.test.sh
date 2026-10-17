@@ -63,9 +63,24 @@ case "$*" in
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *'#{session_name}:#{window_name}'*) printf 'firstmate:%s\n' "$(cat "$FM_FAKE_TMUX_CALL_LOG.window")" ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  new-window)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then shift; printf '%s\n' "$1" > "$FM_FAKE_TMUX_CALL_LOG.window"; break; fi
+      shift
+    done
+    printf '@101\n'
+    exit 0
+    ;;
+  rename-window) printf '%s\n' "${4:-}" > "$FM_FAKE_TMUX_CALL_LOG.window"; exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     prev=
     literal=

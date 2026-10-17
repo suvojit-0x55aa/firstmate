@@ -3,6 +3,83 @@
 FM_CUSTOM_CHECK_HASH=
 FM_CUSTOM_CHECK_SNAPSHOT=
 
+fm_check_index_root() { printf '%s/.registered-checks-v1\n' "$1"; }
+
+fm_check_index_recover() { # <state>
+  local state=$1 root ready check id marker tmp protocol ready_valid=0
+  root=$(fm_check_index_root "$state")
+  ready="$root/.ready"
+  if [ -f "$ready" ] && [ ! -L "$ready" ]; then
+    IFS= read -r protocol < "$ready" || return 1
+    [ "$protocol" = fm-registered-checks.v1 ] || return 1
+    ready_valid=1
+  fi
+  [ ! -e "$root" ] || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
+  mkdir -p "$root" || return 1
+  for check in "$state"/*.check.sh; do
+    [ -f "$check" ] && [ ! -L "$check" ] || continue
+    id=${check##*/}; id=${id%.check.sh}
+    fm_pr_task_id_valid "$id" || continue
+    if [ "$ready_valid" -eq 1 ] && [ "$id" != x-watch ] \
+      && [ ! -f "$state/$id.check-trust" ] \
+      && [ ! -f "$state/$id.pr-poll-registration" ]; then
+      continue
+    fi
+    marker="$root/$id"
+    tmp="$root/.$id.tmp.${BASHPID:-$$}"
+    if ! ( umask 077; printf '%s\n' "$id.check.sh" > "$tmp" ) \
+      || ! mv -f -- "$tmp" "$marker"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  done
+  if [ "$ready_valid" -eq 0 ]; then
+    tmp="$root/.ready.tmp.${BASHPID:-$$}"
+    if ! ( umask 077; printf 'fm-registered-checks.v1\n' > "$tmp" ) \
+      || ! mv -f -- "$tmp" "$ready"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  fi
+}
+
+fm_check_index_register() { # <state> <id>
+  local state=$1 id=$2 root marker tmp
+  fm_pr_task_id_valid "$id" || return 1
+  fm_check_index_recover "$state" || return 1
+  root=$(fm_check_index_root "$state")
+  marker="$root/$id"
+  tmp="$root/.$id.tmp.${BASHPID:-$$}"
+  if ! ( umask 077; printf '%s\n' "$id.check.sh" > "$tmp" ) \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_check_index_remove() { # <state> <id>
+  local root marker
+  root=$(fm_check_index_root "$1")
+  marker="$root/$2"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || rm -f -- "$marker"
+}
+
+fm_check_index_inventory() { # <state>
+  local state=$1 root marker id value check
+  fm_check_index_recover "$state" || return 1
+  root=$(fm_check_index_root "$state")
+  for marker in "$root"/*; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    id=${marker##*/}
+    fm_pr_task_id_valid "$id" || continue
+    IFS= read -r value < "$marker" || continue
+    [ "$value" = "$id.check.sh" ] || continue
+    check="$state/$value"
+    [ -f "$check" ] && [ ! -L "$check" ] || continue
+    printf '%s\n' "$check"
+  done | LC_ALL=C sort
+}
+
 fm_custom_check_sha256() {
   local file=$1
   if command -v shasum >/dev/null 2>&1; then

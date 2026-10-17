@@ -323,6 +323,11 @@ SH
   [ ! -s "$dir/runtime.log" ] || fail "isolated invalid endpoint reached tmux"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$control" || fail "invalid cleanup removed control window"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$target" || fail "invalid cleanup removed target window"
+  # This retained malformed record proved the refusal above, but it is not an
+  # input to the later valid-endpoint case. Leaving it in the same state tree
+  # makes that case fail closed during whole-registry recovery before it can
+  # exercise the exact endpoint teardown contract.
+  rm -f "$dir/home/state/invalid.meta"
 
   set +e
   # shellcheck disable=SC2016 # $1 expands inside the isolated child shell.

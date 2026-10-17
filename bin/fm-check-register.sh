@@ -43,4 +43,5 @@ fm_pr_regular_destination_on_device_or_absent "$TRUST" "$STATE_DEVICE" || exit 1
 mv -f -- "$TMP" "$TRUST" || exit 1
 TMP=
 fm_custom_check_registered "$STATE" "$ID" || { rm -f -- "$TRUST"; exit 1; }
+fm_check_index_register "$STATE" "$ID" || { rm -f -- "$TRUST"; exit 1; }
 printf 'registered: state/%s.check.sh\n' "$ID"

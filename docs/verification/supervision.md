@@ -466,9 +466,57 @@ Portable ownership and cancellation coverage lives in `tests/fm-codex-stop.test.
 `tests/fm-watch-checkpoint.test.sh` retains the foreground helper controls and exercises two native actionable successors with ordinary drain/ack and duplicate-owner refusal.
 The current continuation procedure is owned by [`../supervision-protocols/codex.md`](../supervision-protocols/codex.md).
 
+On 2026-10-17, macOS Bash `3.2.57(1)-release` and Python `3.14.7` passed the portable admission regression against the shared backend agent-state dispatcher.
+The motivating primary-home inventory was measured read-only: 92 distinct recorded targets classified as 3 budgeted workers, 79 existing endpoints with no agent, and 10 absent endpoints; the combined existence and agent-state scan completed in 2.529 seconds.
+The recorded green run below exercised the then-current 96-case Codex Stop driver, covering atomic active-supervision snapshots, monotonic generation-bound owner indexes, pre-launch, post-creation, metadata-publication, and remote-unknown reservation crash recovery, pending ownership, owner-addressed exact and legacy death-receipt recovery without tree scans, post-upgrade death recovery, registration, retirement, and generation revocation; 100 historical tmux endpoints and 40 historical Herdr endpoints, including absent targets and ambiguous agent-status rows, beside three live endpoints; a production-shaped 59-record stale inventory beside one overdue registered check; one process-complete backend snapshot per scope and cycle with no per-target probes; active-only keyed pending-reply reuse of exact-dead and missing classifications across duplicate endpoint owners with archived records excluded; paused remote endpoint and durable remote-inbox isolation from colliding local state; linear metadata resolution with duplicate endpoints; collision-free durable spawn-bound death receipts without backend capture; relaunch death before alive observation; paused and captain-held death notification before long cadence; local secondmate death notification with healthy-idle and remote isolation; active-owner busy and mixed-policy folding over one observation; timed-probe descendant cleanup; registered-check TERM/KILL/reap enforcement; recurring-probe and identity/cleanup transport-reserve enforcement including near-reserve owned cleanup and persistent uncertainty; terminal-error generation triage; exact attached-watcher runtime capability matching including the admission guard, active registry, per-owner fan-out accounting, and owner-bound full-cycle resumable batch-handoff mode; bounded-check parking with live-owner authorization and immutable lexical high-water fairness; production fork-to-publication launcher ownership retirement; pre-lock descendant cleanup for a cancelled running arm; bounded handoff from a retiring prior-session owner to the current Stop owner; a deliberately oversized two-endpoint live inventory; due authenticated custom and PR checks; unseen signals; due remote reply recovery; watcher ownership; and cancellation.
+The current driver invokes 113 top-level cases, including seventeen additions not represented by that recorded run.
+The unchanged Claude boundary and generated harness instructions also passed their focused suites.
+
+```sh
+bash tests/fm-codex-stop.test.sh
+bash tests/fm-claude-stop-autoarm.test.sh
+bash tests/fm-turnend-guard.test.sh
+bash tests/fm-supervision-instructions.test.sh
+bin/fm-lint.sh
+```
+
+Exact relevant output:
+
+```text
+ok - large stale endpoint history does not consume the live cycle budget
+ok - 59 stale task records and one overdue check preserve live-only Stop admission
+ok - paused remote endpoints stay isolated from local stale handling
+ok - remote inboxes remain owned by durable remote delivery
+ok - Herdr histories use bounded bulk snapshots without endpoint probes
+ok - bounded bootstrap safely rebinds proven live endpoints
+ok - small live endpoint inventories remain conservatively bounded
+ok - admission timeout terminates its probe process group
+ok - retained dead endpoints stay cheap and preserve notification
+ok - paused and captain-held deaths notify once before long cadence
+ok - local secondmate deaths notify once while healthy and remote mates stay quiet
+ok - exact-dead inventory is linear and explicit receipts suppress duplicates
+ok - absorbed dead endpoints emit one new death notification
+ok - resumed work retires death receipt and wakes once
+ok - relaunch generation death surfaces before alive observation
+ok - colliding endpoint keys retain independent stable death receipts
+ok - ambiguous busy resume retires the previous death receipt
+ok - attached watcher capability binds timeout, guard and remote observation
+ok - due custom and PR checks complete across bounded watcher cycles
+ok - large registered-check inventories are admitted in bounded batches
+ok - recurring cycle probes preserve the fixed transport reserve
+ok - due remote recovery fits the computed watcher cycle budget
+ok - Codex defers remote observation while Claude default remains unchanged
+ok - running arm cancellation reaps pre-lock watcher descendants
+ok - a retiring prior-session owner hands the current Stop to its successor
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-lint.sh: full ShellCheck extended analysis enabled
+fm-lint-workflows.sh: actionlint 1.7.12 (pinned 1.7.12)
+fm-lint-workflows.sh: 3 workflow files valid
+```
+
 ### Paired Claude preservation
 
-On 2026-10-14, the unchanged `bash tests/fm-claude-stop-autoarm.test.sh` passed all 39 cases after the shared Bash 3.2 lock-identity correction.
+On 2026-10-16, the unchanged `bash tests/fm-claude-stop-autoarm.test.sh` passed all 39 cases after the Codex-only bounded check sweep was added to the shared watcher.
 The Claude fixtures in `tests/fm-turnend-guard.test.sh` also refuse any Codex adapter invocation or Codex continuation state.
 The Claude hook registration, auto-arm implementation, session-lock library, Claude protocol document, and emitted Claude instructions were byte-identical to clean base `a2218be`.
 This byte comparison supplements behavioral controls; it does not prove native delivery.

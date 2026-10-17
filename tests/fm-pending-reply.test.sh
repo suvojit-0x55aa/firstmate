@@ -1251,6 +1251,61 @@ test_failed_send_discards_undelivered_expectation() {
   pass "failed transport discards undelivered expectation only"
 }
 
+test_active_index_rejects_malformed_correlation_paths() {
+  local home state records root task_dir
+  home=$(setup_parent malformed-index-corr)
+  state="$home/state"
+  records="$state/pending-replies"
+  root="$state/.pending-reply-active-v1"
+  mkdir -p "$records"
+  cat > "$records/malformed" <<'EOF'
+schema=fm-pending-reply.v1
+corr_id=../../outside-index
+task_id=hibit
+phase=awaiting_report
+EOF
+  fm_pending_reply_index_recover "$state" || fail "malformed archive recovery should finish safely"
+  task_dir=$(fm_pending_reply_index_task_dir "$state" hibit)
+  [ ! -d "$task_dir" ] || fail "malformed correlation id entered the active index"
+  [ ! -e "$state/outside-index" ] && [ ! -e "$home/outside-index" ] \
+    || fail "malformed correlation id escaped the active index"
+  if fm_pending_reply_index_add "$state" hibit '../invalid-index' 2>/dev/null; then
+    fail "active index accepted a malformed correlation id"
+  fi
+  if fm_pending_reply_path "$state" '../../invalid-record' >/dev/null 2>&1; then
+    fail "pending-reply record path accepted a malformed correlation id"
+  fi
+  [ -f "$root/.ready" ] || fail "safe recovery did not publish its readiness marker"
+  pass "active reply index rejects malformed correlation paths"
+}
+
+test_active_index_recovers_interrupted_publication_after_ready() {
+  local home state records corr rec task_dir
+  home=$(setup_parent interrupted-index-publication)
+  state="$home/state"
+  records="$state/pending-replies"
+  corr=0123456789abcdef
+  fm_pending_reply_index_recover "$state" || fail "could not initialize active reply index"
+  mkdir -p "$records"
+  fm_pending_reply_index_prepare "$state" hibit "$corr" \
+    || fail "could not publish pending-reply transaction intent"
+  rec="$records/$corr"
+  cat > "$rec" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=hibit
+phase=awaiting_report
+EOF
+  fm_pending_reply_index_recover "$state" \
+    || fail "interrupted pending-reply publication did not reconcile"
+  task_dir=$(fm_pending_reply_index_task_dir "$state" hibit)
+  [ "$(cat "$task_dir/$corr")" = "$corr" ] \
+    || fail "durable open reply was omitted after index readiness"
+  [ ! -e "$state/.pending-reply-active-v1/.publish-$corr" ] \
+    || fail "completed pending-reply publication intent was not retired"
+  pass "active reply index reconciles interrupted publication after readiness"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1283,6 +1338,8 @@ test_tick_skips_terminal_and_reuses_target_observation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
+test_active_index_rejects_malformed_correlation_paths
+test_active_index_recovers_interrupted_publication_after_ready
 test_remote_repost_waits_for_the_reply_channel
 test_mirrored_remote_reply_never_triggers_a_repost
 

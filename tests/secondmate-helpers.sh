@@ -26,19 +26,48 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  new-window)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then shift; printf '%s\n' "$1" > "$FM_FAKE_TMUX_LOG.window"; break; fi
+      shift
+    done
+    printf '@101\n'
+    exit 0
+    ;;
+  rename-window)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    printf '%s\n' "${4:-}" > "$FM_FAKE_TMUX_LOG.window"
+    exit 0
+    ;;
+  has-session|new-session|send-keys|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
     exit 0
     ;;
   list-windows)
     if [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-      printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+      format=
+      for arg in "$@"; do case "$arg" in '#{'*) format=$arg ;; esac; done
+      case "$FM_FAKE_TMUX_WINDOW" in
+        *:*) target=$FM_FAKE_TMUX_WINDOW; label=${FM_FAKE_TMUX_WINDOW#*:} ;;
+        *) target=firstmate:$FM_FAKE_TMUX_WINDOW; label=$FM_FAKE_TMUX_WINDOW ;;
+      esac
+      case "$format" in
+        *session_name*window_name*)
+          printf '%s\t%s\n' "$target" "$label"
+          ;;
+        *pane_tty*pane_current_command*)
+          printf '%s\t/dev/ttys999\tzsh\n' "$label"
+          ;;
+        *) printf '%s\n' "$FM_FAKE_TMUX_WINDOW" ;;
+      esac
     fi
     exit 0
     ;;
   display-message)
     case "$*" in
       *'#{cursor_y}'*) printf '0\n' ;;
+      *'#{session_name}:#{window_name}'*) printf 'firstmate:%s\n' "$(cat "$FM_FAKE_TMUX_LOG.window")" ;;
       *) printf 'firstmate\n' ;;
     esac
     exit 0

@@ -156,6 +156,11 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+live=$(fm_backend_tmux_list_live) || fail "fm_backend_tmux_list_live failed"
+[ "$live" = "$TARGET"$'\t'"$WINDOW" ] \
+  || fail "real tmux: live inventory did not preserve the exact task target and label: $live"
+pass "real tmux: live inventory preserves the exact task target and label"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"

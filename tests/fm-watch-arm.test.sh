@@ -143,7 +143,7 @@ start_rearm_arm() {  # <home> <state> <fakebin> <arm-out> [predecessor-arm-pid]
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_WATCH_PREDECESSOR_ARM_PID="$predecessor" \
-    "$WATCH_ARM" --restart > "$armout" &
+    "$WATCH_ARM" --restart > "$armout" 2>&1 &
   ARM_PID=$!
   i=0
   while [ "$i" -lt 80 ]; do
@@ -251,6 +251,21 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   armout="$dir/arm.out"
   drainout="$dir/drain.out"
   mkdir -p "$home/data"
+  cat > "$state/ios.meta" <<EOF
+window=remote:ios
+endpoint_task_id=ios
+worktree=$home
+project=$home
+harness=claude
+kind=secondmate
+home=$home
+remote_host=fixture.invalid
+remote_root=$home
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:fixture-pane
+spawn_gen=fixture-ios
+EOF
 
   # This is the real remote parent-reply ingest boundary. It writes the remote
   # secondmate's decision onto the parent status surface the shared fold owns.
@@ -273,7 +288,8 @@ test_rearm_resurfaces_durable_queue_and_remote_open_decision() {
   # A real watcher is then interrupted before the next two durable updates.
   # This is the accepted blocking-tool shape: no watcher runs during the gap.
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/down-arm.out"
-  is_live_non_zombie "$ARM_PID" || fail "pre-outage watcher did not stay live"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "pre-outage watcher did not stay live: $(cat "$dir/down-arm.out")"
   watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   kill -KILL "$watcher_pid" 2>/dev/null || fail "could not abruptly stop pre-outage watcher"
   wait "$ARM_PID" 2>/dev/null || true
