@@ -117,6 +117,13 @@ fm_lock_acquire_wait "$META_LOCK"
 META_LOCK_HELD=1
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+fm_lock_release "$META_LOCK"
+META_LOCK_HELD=0
+fm_supervision_registry_register "$STATE" "$ID" "$META" || exit 1
+fm_lock_acquire_wait "$META_LOCK"
+META_LOCK_HELD=1
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
@@ -127,7 +134,6 @@ grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
 } >> "$TMP"
 mv "$TMP" "$META"
 TMP=
-fm_supervision_registry_register "$STATE" "$ID" "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 

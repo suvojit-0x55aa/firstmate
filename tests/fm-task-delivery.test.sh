@@ -201,10 +201,17 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status
+  local home meta out status fakebin id inventory
   home="$TMP_ROOT/promote/home"
-  mkdir -p "$home/state"
+  fakebin="$TMP_ROOT/promote/fakebin"
+  mkdir -p "$home/state" "$fakebin"
   meta="$home/state/promote-d1.meta"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'no server running on /tmp/fm-promote-test/default' >&2
+exit 1
+SH
+  chmod 0700 "$fakebin/tmux"
 
   write_scout_meta() {
     printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
@@ -227,7 +234,8 @@ test_promote_requires_and_records_the_delivery_contract() {
   [ "$status" -ne 0 ] || fail "promotion on a conditional policy should exit non-zero"
   assert_contains "$out" "classify this task's surface" "promote did not refuse the conditional policy as a task mode"
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
@@ -235,7 +243,72 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
-  pass "fm-promote: promotion requires the delivery contract and records it exactly once"
+
+  home="$TMP_ROOT/promote-retry/home"
+  fakebin="$TMP_ROOT/promote-retry/fakebin"
+  mkdir -p "$home/state" "$fakebin"
+  meta="$home/state/promote-retry.meta"
+  printf '%s\n' \
+    'window=prior-0:pane-0' 'kind=scout' 'worktree=/tmp/promote-retry' \
+    'backend=herdr' 'herdr_session=prior-0' 'herdr_workspace_id=workspace-0' \
+    'herdr_tab_id=tab-0' 'herdr_pane_id=pane-0' 'spawn_gen=promote-retry-1' \
+    > "$meta"
+  id=1
+  while [ "$id" -le 8 ]; do
+    printf '%s\n' \
+      "window=prior-$id:pane-$id" 'kind=ship' "worktree=/tmp/historical-$id" \
+      'backend=herdr' "herdr_session=prior-$id" "herdr_workspace_id=workspace-$id" \
+      "herdr_tab_id=tab-$id" "herdr_pane_id=pane-$id" "spawn_gen=historical-$id" \
+      > "$home/state/historical-$id.meta"
+    id=$((id + 1))
+  done
+  cp "$meta" "$meta.before"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  session:list)
+    if [ "$FM_TEST_PROMOTE_SESSION_MODE" = oversized ]; then
+      printf '%s\n' '{"sessions":[{"name":"prior-0","running":true},{"name":"prior-1","running":true},{"name":"prior-2","running":true},{"name":"prior-3","running":true},{"name":"prior-4","running":true},{"name":"prior-5","running":true},{"name":"prior-6","running":true},{"name":"prior-7","running":true},{"name":"prior-8","running":true}]}'
+    else
+      printf '%s\n' '{"sessions":[{"name":"prior-0","running":true}]}'
+    fi
+    ;;
+  tab:list)
+    printf '%s\n' scoped >> "$FM_TEST_PROMOTE_SCOPED_LOG"
+    printf '%s\n' '{"result":{"tabs":[]}}'
+    ;;
+  *) exit 72 ;;
+esac
+SH
+  chmod 0700 "$fakebin/herdr"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    HERDR_SESSION=prior-0 FM_TEST_PROMOTE_SESSION_MODE=oversized \
+    FM_TEST_PROMOTE_SCOPED_LOG="$home/scoped-reads" \
+    "$PROMOTE" promote-retry --mode local-only --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion published metadata after registry bootstrap refusal"
+  cmp -s "$meta.before" "$meta" || fail "registry bootstrap refusal changed scout metadata"
+  [ ! -e "$home/state/.active-supervision-generation" ] \
+    || fail "registry bootstrap refusal published an active generation"
+  [ ! -e "$home/scoped-reads" ] || fail "oversized registry bootstrap performed scoped reads"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    HERDR_SESSION=prior-0 FM_TEST_PROMOTE_SESSION_MODE=bounded \
+    FM_TEST_PROMOTE_SCOPED_LOG="$home/scoped-reads" \
+    "$PROMOTE" promote-retry --mode local-only --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "a retry after successful registry bootstrap should promote the scout"
+  assert_grep 'kind=ship' "$meta" "retry-safe promotion did not commit the ship kind"
+  assert_grep 'mode=local-only' "$meta" "retry-safe promotion did not record its mode"
+  assert_grep 'yolo=off' "$meta" "retry-safe promotion did not record its merge posture"
+  inventory=$(FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin") || fail "successful promotion did not retain active supervision"
+  [ "$inventory" = "$meta" ] || fail "successful promotion published the wrong supervision inventory: $inventory"
+  pass "fm-promote: promotion is retry-safe across registry bootstrap refusal"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the

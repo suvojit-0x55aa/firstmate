@@ -2390,7 +2390,9 @@ test_bounded_bootstrap_rebinds_unique_live_targets() {
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
   list-windows:*)
-    printf '%s\n' '[{"id":"11111111-6666-6666-6666-666666666666"},{"id":"22222222-7777-7777-7777-777777777777"}]'
+    count=2
+    [ "$FM_TEST_CMUX_REMAP_MODE" = unique ] && count=1
+    printf '[{"id":"11111111-6666-6666-6666-666666666666","workspace_count":1},{"id":"22222222-7777-7777-7777-777777777777","workspace_count":%s}]\n' "$count"
     ;;
   workspace:list)
     window=
@@ -2659,7 +2661,7 @@ SH
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
   list-windows:*)
-    printf '%s\n' '[{"id":"11111111-6666-6666-6666-666666666666"}]'
+    printf '%s\n' '[{"id":"11111111-6666-6666-6666-666666666666","workspace_count":1}]'
     ;;
   workspace:list)
     printf '{"workspaces":[{"id":"%s","title":"%s"}]}\n' \
@@ -2697,11 +2699,13 @@ SH
     > "$dir/promotion.out" 2> "$dir/promotion.err" &
   promotion=$!
   for _ in $(seq 1 100); do
-    grep -qx 'kind=ship' "$dir/state/live-owner.meta" 2>/dev/null && break
+    [ -d "$dir/state/.control-live-owner.lock" ] && break
     sleep 0.01
   done
-  grep -qx 'kind=ship' "$dir/state/live-owner.meta" \
-    || fail 'concurrent promotion did not publish its metadata update'
+  [ -d "$dir/state/.control-live-owner.lock" ] \
+    || fail 'concurrent promotion did not acquire its lifecycle lock'
+  grep -qx 'kind=scout' "$dir/state/live-owner.meta" \
+    || fail 'concurrent promotion committed metadata before registry recovery'
   kill -0 "$promotion" 2>/dev/null \
     || fail 'concurrent promotion did not wait for registry recovery'
   : > "$dir/release-recovery"
@@ -2711,7 +2715,7 @@ SH
   wait "$promotion"
   promotion_rc=$?
   set -e
-  [ "$recovery_rc" -ne 0 ] || fail 'contended bootstrap recovery did not fail closed'
+  [ "$recovery_rc" -eq 0 ] || fail 'registry recovery failed while promotion waited to commit'
   [ "$promotion_rc" -eq 0 ] \
     || fail "concurrent promotion failed after bootstrap contention: $(cat "$dir/promotion.err")"
   grep -qx 'kind=ship' "$dir/state/live-owner.meta" \
@@ -2719,7 +2723,7 @@ SH
     && grep -qx 'yolo=off' "$dir/state/live-owner.meta" \
     || fail 'live-target normalization lost the concurrent promotion contract'
   [ "$(sed -n 's/^window=//p' "$dir/state/live-owner.meta")" = "$new_workspace:$new_surface" ] \
-    || fail 'promotion-owned recovery did not normalize the live target'
+    || fail 'pre-promotion recovery did not normalize the live target'
   inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
