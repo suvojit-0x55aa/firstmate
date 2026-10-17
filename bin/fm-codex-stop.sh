@@ -223,7 +223,7 @@ def admission_cycle_work(probe_deadline=None):
 . "$1/fm-task-inbox-lib.sh" || exit 1
 . "$1/fm-pr-lib.sh" || exit 1
 set -o pipefail
-fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+fm_supervision_registry_recover "$FM_STATE_OVERRIDE" bounded || exit 1
 generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 printf 'generation\t%s\n' "$generation"
 registered_checks=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
@@ -491,7 +491,7 @@ def bounded_watcher_capability_content(check_limit):
         ('inactive-reconcile-budget', inactive_reconcile_budget),
         ('admission-guard-grace', watcher_guard_grace),
         ('remote-observation', 'deferred'),
-        ('inventory', 'active-registry-v6'),
+        ('inventory', 'active-registry-v7'),
         ('check-batch-handoff', 'resume-owner-cycle-v5'),
     )
     return 'fm-codex-bounded.v10\t' + '\t'.join(

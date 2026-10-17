@@ -1010,52 +1010,81 @@ fm_supervision_registry_death_surfaced_values() { # <state> <task> <backend> <ta
 # pass.  Every emitted field is non-empty so shell TSV readers cannot collapse
 # missing columns; endpoint presence and spawn incarnation are explicit to
 # distinguish legitimate '-' values from absent metadata.
-fm_supervision_registry_meta_facts() { # <meta> <task>
-  local meta=$1 task=$2
+fm_supervision_registry_meta_load() { # <meta> <task>
+  local meta=$1 task=$2 line key value backend= terminal= window= remote_host= home= kind=
+  local spawn= spawn_seen=0 endpoint_state= worktree= target endpoint route incarnation field
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   fm_supervision_registry_task_valid "$task" || return 1
-  LC_ALL=C awk -F= -v task="$task" '
-    function assign(key, value) {
-      if (key == "backend") backend=value
-      else if (key == "terminal") terminal=value
-      else if (key == "window") window=value
-      else if (key == "remote_host") remote_host=value
-      else if (key == "home") home=value
-      else if (key == "kind") kind=value
-      else if (key == "spawn_gen") { spawn=value; spawn_seen=1 }
-      else if (key == "endpoint_state") endpoint_state=value
-    }
-    {
-      key=$1
-      value=$0
-      sub(/^[^=]*=/, "", value)
-      assign(key, value)
-    }
-    END {
-      if (backend == "") backend="tmux"
-      if (backend == "orca" && endpoint_state == "worktree-only") target=""
-      else target=(backend == "orca" && terminal != "") ? terminal : window
-      if (target == "") { endpoint="absent"; target="-" } else endpoint="present"
-      route=(target ~ /^remote:/ || remote_host != "") ? "remote" : "local"
-      if (home == "") home="-"
-      if (kind == "") kind="ship"
-      incarnation=spawn_seen ? "spawn:" spawn : "legacy:0"
-      if (!spawn_seen || spawn == "") spawn="-"
-      values[1]=endpoint; values[2]=backend; values[3]=target; values[4]=route
-      values[5]=home; values[6]=task; values[7]=kind; values[8]=spawn; values[9]=incarnation
-      for (i=1; i<=9; i++) {
-        if (values[i] == "" || values[i] ~ /[\t\r\n]/) exit 1
-      }
-      printf "%s", values[1]
-      for (i=2; i<=9; i++) printf "\t%s", values[i]
-      printf "\n"
-    }
-  ' "$meta"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *=*) key=${line%%=*}; value=${line#*=} ;; *) continue ;; esac
+    case "$key" in
+      backend) backend=$value ;;
+      terminal) terminal=$value ;;
+      window) window=$value ;;
+      remote_host) remote_host=$value ;;
+      home) home=$value ;;
+      worktree) worktree=$value ;;
+      kind) kind=$value ;;
+      spawn_gen) spawn=$value; spawn_seen=1 ;;
+      endpoint_state) endpoint_state=$value ;;
+    esac
+  done < "$meta"
+  [ -n "$backend" ] || backend=tmux
+  if [ "$backend" = orca ] && [ "$endpoint_state" = worktree-only ]; then
+    target=
+  elif [ "$backend" = orca ] && [ -n "$terminal" ]; then
+    target=$terminal
+  else
+    target=$window
+  fi
+  if [ -n "$target" ]; then endpoint=present; else endpoint=absent; target=-; fi
+  route=local
+  case "$target" in remote:*) route=remote ;; esac
+  [ -z "$remote_host" ] || route=remote
+  [ -n "$home" ] || home=-
+  [ -n "$worktree" ] || worktree=-
+  [ -n "$kind" ] || kind=ship
+  if [ "$spawn_seen" -eq 1 ]; then incarnation="spawn:$spawn"; else incarnation=legacy:0; fi
+  [ "$spawn_seen" -eq 1 ] && [ -n "$spawn" ] || spawn=-
+  for field in "$endpoint" "$backend" "$target" "$route" "$home" "$task" "$kind" "$spawn" "$worktree" "$incarnation"; do
+    case "$field" in ''|*[$'\t\r\n']*) return 1 ;; esac
+  done
+  FM_SUPERVISION_FACT_ENDPOINT=$endpoint
+  FM_SUPERVISION_FACT_BACKEND=$backend
+  FM_SUPERVISION_FACT_TARGET=$target
+  FM_SUPERVISION_FACT_ROUTE=$route
+  FM_SUPERVISION_FACT_HOME=$home
+  FM_SUPERVISION_FACT_TASK=$task
+  FM_SUPERVISION_FACT_KIND=$kind
+  FM_SUPERVISION_FACT_SPAWN=$spawn
+  FM_SUPERVISION_FACT_WORKTREE=$worktree
+  FM_SUPERVISION_FACT_INCARNATION=$incarnation
+}
+
+fm_supervision_registry_meta_facts() { # <meta> <task>
+  fm_supervision_registry_meta_load "$1" "$2" || return 1
+  fm_supervision_tsv_row \
+    "$FM_SUPERVISION_FACT_ENDPOINT" "$FM_SUPERVISION_FACT_BACKEND" \
+    "$FM_SUPERVISION_FACT_TARGET" "$FM_SUPERVISION_FACT_ROUTE" "$FM_SUPERVISION_FACT_HOME" \
+    "$FM_SUPERVISION_FACT_TASK" "$FM_SUPERVISION_FACT_KIND" "$FM_SUPERVISION_FACT_SPAWN" \
+    "$FM_SUPERVISION_FACT_WORKTREE" "$FM_SUPERVISION_FACT_INCARNATION"
+}
+
+fm_supervision_registry_bounded_migration_candidate() {
+  local state=$1 task=$2 worktree=$3 home=$4 owner_kind=$5 record
+  case "$worktree" in ''|-) ;; *) [ -d "$worktree" ] && return 0 ;; esac
+  case "$home" in ''|-) ;; *) [ -d "$home" ] && return 0 ;; esac
+  [ "$owner_kind" != secondmate ] || return 0
+  for record in "$state/$task.inbox"/*; do
+    [ -f "$record" ] && [ ! -L "$record" ] && return 0
+  done
+  return 1
 }
 
 fm_supervision_registry_recover() {
-  local state=$1 path lock candidates states endpoints meta task target backend route home verdict tmp spawn_gen rc
-  local facts endpoint owner_kind incarnation candidate_task surfaced filtered
+  local state=$1 mode=${2:-legacy} path lock candidates states endpoints meta task target backend route home verdict tmp spawn_gen rc
+  local endpoint owner_kind incarnation candidate_task worktree surfaced filtered
+  case "$mode" in legacy|bounded) ;; *) return 1 ;; esac
   path=$(fm_supervision_registry_generation_path "$state")
   [ -f "$path" ] && fm_supervision_registry_snapshot_valid "$path" && return 0
   [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
@@ -1080,10 +1109,21 @@ fm_supervision_registry_recover() {
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     task=${meta##*/}; task=${task%.meta}
     fm_supervision_registry_task_valid "$task" || continue
-    facts=$(fm_supervision_registry_meta_facts "$meta" "$task") || continue
-    IFS="$(printf '\t')" read -r endpoint backend target route home candidate_task owner_kind spawn_gen incarnation <<EOF
-$facts
-EOF
+    fm_supervision_registry_meta_load "$meta" "$task" || continue
+    endpoint=$FM_SUPERVISION_FACT_ENDPOINT
+    backend=$FM_SUPERVISION_FACT_BACKEND
+    target=$FM_SUPERVISION_FACT_TARGET
+    route=$FM_SUPERVISION_FACT_ROUTE
+    home=$FM_SUPERVISION_FACT_HOME
+    candidate_task=$FM_SUPERVISION_FACT_TASK
+    owner_kind=$FM_SUPERVISION_FACT_KIND
+    spawn_gen=$FM_SUPERVISION_FACT_SPAWN
+    worktree=$FM_SUPERVISION_FACT_WORKTREE
+    incarnation=$FM_SUPERVISION_FACT_INCARNATION
+    [ "$mode" != bounded ] \
+      || fm_supervision_registry_bounded_migration_candidate \
+        "$state" "$task" "$worktree" "$home" "$owner_kind" \
+      || continue
     [ "$endpoint" = present ] || continue
     fm_supervision_tsv_row \
       "$backend" "$target" "$route" "$home" "$candidate_task" "$spawn_gen" "$incarnation" \
@@ -1175,7 +1215,7 @@ fm_supervision_registry_task_key() {
 
 fm_supervision_registry_snapshot_index() {
   local state=$1 expected=$2 index=$3 path protocol generation kind task spawn_gen phase meta current lock rc=0 key
-  local target backend record_home route owner_kind facts endpoint candidate_task incarnation
+  local target backend record_home route owner_kind endpoint candidate_task incarnation
   [ -d "$index" ] && [ ! -L "$index" ] || return 1
   mkdir "$index/tasks" || return 1
   lock=$(fm_supervision_registry_lock_path "$state")
@@ -1192,10 +1232,16 @@ fm_supervision_registry_snapshot_index() {
     [ "$kind" = entry ] || { rc=2; break; }
     meta="$state/$task.meta"
     [ -f "$meta" ] && [ ! -L "$meta" ] || { rc=1; break; }
-    facts=$(fm_supervision_registry_meta_facts "$meta" "$task") || { rc=1; break; }
-    IFS="$(printf '\t')" read -r endpoint backend target route record_home candidate_task owner_kind current incarnation <<EOF
-$facts
-EOF
+    fm_supervision_registry_meta_load "$meta" "$task" || { rc=1; break; }
+    endpoint=$FM_SUPERVISION_FACT_ENDPOINT
+    backend=$FM_SUPERVISION_FACT_BACKEND
+    target=$FM_SUPERVISION_FACT_TARGET
+    route=$FM_SUPERVISION_FACT_ROUTE
+    record_home=$FM_SUPERVISION_FACT_HOME
+    candidate_task=$FM_SUPERVISION_FACT_TASK
+    owner_kind=$FM_SUPERVISION_FACT_KIND
+    current=$FM_SUPERVISION_FACT_SPAWN
+    incarnation=$FM_SUPERVISION_FACT_INCARNATION
     [ "$candidate_task" = "$task" ] || { rc=2; break; }
     [ "$current" = "$spawn_gen" ] || { rc=2; break; }
     key=$(fm_supervision_registry_task_key "$task") || { rc=1; break; }

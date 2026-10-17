@@ -261,7 +261,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v6\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v7\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_REAP_ALLOWANCE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -494,7 +494,7 @@ case "${FM_CODEX_BOUNDED_WATCH:-0}:${FM_CHECKS_PER_CYCLE:-0}" in
     [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ] \
       && remote_observation=deferred || remote_observation=inline
     batch_lease=${FM_CODEX_CHECK_BATCH_LEASE:-watcher-$$}
-    printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v6\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
+    printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v7\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
       "$FM_CHECKS_PER_CYCLE" "${FM_CHECK_TIMEOUT:-30}" "${FM_CHECK_KILL_GRACE:-1}" "${FM_CHECK_REAP_ALLOWANCE:-1}" "${FM_CHECK_INTERVAL:-300}" \
       "${FM_POLL:-15}" "${FM_SIGNAL_GRACE:-30}" "${FM_CREW_STATE_NM_TIMEOUT:-10}" \
       "${FM_WORKTREE_WRITE_TIMEOUT:-10}" "${FM_SEND_REMOTE_BUDGET:-30}" \
@@ -1694,7 +1694,6 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
   dir=$(fixture stale-endpoint-inventory)
   install_controlled_watcher "$dir"
   install_endpoint_inventory_tmux "$dir"
-  initialize_empty_active_supervision_registry "$dir"
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-pending-reply-lib.sh"
     fm_pending_reply_index_recover "$FM_STATE_OVERRIDE"
@@ -1710,9 +1709,11 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
       "$id" "$id" > "$(printf '%s/pending-replies/%016x' "$dir/state" "$id")"
     id=$((id + 1))
   done
-  printf '%s\n' 'window=fleet:live-a' > "$dir/state/live-a.meta"
-  printf '%s\n' 'window=fleet:live-b' > "$dir/state/live-b.meta"
-  register_active_supervision_tasks "$dir" live-a live-b
+  mkdir -p "$dir/live-a-worktree" "$dir/live-b-worktree"
+  printf 'window=fleet:live-a\nworktree=%s\nproject=%s\nspawn_gen=live-a\n' \
+    "$dir/live-a-worktree" "$dir" > "$dir/state/live-a.meta"
+  printf 'window=fleet:live-b\nworktree=%s\nproject=%s\nspawn_gen=live-b\n' \
+    "$dir/live-b-worktree" "$dir" > "$dir/state/live-b.meta"
   for id in $(seq 1 12); do
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/check-$id.check.sh"
     chmod 0700 "$dir/state/check-$id.check.sh"
@@ -1738,6 +1739,36 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget() {
   assert_no_watcher "$dir"
   finish "$dir"
   pass '10,000 archived task records stay outside the active supervision hot set'
+}
+
+test_bounded_event_wait_uses_active_registry() {
+  local dir rc
+  dir=$(fixture bounded-event-wait-inventory)
+  install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
+  mkdir -p "$dir/live-worktree"
+  printf 'window=archive-session:archive-pane\nbackend=herdr\nspawn_gen=archive-gen\n' \
+    > "$dir/state/archive.meta"
+  printf 'window=fleet:live\nworktree=%s\nproject=%s\nspawn_gen=live-gen\n' \
+    "$dir/live-worktree" "$dir" > "$dir/state/live.meta"
+  register_active_supervision_tasks "$dir" live
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_HERDR_LOG"
+exit 1
+SH
+  chmod +x "$dir/fakebin/herdr"
+  set +e
+  FM_TEST_HERDR_LOG="$dir/herdr-calls" FM_TEST_EXISTING_TARGETS='fleet:live' \
+    FM_TEST_LIVE_TARGETS='fleet:live' FM_TEST_BOUNDED_WATCH_TIMEOUT=1 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "bounded watcher did not complete observer cycles: rc=$rc $(cat "$dir/watch.err")"
+  [ -e "$dir/state/.last-watcher-beat" ] || fail 'bounded watcher never completed an observer cycle'
+  [ ! -e "$dir/herdr-calls" ] \
+    || fail "bounded event wait revisited archived Herdr metadata: $(cat "$dir/herdr-calls")"
+  pass 'bounded event wait reads only active registry owners'
 }
 
 test_production_shaped_stale_inventory_arms_supervision() {
@@ -5404,6 +5435,7 @@ test_sequential_task_classification_fits_complete_cycle_bound
 test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
+test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata
 test_active_indexes_discover_new_obligations

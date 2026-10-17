@@ -1522,16 +1522,23 @@ heartbeat_scan_finds_actionable() {
 # supervision cycle: the reader is a short-lived subprocess of THIS watcher, not
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
-  local w b session first_backend="" first_session="" rec rc
+  local w task b kind route record_home spawn_gen event_inventory session first_backend="" first_session="" rec rc
   local windows=()
-  while IFS= read -r w; do
-    b=$(window_backend "$w")
+  if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
+    event_inventory=$(active_window_inventory) || exit 1
+  else
+    event_inventory=$(while IFS= read -r w; do
+      fm_supervision_tsv_row "$w" - "$(window_backend "$w")" "$(window_kind "$w")" - - -
+    done < <(recorded_windows)) || exit 1
+  fi
+  while IFS="$(printf '\t')" read -r w task b kind route record_home spawn_gen; do
+    [ -n "$w" ] || continue
     fm_backend_has_push "$b" || continue
     # Secondmate endpoints are supervised via status writes, not pane/agent
     # state (an idle or blocked secondmate agent pane is healthy by design), so
     # they are excluded from the fast escalation exactly as the stale loop skips
     # them.
-    [ "$(window_kind "$w")" = secondmate ] && continue
+    [ "$kind" = secondmate ] && continue
     session=${w%%:*}
     if [ -z "$first_backend" ]; then first_backend=$b; first_session=$session; fi
     # One socket connection covers one backend+session; a home normally has a
@@ -1541,7 +1548,9 @@ event_wait_or_sleep() {
       continue
     fi
     windows+=("$w")
-  done < <(recorded_windows)
+  done <<EOF
+$event_inventory
+EOF
 
   if [ "${#windows[@]}" -eq 0 ]; then
     sleep "$POLL"
@@ -1708,7 +1717,7 @@ WATCHER_PID=${BASHPID:-$$}
 CODEX_CHECK_BATCH_SEQUENCE=1
 CODEX_CHECK_BATCH_AUTHORIZED=1
 if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
-  fm_supervision_registry_recover "$STATE" || exit 1
+  fm_supervision_registry_recover "$STATE" bounded || exit 1
   if [ -z "${FM_CODEX_REGISTRY_GENERATION:-}" ]; then
     FM_CODEX_REGISTRY_GENERATION=$(fm_supervision_registry_generation "$STATE") || exit 1
   else
@@ -1746,7 +1755,7 @@ if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ] && [ "$CHECKS_PER_CYCLE" -gt 0 ] \
   else
     remote_observation=inline
   fi
-  capability_value=$(printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v6\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
+  capability_value=$(printf 'fm-codex-bounded.v10\tchecks-per-cycle=%s\tcheck-timeout=%s\tcheck-kill-grace=%s\tcheck-reap-allowance=%s\tcheck-interval=%s\tpoll=%s\tsignal-grace=%s\tcrew-state-timeout=%s\tworktree-write-timeout=%s\tremote-send-timeout=%s\tinactive-reconcile-budget=%s\tadmission-guard-grace=%s\tremote-observation=%s\tinventory=active-registry-v7\tcheck-batch-handoff=resume-owner-cycle-v5\tcheck-batch-lease=%s\n' \
     "$CHECKS_PER_CYCLE" "$CHECK_TIMEOUT" "$CHECK_KILL_GRACE" "$CHECK_REAP_ALLOWANCE" "$CHECK_INTERVAL" "$POLL" "$SIGNAL_GRACE" \
     "${FM_CREW_STATE_NM_TIMEOUT:-10}" "${FM_WORKTREE_WRITE_TIMEOUT:-10}" \
     "${FM_SEND_REMOTE_BUDGET:-30}" "${FM_INACTIVE_RECONCILE_BUDGET_SECS:-10}" \
