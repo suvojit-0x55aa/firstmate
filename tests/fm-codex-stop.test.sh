@@ -123,6 +123,14 @@ wait_file() {
   while [ ! -s "$1" ] && [ "$i" -lt "$limit" ]; do sleep 0.1; i=$((i + 1)); done
   [ -s "$1" ] || fail "timeout waiting for $1"
 }
+wait_absent() {
+  local i=0 limit=${2:-150}
+  while { [ -e "$1" ] || [ -L "$1" ]; } && [ "$i" -lt "$limit" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -e "$1" ] && [ ! -L "$1" ] || fail "timeout waiting for $1 to disappear"
+}
 monotonic_seconds() {
   python3 -c 'import time; print(int(time.monotonic()))'
 }
@@ -219,6 +227,7 @@ FM_WATCH_ARM_OWNER_PID=${BASHPID:-$$}
 FM_WATCH_ARM_OWNER_IDENTITY=$(fm_pid_identity "$FM_WATCH_ARM_OWNER_PID") || exit 1
 export FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
 printf '%s\n' "$FM_WATCH_ARM_OWNER_PID" > "$FM_HOME/controlled-arm-pid"
+printf '%s\n' "$FM_WATCH_ARM_OWNER_PID" >> "$FM_HOME/controlled-arm-starts"
 if [ -n "${FM_CODEX_CHECK_BATCH_LEASE:-}" ]; then
   printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
     "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
@@ -1415,25 +1424,38 @@ PY
   pass 'terminal errors distinguish current uncertain and changed generations'
 }
 
-test_current_generation_failure_remains_closed() {
-  local dir original_root=$TEST_ROOT
+test_current_generation_failure_episode_is_bounded() {
+  local dir original_root=$TEST_ROOT first_arm_count
   dir=$(fixture bounded-failure-episode)
   install_controlled_watcher "$dir"
   printf '%s\n' 'kind=ship' 'harness=codex' 'spawn_gen=failure-episode-1' \
     > "$dir/state/task.meta"
   initialize_empty_active_supervision_registry "$dir"
   register_active_supervision_tasks "$dir" task
-  FM_CODEX_REPEAT=1 FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+  FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
+    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
     TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
+  wait_file "$dir/repeat-paused" 350
+  [ "$(jq -r .phase "$dir/state/.codex-stop.json")" = handling ] \
+    || fail 'first current-generation watcher failure did not enter bounded handling'
+  cp "$dir/state/.codex-stop-failure-episode.json" "$dir/first-failure-episode"
+  first_arm_count=$(wc -l < "$dir/controlled-arm-starts")
+  [ "$first_arm_count" -eq 1 ] || fail 'first failure episode launched an unexpected arm count'
+  touch "$dir/repeat-paused.release"
   wait_file "$dir/repeat-rc" 350
   [ "$(cat "$dir/rc")" = 2 ] || fail 'first current-generation watcher failure was not surfaced'
-  [ "$(cat "$dir/repeat-rc")" = 2 ] \
-    || fail 'unchanged current-generation watcher failure was acknowledged without recovery'
+  [ "$(cat "$dir/repeat-rc")" = 0 ] \
+    || fail 'unchanged current-generation watcher failure surfaced more than once'
   assert_contains "$(cat "$dir/out")" 'watcher failed' \
     'first current-generation failure lost its durable diagnostic'
-  assert_contains "$(cat "$dir/repeat-out")" 'watcher failed' \
-    'repeated current-generation failure lost its fail-closed diagnostic'
+  [ ! -s "$dir/repeat-out" ] \
+    || fail 'deduplicated current-generation failure emitted a second continuation'
+  [ "$(wc -l < "$dir/controlled-arm-starts")" -eq 1 ] \
+    || fail 'deduplicated current-generation failure launched another watcher arm'
+  wait_absent "$dir/state/.codex-stop.json"
+  cmp "$dir/first-failure-episode" "$dir/state/.codex-stop-failure-episode.json" \
+    || fail 'deduplicated current-generation failure replaced its durable episode'
   [ "$(jq -r .protocol "$dir/state/.codex-stop-failure-episode.json")" = fm-codex-stop-failure.v1 ] \
     || fail 'current-generation failure episode was not recorded durably'
   finish "$dir"
@@ -1460,8 +1482,10 @@ test_current_generation_failure_remains_closed() {
     || fail 'a changed active generation did not receive one new failure episode'
   assert_contains "$(cat "$dir/repeat-out")" 'watcher failed' \
     'changed generation incorrectly inherited the prior failure suppression'
+  [ "$(wc -l < "$dir/controlled-arm-starts")" -eq 2 ] \
+    || fail 'changed generation did not launch exactly one new watcher arm'
   finish "$dir"
-  pass 'current-generation Stop failures remain closed until recovery'
+  pass 'current-generation Stop failures surface once per unchanged episode'
 }
 
 test_stalled_watcher_cannot_complete_quiet_window() {
@@ -6522,7 +6546,7 @@ test_identity_and_cleanup_phases_preserve_transport_reserve
 test_registry_retirement_preserves_conclusive_generation_change
 test_persistent_identity_timeout_fails_closed
 test_terminal_error_generation_tristate
-test_current_generation_failure_remains_closed
+test_current_generation_failure_episode_is_bounded
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake

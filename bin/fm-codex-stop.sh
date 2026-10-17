@@ -10,6 +10,8 @@
 # Due checks are split into a durable per-cycle batch sized to the remaining
 # deadline, without reducing any individual check's timeout.
 # Between Stops it holds an identity-checked handling lease for at most 300s.
+# A committed failure episode blocks once; an unchanged follow-up retires the
+# owner without launching another watcher or extending the handling lease.
 # Closing an unanswered hook connection cancels its owned watcher process group;
 # an independently attached watcher is outside that group and is never killed.
 # No lock PID is trusted for exclusion or stale takeover: flock releases on death.
@@ -742,6 +744,57 @@ def failure_episode(reason, registry_generation):
                 registry_generation=registry_generation, reason=normalized)
 
 
+def read_failure_episode():
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(FAILURE_EPISODE, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                return None
+            value = json.loads(os.read(fd, 4097).decode('utf-8'))
+        finally:
+            os.close(fd)
+        return value
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def failure_episode_seen(expected):
+    return expected is not None and read_failure_episode() == expected
+
+
+def failure_episode_unchanged():
+    current = read_failure_episode()
+    if not isinstance(current, dict):
+        return False
+    expected = failure_episode(current.get('reason', ''), current.get('registry_generation'))
+    if current != expected or queued():
+        return False
+    generation = current['registry_generation']
+    result = shell(r'''
+. "$1/fm-backend.sh" || exit 1
+. "$1/fm-supervision-registry-lib.sh" || exit 1
+before=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+[ "$before" = "$2" ] || exit 2
+active=$(fm_supervision_registry_active_tasks "$FM_STATE_OVERRIDE") || exit 1
+while IFS= read -r task; do
+  [ -n "$task" ] || continue
+  for suffix in status turn-ended; do
+    file="$FM_STATE_OVERRIDE/$task.$suffix"
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file" || exit 3
+  done
+done <<EOF
+$active
+EOF
+after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+[ "$after" = "$before" ] || exit 2
+''', generation)
+    return (result is not None and result.returncode == 0 and not queued() and
+            read_failure_episode() == current)
+
+
 def write_failure_episode(value):
     fd, tmp = tempfile.mkstemp(prefix='.codex-stop-failure-episode.')
     try:
@@ -1095,6 +1148,10 @@ def owner(lock):
             reason = budget_reason
         episode = failure_episode(
             reason, leased_registry_generation or admission_registry_generation)
+        if terminal_cleanup_complete and failure_episode_seen(episode):
+            send(active, dict(rc=0, reason='', token=token))
+            terminal_delivered = True
+            return False
         pending_failure_episode = episode
         publish('delivering', 5)
         acknowledged = False
@@ -1201,6 +1258,10 @@ def owner(lock):
                     elif active is not None or phase == 'watching':
                         send(conn, dict(rc=0, reason='', token=token))
                         close(conn)
+                    elif failure_episode_unchanged():
+                        send(conn, dict(rc=0, reason='', token=token))
+                        close(conn)
+                        return
                     else:
                         active = conn
                         acknowledged = False
