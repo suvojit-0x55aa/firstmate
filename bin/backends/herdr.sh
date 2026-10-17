@@ -3129,6 +3129,63 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
     '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
 }
 
+fm_backend_herdr_recover_planned() {  # <task> <target> <detail>
+  local task=$1 target=$2 detail=$3 session label workspace tabs tab_ids count tab pane
+  local list token workspaces
+  case "$target" in *:*) ;; *) return 1 ;; esac
+  session=${target%%:*}
+  label=${target#*:}
+  [ "$label" = "fm-$task" ] || return 1
+  if [ -f "$detail" ] && [ ! -L "$detail" ]; then
+    fm_backend_herdr_projection_journal_snapshot "$detail" "$task" || return 1
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+      [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || return 1
+      workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+      tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+    else
+      token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+      list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+      printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+      workspaces=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
+        '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null) || return 1
+      count=$(printf '%s\n' "$workspaces" | awk 'NF { n++ } END { print n + 0 }')
+      [ "$count" -le 1 ] || return 1
+      if [ "$count" -eq 0 ]; then
+        printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+        return 0
+      fi
+      workspace=$workspaces
+      tab=
+    fi
+  else
+    workspace=$detail
+    tab=
+  fi
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+  tab_ids=$(printf '%s' "$tabs" | jq -r --arg want "$label" \
+    '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null) || return 1
+  if [ -n "$tab" ]; then
+    printf '%s\n' "$tab_ids" | grep -Fqx "$tab" || {
+      printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+      return 0
+    }
+  else
+    count=$(printf '%s\n' "$tab_ids" | awk 'NF { n++ } END { print n + 0 }')
+    [ "$count" -le 1 ] || return 1
+    if [ "$count" -eq 0 ]; then
+      printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+      return 0
+    fi
+    tab=$tab_ids
+  fi
+  pane=$(fm_backend_herdr_pane_for_tab "$session" "$workspace" "$tab") || return 1
+  [ -n "$pane" ] || return 1
+  case "$session$workspace$tab$pane" in *[$'\t\r\n']*) return 1 ;; esac
+  printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t%s\t%s\n' \
+    "$session" "$pane" "$tab" "$session" "$workspace" "$tab" "$pane"
+}
+
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an
 # ad hoc selector with no meta (mirrors tmux's list-windows grep). Searches
 # every RUNNING named herdr session (herdr session list) for a tab whose label

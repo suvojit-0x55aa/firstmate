@@ -124,7 +124,13 @@ fm_pending_reply_dir() {  # <state-dir>
   printf '%s/pending-replies' "$state"
 }
 
+fm_pending_reply_corr_valid() {  # <corr_id>
+  [ "${#1}" -eq 16 ] || return 1
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
 fm_pending_reply_path() {  # <state-dir> <corr_id>
+  fm_pending_reply_corr_valid "$2" || return 1
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
 }
 
@@ -138,6 +144,7 @@ fm_pending_reply_index_task_dir() {
 }
 fm_pending_reply_index_add() {  # <state> <task> <corr>
   local dir tmp
+  fm_pending_reply_corr_valid "$3" || return 1
   dir=$(fm_pending_reply_index_task_dir "$1" "$2") || return 1
   mkdir -p "$dir" || return 1
   tmp="$dir/.$3.tmp.${BASHPID:-$$}"
@@ -149,6 +156,7 @@ fm_pending_reply_index_add() {  # <state> <task> <corr>
 }
 fm_pending_reply_index_remove() {  # <state> <task> <corr>
   local dir
+  fm_pending_reply_corr_valid "$3" || return 1
   dir=$(fm_pending_reply_index_task_dir "$1" "$2") || return 1
   rm -f -- "$dir/$3"
   rmdir "$dir" 2>/dev/null || true
@@ -169,6 +177,7 @@ fm_pending_reply_index_recover() {  # <state>
       [ -f "$rec" ] && [ ! -L "$rec" ] || continue
       case "${rec##*/}" in .*) continue ;; esac
       corr=$(fm_pending_reply_get "$rec" corr_id); [ -n "$corr" ] || corr=${rec##*/}
+      fm_pending_reply_corr_valid "$corr" || continue
       task=$(fm_pending_reply_get "$rec" task_id)
       phase=$(fm_pending_reply_get "$rec" phase)
       [ -n "$task" ] && [ "$phase" != resolved ] || continue
@@ -238,7 +247,8 @@ fm_pending_reply_get() {  # <record-path> <key>
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase delivered
-  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  corr=$(printf '%s' "$corr" | tr 'A-F' 'a-f')
+  fm_pending_reply_corr_valid "$corr" || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
@@ -1393,6 +1403,7 @@ EOF
       for indexed in "$index_dir"/*; do
         [ -f "$indexed" ] && [ ! -L "$indexed" ] || continue
         corr=${indexed##*/}
+        fm_pending_reply_corr_valid "$corr" || continue
         printf '%s/%s\n' "$dir" "$corr" >> "$record_list" || {
           find "$lookup_dir" -depth -delete 2>/dev/null || true
           return 1
@@ -1413,6 +1424,7 @@ EOF
     esac
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
+    fm_pending_reply_corr_valid "$corr" || continue
     task_id=$(fm_pending_reply_get "$rec" task_id)
     if [ "$active_only" = active-only ]; then
       task_key=$(fm_backend_agent_state_cache_key "$task_id") || continue

@@ -341,6 +341,29 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
+fm_backend_cmux_recover_planned() {  # <task> <target> <detail>
+  local task=$1 target=$2 detail=$3 expected list workspaces count workspace surface
+  [ "$target" = "fm-$task" ] || return 1
+  expected=$(fm_backend_cmux_scoped_title "$target")
+  [ "$detail" = "$expected" ] || return 1
+  list=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  workspaces=$(printf '%s' "$list" | jq -r --arg want "$expected" \
+    '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$workspaces" | awk 'NF { n++ } END { print n + 0 }')
+  [ "$count" -le 1 ] || return 1
+  if [ "$count" -eq 0 ]; then
+    printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+    return 0
+  fi
+  workspace=$workspaces
+  surface=$(fm_backend_cmux_surface_id_for_workspace "$workspace") || return 1
+  [ -n "$surface" ] || return 1
+  case "$workspace$surface" in *[$'\t\r\n']*) return 1 ;; esac
+  printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t-\t-\n' \
+    "$workspace" "$surface" "$workspace" "$workspace" "$surface"
+}
+
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
 # refusing an existing live <label> (finding #6: cmux enforces no uniqueness
 # itself). Resolves the fresh workspace's default surface via one list-panes

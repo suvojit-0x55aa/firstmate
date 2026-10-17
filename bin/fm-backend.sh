@@ -350,11 +350,13 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window
+  local meta=$1 backend terminal window endpoint_state
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+    endpoint_state=$(fm_meta_get "$meta" endpoint_state)
+    [ "$endpoint_state" != worktree-only ] || return 0
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
@@ -899,6 +901,20 @@ fm_backend_reservation_identity() {
       fm_backend_tmux_reservation_identity "$@"
       ;;
     *) printf 'unverified\t-\n' ;;
+  esac
+}
+
+fm_backend_recover_planned() {
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_recover_planned "$@" ;;
+    herdr) fm_backend_herdr_recover_planned "$@" ;;
+    zellij) fm_backend_zellij_recover_planned "$@" ;;
+    cmux) fm_backend_cmux_recover_planned "$@" ;;
+    orca) fm_backend_orca_recover_planned "$@" ;;
+    *) return 1 ;;
   esac
 }
 

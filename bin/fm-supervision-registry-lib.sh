@@ -350,10 +350,64 @@ fm_supervision_registry_remote_recovery() {
   printf '%s\n' "$parsed"
 }
 
+fm_supervision_registry_publish_planned_locked() { # <state> <task> <spawn> <backend> <plan-meta> <phase> <target> <detail> <worktree> <id1> <id2> <id3> <id4>
+  local state=$1 task=$2 spawn_gen=$3 backend=$4 plan_meta=$5 phase=$6 target=$7 detail=$8
+  local worktree=$9 id1=${10} id2=${11} id3=${12} id4=${13}
+  local meta tmp project harness kind planned_worktree value
+  meta="$state/$task.meta"
+  project=$(fm_backend_meta_exact_value "$plan_meta" project 2>/dev/null) || return 1
+  harness=$(fm_backend_meta_exact_value "$plan_meta" harness 2>/dev/null) || return 1
+  kind=$(fm_backend_meta_exact_value "$plan_meta" kind 2>/dev/null) || return 1
+  planned_worktree=$(fm_backend_meta_exact_value "$plan_meta" worktree 2>/dev/null) || return 1
+  [ "$worktree" != - ] || worktree=$planned_worktree
+  for value in "$project" "$harness" "$kind" "$worktree" "$target" "$detail" \
+    "$id1" "$id2" "$id3" "$id4"; do
+    case "$value" in ''|*[$'\t\r\n']*) return 1 ;; esac
+  done
+  tmp=$(umask 077; mktemp "$state/.$task.meta.planned-recovery.XXXXXX") || return 1
+  {
+    case "$backend" in
+      tmux)
+        printf 'window=%s\n' "$detail"
+        ;;
+      herdr)
+        printf 'window=%s\nbackend=herdr\n' "$target"
+        printf 'herdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
+          "$id1" "$id2" "$id3" "$id4"
+        ;;
+      zellij)
+        printf 'window=%s\nbackend=zellij\n' "$target"
+        printf 'zellij_session=%s\nzellij_tab_id=%s\nzellij_pane_id=%s\n' \
+          "$id1" "$id2" "$id3"
+        ;;
+      cmux)
+        printf 'window=%s\nbackend=cmux\n' "$target"
+        printf 'cmux_workspace_id=%s\ncmux_surface_id=%s\n' "$id1" "$id2"
+        ;;
+      orca)
+        [ "$phase" = worktree-only ] || { rm -f -- "$tmp"; return 1; }
+        printf 'window=%s\nendpoint_state=worktree-only\nbackend=orca\n' "$target"
+        printf 'orca_worktree_id=%s\n' "$id1"
+        ;;
+      *) rm -f -- "$tmp"; return 1 ;;
+    esac
+    printf 'endpoint_task_id=%s\nworktree=%s\nproject=%s\n' "$task" "$worktree" "$project"
+    printf 'harness=%s\nkind=%s\nspawn_gen=%s\n' "$harness" "$kind" "$spawn_gen"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! fm_supervision_registry_staged_meta_valid \
+      "$tmp" "$task" "$spawn_gen" "$phase" "$backend" "$target" "$detail" \
+    || ! mv -f -- "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_supervision_registry_write_locked "$state" "$task" "$meta" pending set
+}
+
 fm_supervision_registry_reconcile_locked() {
   local state=$1 path protocol generation kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail meta current identity verdict
   local recovery_identity recovery_state recovery_path recovery_target transaction_meta recovery_result recovery_tmp
-  local recovery_harness expected_harness
+  local recovery_harness expected_harness planned_result planned_verdict planned_phase
+  local planned_target planned_detail planned_worktree planned_id1 planned_id2 planned_id3 planned_id4
   path=$(fm_supervision_registry_generation_path "$state")
   fm_supervision_registry_snapshot_valid "$path" || return 1
   IFS="$(printf '\t')" read -r protocol generation < "$path" || return 1
@@ -377,6 +431,25 @@ fm_supervision_registry_reconcile_locked() {
         transaction_meta=$(fm_supervision_registry_transaction_meta_locked \
           "$state" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" 2>/dev/null || true)
         [ -n "$transaction_meta" ] || return 1
+        planned_result=$(fm_backend_recover_planned \
+          "$backend" "$task" "$target" "$detail" 2>/dev/null) || continue
+        IFS="$(printf '\t')" read -r planned_verdict planned_phase planned_target planned_detail \
+          planned_worktree planned_id1 planned_id2 planned_id3 planned_id4 <<EOF
+$planned_result
+EOF
+        case "$planned_verdict" in
+          missing)
+            fm_supervision_registry_write_locked "$state" "$task" '' '' cancel || return 1
+            ;;
+          found)
+            case "$planned_phase" in created|worktree-only) ;; *) continue ;; esac
+            fm_supervision_registry_publish_planned_locked \
+              "$state" "$task" "$spawn_gen" "$backend" "$transaction_meta" \
+              "$planned_phase" "$planned_target" "$planned_detail" "$planned_worktree" \
+              "$planned_id1" "$planned_id2" "$planned_id3" "$planned_id4" || return 1
+            ;;
+          *) continue ;;
+        esac
         continue
         ;;
       worktree-only)
@@ -745,6 +818,7 @@ fm_supervision_registry_meta_facts() { # <meta> <task>
       else if (key == "home") home=value
       else if (key == "kind") kind=value
       else if (key == "spawn_gen") { spawn=value; spawn_seen=1 }
+      else if (key == "endpoint_state") endpoint_state=value
     }
     {
       key=$1
@@ -754,7 +828,8 @@ fm_supervision_registry_meta_facts() { # <meta> <task>
     }
     END {
       if (backend == "") backend="tmux"
-      target=(backend == "orca" && terminal != "") ? terminal : window
+      if (backend == "orca" && endpoint_state == "worktree-only") target=""
+      else target=(backend == "orca" && terminal != "") ? terminal : window
       if (target == "") { endpoint="absent"; target="-" } else endpoint="present"
       route=(target ~ /^remote:/ || remote_host != "") ? "remote" : "local"
       if (home == "") home="-"

@@ -376,6 +376,41 @@ $windows
 EOF
 }
 
+fm_backend_tmux_recover_planned() {  # <task> <target> <detail>
+  local task=$1 target=$2 detail=$3 session name tab out status matches count stable live path
+  case "$target" in *:*) ;; *) return 1 ;; esac
+  session=${target%%:*}
+  name=${target#*:}
+  [ "$name" = "fm-$task" ] && [ "$detail" = "$target" ] || return 1
+  tab=$(printf '\t')
+  out=$(LC_ALL=C tmux list-windows -t "$session" \
+    -F "#{window_id}${tab}#{session_name}:#{window_name}${tab}#{pane_current_path}" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    case "$out" in
+      *"can't find session:"*|*"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  matches=$(printf '%s\n' "$out" | awk -F '\t' -v want="$target" '$2 == want { print }')
+  count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n + 0 }')
+  [ "$count" -le 1 ] || return 1
+  if [ "$count" -eq 0 ]; then
+    printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+    return 0
+  fi
+  IFS="$tab" read -r stable live path <<EOF
+$matches
+EOF
+  [ -n "$stable" ] && [ "$live" = "$target" ] && [ -n "$path" ] || return 1
+  case "$stable$live$path" in *[$'\t\r\n']*) return 1 ;; esac
+  printf 'found\tcreated\t%s\t%s\t%s\t-\t-\t-\t-\n' \
+    "$stable" "$live" "$path"
+}
+
 fm_backend_tmux_agent_state() {  # <target> [inventory-status] [inventory-directory]
   local target=$1 snapshot_status=${2:-} snapshot_dir=${3:-}
   local comm session window windows inventory_status membership_key snapshot_state

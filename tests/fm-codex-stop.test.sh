@@ -4587,8 +4587,8 @@ SH
   pass 'transaction journals preserve backend metadata and converge remote unknown completion'
 }
 
-test_planned_reservations_survive_backend_creation_crashes() {
-  local dir rc backend task target detail
+test_planned_reservations_converge_after_backend_creation_crashes() {
+  local dir rc backend task target detail facts
   dir=$(fixture planned-reservation-crashes)
   set +e
   FM_STATE_OVERRIDE="$dir/state" bash -c '
@@ -4612,6 +4612,8 @@ herdr|planned-herdr|default:fm-planned-herdr|workspace-planned
 zellij|planned-zellij|zellij-main:fm-planned-zellij|zellij-main
 cmux|planned-cmux|fm-planned-cmux|fm-home-planned-cmux
 orca|planned-orca|fm-planned-orca|/project/planned-orca
+tmux|planned-missing|fleet:fm-planned-missing|fleet:fm-planned-missing
+tmux|planned-unknown|fleet:fm-planned-unknown|fleet:fm-planned-unknown
 EOF
     exit 79
   ' _ "$ROOT/bin" >/dev/null 2>&1
@@ -4622,27 +4624,111 @@ EOF
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
+    fm_backend_recover_planned() {
+      case "$2" in
+        planned-tmux) printf "found\tcreated\t@41\tfleet:fm-planned-tmux\t/planned/planned-tmux\t-\t-\t-\t-\n" ;;
+        planned-herdr) printf "found\tcreated\tdefault:pane-2\ttab-2\t-\tdefault\tworkspace-planned\ttab-2\tpane-2\n" ;;
+        planned-zellij) printf "found\tcreated\tzellij-main:8\t7\t-\tzellij-main\t7\t8\t-\n" ;;
+        planned-cmux) printf "found\tcreated\tworkspace-3:surface-3\tworkspace-3\t-\tworkspace-3\tsurface-3\t-\t-\n" ;;
+        planned-orca) printf "found\tworktree-only\tfm-planned-orca\tworktree-4\t/planned/planned-orca\tworktree-4\t-\t-\t-\n" ;;
+        planned-missing) printf "missing\t-\t-\t-\t-\t-\t-\t-\t-\n" ;;
+        planned-unknown) return 1 ;;
+        *) return 1 ;;
+      esac
+    }
     fm_supervision_registry_generation "$FM_STATE_OVERRIDE" >/dev/null
   ' _ "$ROOT/bin" || fail 'planned reservation reconciliation failed'
   for backend in tmux herdr zellij cmux orca; do
     task="planned-$backend"
-    grep -F "$(printf 'reservation\t%s\t%s-gen\t' "$task" "$task")" \
-      "$dir/state/.active-supervision-generation" | grep -F "$(printf '\tplanned\t%s\t' "$backend")" >/dev/null \
-      || fail "$backend creation plan was discarded after its owner died"
-    [ -f "$dir/state/.active-supervision-transactions-v1/$(printf '%s' "$task" | od -An -v -tx1 | tr -d ' \n')/meta" ] \
-      || fail "$backend creation plan lost its durable recovery envelope"
+    grep -F "$(printf 'entry\t%s\t%s-gen\tpending' "$task" "$task")" \
+      "$dir/state/.active-supervision-generation" >/dev/null \
+      || fail "$backend creation plan did not publish recovered ownership"
+    [ -f "$dir/state/$task.meta" ] || fail "$backend recovery did not publish metadata"
+    FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1/fm-backend.sh"
+      fm_backend_validate_task_endpoint "$FM_STATE_OVERRIDE/$2.meta" "$2"
+    ' _ "$ROOT/bin" "$task" || fail "$backend planned recovery published invalid metadata"
   done
-  set +e
-  FM_STATE_OVERRIDE="$dir/state" bash -c '
-    . "$1/fm-wake-lib.sh"
+  ! grep -F "$(printf '\tplanned-missing\t')" "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'authoritatively missing creation plan retained ownership'
+  grep -F "$(printf 'reservation\tplanned-unknown\tplanned-unknown-gen\t')" \
+    "$dir/state/.active-supervision-generation" | grep -F "$(printf '\tplanned\ttmux\t')" >/dev/null \
+    || fail 'unverified creation plan did not remain fail-closed'
+  [ -z "$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-backend.sh"
+    fm_backend_target_of_meta "$FM_STATE_OVERRIDE/planned-orca.meta"
+  ' _ "$ROOT/bin")" ] || fail 'Orca worktree-only recovery invented a terminal target'
+  facts=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
-    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
-  ' _ "$ROOT/bin" >/dev/null 2>&1
-  rc=$?
-  set -e
-  [ "$rc" -ne 0 ] || fail 'unresolved creation plans were hidden from supervision admission'
-  pass 'backend creation plans retain recovery identity and fail closed after crashes'
+    fm_supervision_registry_meta_facts "$FM_STATE_OVERRIDE/planned-orca.meta" planned-orca
+  ' _ "$ROOT/bin") || fail 'Orca worktree-only metadata facts were unreadable'
+  case "$facts" in absent$'\t'orca$'\t-'$'\t'*) ;; *) fail 'Orca worktree-only facts exposed a fabricated endpoint' ;; esac
+  pass 'backend creation plans converge through authoritative discovery'
+}
+
+test_planned_backend_discovery_uses_live_identity() {
+  local dir
+  dir=$(fixture planned-backend-discovery)
+  FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+    . "$1/fm-backend.sh"
+    fm_backend_source tmux || exit 1
+    fm_backend_source herdr || exit 1
+    fm_backend_source zellij || exit 1
+    fm_backend_source cmux || exit 1
+    fm_backend_source orca || exit 1
+    tmux() {
+      [ "$1" = list-windows ] || return 1
+      printf "@71\tfleet:fm-discovery-tmux\t/live/tmux\n"
+    }
+    fm_backend_herdr_cli() {
+      case "$2:$3" in
+        tab:list) printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"tab-2\",\"label\":\"fm-discovery-herdr\"}]}}" ;;
+        pane:list) printf "%s\n" "{\"result\":{\"panes\":[{\"tab_id\":\"tab-2\",\"pane_id\":\"pane-2\"}]}}" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_zellij_cli() {
+      case "$2:$3" in
+        action:list-tabs)
+          title=$(fm_backend_zellij_scoped_title fm-discovery-zellij)
+          printf "[{\"tab_id\":7,\"name\":\"%s\"}]\n" "$title"
+          ;;
+        action:list-panes) printf "%s\n" "[{\"tab_id\":7,\"id\":8,\"is_plugin\":false}]" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_cmux_cli() {
+      case "$1:$2" in
+        workspace:list)
+          title=$(fm_backend_cmux_scoped_title fm-discovery-cmux)
+          printf "{\"workspaces\":[{\"id\":\"workspace-3\",\"title\":\"%s\"}]}\n" "$title"
+          ;;
+        list-panes:*) printf "%s\n" "{\"panes\":[{\"selected_surface_id\":\"surface-3\"}]}" ;;
+        *) return 1 ;;
+      esac
+    }
+    orca() {
+      case "$1:$2" in
+        status:--json) printf "%s\n" "{\"ok\":true,\"result\":{\"runtime\":{\"reachable\":true,\"state\":\"ready\"}}}" ;;
+        repo:show) printf "%s\n" "{\"ok\":true,\"result\":{\"repo\":{\"id\":\"repo-4\"}}}" ;;
+        worktree:list) printf "%s\n" "{\"ok\":true,\"result\":{\"worktrees\":[{\"id\":\"worktree-4\",\"displayName\":\"fm-discovery-orca\",\"path\":\"/live/orca\"}],\"truncated\":false}}" ;;
+        *) return 1 ;;
+      esac
+    }
+    [ "$(fm_backend_tmux_recover_planned discovery-tmux fleet:fm-discovery-tmux fleet:fm-discovery-tmux)" = \
+      "$(printf "found\tcreated\t@71\tfleet:fm-discovery-tmux\t/live/tmux\t-\t-\t-\t-")" ] || exit 1
+    [ "$(fm_backend_herdr_recover_planned discovery-herdr default:fm-discovery-herdr workspace-2)" = \
+      "$(printf "found\tcreated\tdefault:pane-2\ttab-2\t-\tdefault\tworkspace-2\ttab-2\tpane-2")" ] || exit 1
+    [ "$(fm_backend_zellij_recover_planned discovery-zellij zellij-main:fm-discovery-zellij zellij-main)" = \
+      "$(printf "found\tcreated\tzellij-main:8\t7\t-\tzellij-main\t7\t8\t-")" ] || exit 1
+    cmux_title=$(fm_backend_cmux_scoped_title fm-discovery-cmux)
+    [ "$(fm_backend_cmux_recover_planned discovery-cmux fm-discovery-cmux "$cmux_title")" = \
+      "$(printf "found\tcreated\tworkspace-3:surface-3\tworkspace-3\t-\tworkspace-3\tsurface-3\t-\t-")" ] || exit 1
+    [ "$(fm_backend_orca_recover_planned discovery-orca fm-discovery-orca /project/orca)" = \
+      "$(printf "found\tworktree-only\tfm-discovery-orca\tworktree-4\t/live/orca\tworktree-4\t-\t-\t-")" ] || exit 1
+  ' _ "$ROOT/bin" || fail 'planned backend discovery did not resolve live identities'
+  pass 'planned backend discovery resolves exact live identities'
 }
 
 test_registered_check_kills_term_ignoring_process_group() {
@@ -5115,7 +5201,8 @@ test_incarnation_allocator_is_durable_unique_and_nonreusable
 test_registry_reservation_recovers_spawn_crash_windows
 test_remote_recovery_protocol_reports_exact_endpoint
 test_transaction_journals_recover_every_backend
-test_planned_reservations_survive_backend_creation_crashes
+test_planned_reservations_converge_after_backend_creation_crashes
+test_planned_backend_discovery_uses_live_identity
 test_registered_check_kills_term_ignoring_process_group
 test_registered_check_preserves_grace_for_orphan_descendant
 test_bounded_check_starts_without_observer_endpoint

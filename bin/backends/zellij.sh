@@ -270,6 +270,31 @@ fm_backend_zellij_pane_for_tab() {  # <session> <tab_id>
     | jq -r --argjson t "$tab_id" '.[]? | select(.tab_id == $t and .is_plugin == false) | .id' 2>/dev/null | head -1
 }
 
+fm_backend_zellij_recover_planned() {  # <task> <target> <detail>
+  local task=$1 target=$2 detail=$3 session label title tabs tab_ids count tab pane
+  case "$target" in *:*) ;; *) return 1 ;; esac
+  session=${target%%:*}
+  label=${target#*:}
+  [ "$session" = "$detail" ] && [ "$label" = "fm-$task" ] || return 1
+  title=$(fm_backend_zellij_scoped_title "$label")
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  tab_ids=$(printf '%s' "$tabs" | jq -r --arg want "$title" \
+    '.[]? | select(.name == $want) | .tab_id' 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$tab_ids" | awk 'NF { n++ } END { print n + 0 }')
+  [ "$count" -le 1 ] || return 1
+  if [ "$count" -eq 0 ]; then
+    printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+    return 0
+  fi
+  tab=$tab_ids
+  pane=$(fm_backend_zellij_pane_for_tab "$session" "$tab") || return 1
+  case "$tab:$pane" in *[!0-9:]*) return 1 ;; esac
+  [ -n "$pane" ] || return 1
+  printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t%s\t-\n' \
+    "$session" "$pane" "$tab" "$session" "$tab" "$pane"
+}
+
 # fm_backend_zellij_tab_for_pane: the owning tab id for <pane_id> in
 # <session>, the reverse lookup kill needs (meta stores only the pane in the
 # target string; the tab id is looked up fresh rather than trusted stale,

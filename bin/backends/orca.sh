@@ -196,6 +196,58 @@ fm_backend_orca_worktree_path() {
   printf '%s' "$path"
 }
 
+fm_backend_orca_recover_planned() {  # <task> <target> <project>
+  local task=$1 target=$2 project=$3 repo_out repo_status repo_id list parsed
+  local count truncated worktree_id worktree_path
+  [ "$target" = "fm-$task" ] || return 1
+  fm_backend_orca_runtime_check >/dev/null 2>&1 || return 1
+  repo_out=$(orca repo show --repo "path:$project" --json 2>/dev/null)
+  repo_status=$?
+  if [ "$repo_status" -ne 0 ]; then
+    if printf '%s' "$repo_out" | node -e '
+      const fs=require("fs");
+      let d; try { d=JSON.parse(fs.readFileSync(0,"utf8")); } catch (_) { process.exit(1); }
+      const c=String(d?.error?.code || "");
+      process.exit(/not[_-]?found|selector_not_found/.test(c) ? 0 : 1);
+    ' >/dev/null 2>&1; then
+      printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+      return 0
+    fi
+    return 1
+  fi
+  repo_id=$(printf '%s' "$repo_out" | fm_backend_orca_json_get repo-id 2>/dev/null) || return 1
+  list=$(orca worktree list --repo "id:$repo_id" --limit 1000 --json 2>/dev/null) || return 1
+  parsed=$(printf '%s' "$list" | node -e '
+    const fs=require("fs");
+    const want=process.argv[1];
+    let d; try { d=JSON.parse(fs.readFileSync(0,"utf8")); } catch (_) { process.exit(1); }
+    if (d.ok === false) process.exit(1);
+    const r=d.result || {};
+    if (!Array.isArray(r.worktrees)) process.exit(1);
+    const rows=r.worktrees.filter(w => String(w.displayName ?? w.name ?? "") === want);
+    const safe=v => typeof v === "string" && v.length > 0 && !/[\t\r\n]/.test(v);
+    if (rows.length === 1) {
+      const w=rows[0];
+      const id=String(w.id ?? w.worktreeId ?? "");
+      const path=String(w.path ?? w.worktreePath ?? w.git?.path ?? "");
+      if (!safe(id) || !safe(path)) process.exit(1);
+      process.stdout.write(`1\t${r.truncated === true ? "1" : "0"}\t${id}\t${path}`);
+    } else {
+      process.stdout.write(`${rows.length}\t${r.truncated === true ? "1" : "0"}\t-\t-`);
+    }
+  ' "$target") || return 1
+  IFS="$(printf '\t')" read -r count truncated worktree_id worktree_path <<EOF
+$parsed
+EOF
+  case "$count" in 0)
+    [ "$truncated" = 0 ] || return 1
+    printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+    return 0
+    ;; 1) ;; *) return 1 ;; esac
+  printf 'found\tworktree-only\t%s\t%s\t%s\t%s\t-\t-\t-\n' \
+    "$target" "$worktree_id" "$worktree_path" "$worktree_id"
+}
+
 fm_backend_orca_capture() {  # <terminal-id> <lines>
   local terminal=$1 lines=${2:-40} out
   fm_backend_orca_tool_check || return 1
