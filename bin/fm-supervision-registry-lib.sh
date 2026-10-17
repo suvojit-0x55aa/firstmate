@@ -1089,10 +1089,56 @@ fm_supervision_registry_secondmate_registered() {
 
 fm_supervision_registry_bounded_migration_candidate() {
   local state=$1 task=$2 backend=$3 target=$4 home=$5 worktree=$6 owner_kind=$7 live_index=$8
-  local record live_backend live_target
+  local record live_backend live_target live_identity1 live_identity2 live_identity3
+  local resolved= resolved_identity1=- resolved_identity2=- resolved_identity3=- count=0
+  FM_SUPERVISION_MIGRATION_TARGET=$target
+  FM_SUPERVISION_MIGRATION_IDENTITY1=-
+  FM_SUPERVISION_MIGRATION_IDENTITY2=-
+  FM_SUPERVISION_MIGRATION_IDENTITY3=-
   if [ "$owner_kind" = secondmate ] \
     && fm_supervision_registry_secondmate_registered "$state" "$task" "$home"; then
     return 0
+  fi
+  case "$owner_kind" in ship|scout) ;; *) return 1 ;; esac
+  record="$live_index/$task"
+  if [ -f "$record" ] && [ ! -L "$record" ]; then
+    while IFS="$(printf '\t')" read -r live_backend live_target live_identity1 live_identity2 live_identity3; do
+      [ "$live_backend" = "$backend" ] || continue
+      case "$backend" in
+        cmux|herdr)
+          if [ "$live_target" = "$target" ]; then
+            FM_SUPERVISION_MIGRATION_IDENTITY1=$live_identity1
+            FM_SUPERVISION_MIGRATION_IDENTITY2=$live_identity2
+            FM_SUPERVISION_MIGRATION_IDENTITY3=$live_identity3
+            return 0
+          fi
+          [ "$live_target" != "$resolved" ] || continue
+          resolved=$live_target
+          resolved_identity1=$live_identity1
+          resolved_identity2=$live_identity2
+          resolved_identity3=$live_identity3
+          count=$((count + 1))
+          ;;
+        *)
+          if [ "$live_target" = "$target" ]; then
+            FM_SUPERVISION_MIGRATION_IDENTITY1=$live_identity1
+            FM_SUPERVISION_MIGRATION_IDENTITY2=$live_identity2
+            FM_SUPERVISION_MIGRATION_IDENTITY3=$live_identity3
+            return 0
+          fi
+          ;;
+      esac
+    done < "$record"
+    case "$backend:$count" in
+      cmux:1|herdr:1)
+        FM_SUPERVISION_MIGRATION_TARGET=$resolved
+        FM_SUPERVISION_MIGRATION_IDENTITY1=$resolved_identity1
+        FM_SUPERVISION_MIGRATION_IDENTITY2=$resolved_identity2
+        FM_SUPERVISION_MIGRATION_IDENTITY3=$resolved_identity3
+        return 0
+        ;;
+    esac
+    case "$backend" in cmux|herdr) [ "$count" -le 1 ] || return 2 ;; esac
   fi
   for record in "$state/$task.inbox"/*; do
     [ -f "$record" ] && [ ! -L "$record" ] && return 0
@@ -1100,13 +1146,52 @@ fm_supervision_registry_bounded_migration_candidate() {
   case "$owner_kind:$backend:$worktree" in
     ship:orca:?*|scout:orca:?*) [ "$worktree" = - ] || [ ! -d "$worktree" ] || return 0 ;;
   esac
-  case "$owner_kind" in ship|scout) ;; *) return 1 ;; esac
-  record="$live_index/$task"
-  [ -f "$record" ] && [ ! -L "$record" ] || return 1
-  while IFS="$(printf '\t')" read -r live_backend live_target; do
-    [ "$live_backend" = "$backend" ] && [ "$live_target" = "$target" ] && return 0
-  done < "$record"
   return 1
+}
+
+fm_supervision_registry_normalize_live_target() {
+  local state=$1 task=$2 spawn_gen=$3 backend=$4 previous=$5 target=$6
+  local identity1=$7 identity2=$8 identity3=$9 meta tmp session pane workspace surface
+  meta="$state/$task.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  fm_supervision_registry_meta_load "$meta" "$task" || return 1
+  [ "$FM_SUPERVISION_FACT_BACKEND" = "$backend" ] \
+    && [ "$FM_SUPERVISION_FACT_TARGET" = "$previous" ] \
+    && [ "$FM_SUPERVISION_FACT_SPAWN" = "$spawn_gen" ] || return 1
+  tmp=$(umask 077; mktemp "$state/.$task.meta.live-target.XXXXXX") || return 1
+  case "$backend" in
+    cmux)
+      workspace=${target%%:*}
+      surface=${target#*:}
+      [ -n "$workspace" ] && [ -n "$surface" ] && [ "$surface" != "$target" ] \
+        || { rm -f -- "$tmp"; return 1; }
+      {
+        printf 'window=%s\ncmux_workspace_id=%s\ncmux_surface_id=%s\n' \
+          "$target" "$workspace" "$surface"
+        awk -F= '$1 != "window" && $1 != "cmux_workspace_id" && $1 != "cmux_surface_id"' "$meta"
+      } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+      ;;
+    herdr)
+      session=${target%%:*}
+      pane=${target#*:}
+      [ -n "$session" ] && [ -n "$pane" ] && [ "$pane" != "$target" ] \
+        && [ "$identity1" != - ] && [ "$identity2" != - ] && [ "$identity3" = "$pane" ] \
+        || { rm -f -- "$tmp"; return 1; }
+      {
+        printf 'window=%s\nherdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
+          "$target" "$session" "$identity1" "$identity2" "$identity3"
+        awk -F= '$1 != "window" && $1 != "herdr_session" && $1 != "herdr_workspace_id" && $1 != "herdr_tab_id" && $1 != "herdr_pane_id"' "$meta"
+      } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+      ;;
+    *) rm -f -- "$tmp"; return 1 ;;
+  esac
+  if ! fm_backend_validate_task_endpoint "$tmp" "$task" >/dev/null 2>&1 \
+    || [ "$FM_BACKEND_VALIDATED_BACKEND" != "$backend" ] \
+    || [ "$FM_BACKEND_VALIDATED_TARGET" != "$target" ]; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -f -- "$tmp" "$meta"
 }
 
 fm_supervision_registry_bounded_scopes() {
@@ -1167,11 +1252,11 @@ fm_supervision_registry_zellij_live_task() {
 }
 
 fm_supervision_registry_bounded_live_index() {
-  local state=$1 index=$2 backend target label task live scopes rc
+  local state=$1 index=$2 backend target label task live scopes rc identity1 identity2 identity3
   mkdir "$index" || return 1
   scopes=$(fm_supervision_registry_bounded_scopes "$state") || return 1
   live=$(fm_backend_list_live "$scopes") || return 1
-  while IFS="$(printf '\t')" read -r backend target label; do
+  while IFS="$(printf '\t')" read -r backend target label identity1 identity2 identity3; do
     fm_backend_is_known "$backend" || continue
     case "$target" in ''|*[$'\t\r\n']*) continue ;; esac
     if [ "$backend" = zellij ]; then
@@ -1185,7 +1270,9 @@ fm_supervision_registry_bounded_live_index() {
       case "$label" in fm-?*) task=${label#fm-} ;; *) continue ;; esac
     fi
     fm_supervision_registry_task_valid "$task" || continue
-    fm_supervision_tsv_row "$backend" "$target" >> "$index/$task" || return 1
+    fm_supervision_tsv_row \
+      "$backend" "$target" "$identity1" "$identity2" "$identity3" \
+      >> "$index/$task" || return 1
   done <<EOF
 $live
 EOF
@@ -1200,7 +1287,8 @@ fm_supervision_registry_recovery_cleanup() {
 
 fm_supervision_registry_recover_mode() {
   local state=$1 mode=$2 path lock candidates states endpoints meta task target backend route home verdict tmp spawn_gen rc
-  local endpoint owner_kind incarnation candidate_task worktree surfaced filtered live_index=
+  local endpoint owner_kind incarnation candidate_task worktree surfaced filtered live_index= previous_target
+  local migration_rc migration_identity1 migration_identity2 migration_identity3
   case "$mode" in legacy|bounded) ;; *) return 1 ;; esac
   path=$(fm_supervision_registry_generation_path "$state")
   [ -f "$path" ] && fm_supervision_registry_snapshot_valid "$path" && return 0
@@ -1247,13 +1335,37 @@ fm_supervision_registry_recover_mode() {
     spawn_gen=$FM_SUPERVISION_FACT_SPAWN
     worktree=$FM_SUPERVISION_FACT_WORKTREE
     incarnation=$FM_SUPERVISION_FACT_INCARNATION
-    [ "$mode" != bounded ] \
-      || fm_supervision_registry_bounded_migration_candidate \
-        "$state" "$task" "$backend" "$target" "$home" "$worktree" "$owner_kind" "$live_index/tasks" \
-      || continue
+    previous_target=$target
+    migration_identity1=-
+    migration_identity2=-
+    migration_identity3=-
+    if [ "$mode" = bounded ]; then
+      if fm_supervision_registry_bounded_migration_candidate \
+        "$state" "$task" "$backend" "$target" "$home" "$worktree" "$owner_kind" "$live_index/tasks"; then
+        migration_rc=0
+      else
+        migration_rc=$?
+      fi
+      case "$migration_rc" in
+        0)
+          target=$FM_SUPERVISION_MIGRATION_TARGET
+          migration_identity1=$FM_SUPERVISION_MIGRATION_IDENTITY1
+          migration_identity2=$FM_SUPERVISION_MIGRATION_IDENTITY2
+          migration_identity3=$FM_SUPERVISION_MIGRATION_IDENTITY3
+          ;;
+        1) continue ;;
+        *)
+          fm_supervision_registry_recovery_cleanup \
+            "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"
+          fm_lock_release "$lock"
+          return 1
+          ;;
+      esac
+    fi
     [ "$endpoint" = present ] || continue
     fm_supervision_tsv_row \
       "$backend" "$target" "$route" "$home" "$candidate_task" "$spawn_gen" "$incarnation" \
+      "$previous_target" "$migration_identity1" "$migration_identity2" "$migration_identity3" \
       >> "$candidates" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
   done
   if ! awk -F '\t' 'BEGIN { OFS="\t" } !seen[$1 SUBSEP $3 SUBSEP $2]++ { print $1, $2, $3, $4 }' "$candidates" \
@@ -1264,10 +1376,11 @@ fm_supervision_registry_recover_mode() {
     BEGIN { OFS="\t" }
     $0 == "__FM_REGISTRY_CANDIDATES__" { candidates=1; next }
     !candidates { verdict[$1 SUBSEP $4 SUBSEP $2]=$3; next }
-    { key=$1 SUBSEP $3 SUBSEP $2; print $1, $2, verdict[key], $3, $4, $5, $6, $7 }
+    { key=$1 SUBSEP $3 SUBSEP $2; print $1, $2, verdict[key], $3, $4, $5, $6, $7, $8, $9, $10, $11 }
   ' > "$states" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
   rc=0
-  while IFS="$(printf '\t')" read -r backend target verdict route home task spawn_gen incarnation; do
+  while IFS="$(printf '\t')" read -r backend target verdict route home task spawn_gen incarnation \
+    previous_target migration_identity1 migration_identity2 migration_identity3; do
     case "$verdict" in dead|missing) ;; *) continue ;; esac
     if fm_supervision_registry_death_surfaced_values \
       "$state" "$task" "$backend" "$target" "$incarnation"; then
@@ -1293,11 +1406,27 @@ fm_supervision_registry_recover_mode() {
   ' > "$filtered" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
   mv -f -- "$filtered" "$states" \
     || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
+  rc=0
+  while IFS="$(printf '\t')" read -r backend target verdict route home task spawn_gen incarnation \
+    previous_target migration_identity1 migration_identity2 migration_identity3; do
+    [ "$target" != "$previous_target" ] || continue
+    fm_supervision_registry_normalize_live_target \
+      "$state" "$task" "$spawn_gen" "$backend" "$previous_target" "$target" \
+      "$migration_identity1" "$migration_identity2" "$migration_identity3" \
+      || { rc=1; break; }
+  done < "$states"
+  if [ "$rc" -ne 0 ]; then
+    fm_supervision_registry_recovery_cleanup \
+      "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"
+    fm_lock_release "$lock"
+    return 1
+  fi
   tmp=$(umask 077; mktemp "$state/.active-supervision-generation.XXXXXX") \
     || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced"; fm_lock_release "$lock"; return 1; }
   fm_supervision_registry_snapshot_header "$state" > "$tmp" || { fm_supervision_registry_recovery_cleanup "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$tmp"; fm_lock_release "$lock"; return 1; }
   rc=0
-  while IFS="$(printf '\t')" read -r backend target verdict route home task spawn_gen incarnation; do
+  while IFS="$(printf '\t')" read -r backend target verdict route home task spawn_gen incarnation \
+    previous_target migration_identity1 migration_identity2 migration_identity3; do
     meta="$state/$task.meta"
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     printf 'entry\t%s\t%s\tactive\n' "$task" "$spawn_gen" >> "$tmp" \

@@ -3243,8 +3243,8 @@ EOF
 # herdr-verification-p2.md "ID stability"). Read-only: a session that does not
 # exist yet simply lists nothing. One "<session>:<pane_id>\t<label>" line per
 # live task pane.
-fm_backend_herdr_list_live() {  # <session>
-  local session=$1 tabs tab_rows panes tab_id label pane_id pane_ids
+fm_backend_herdr_list_live_details() {  # <session>
+  local session=$1 tabs tab_rows panes tab_id label pane_id pane_ids workspace
   tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e '
     (.result.tabs | type) == "array"
@@ -3252,7 +3252,10 @@ fm_backend_herdr_list_live() {  # <session>
       (.tab_id | type) == "string"
       and (.tab_id | test("^[^[:space:]]+$"))
       and (.label | type) == "string"
-      and (.label | test("^[^\\t\\r\\n]+$")))
+      and (.label | test("^[^\\t\\r\\n]+$"))
+      and (.workspace_id | type) == "string"
+      and (.workspace_id | test("^[^[:space:]]+$")))
+    and (([.result.tabs[].tab_id] | length) == ([.result.tabs[].tab_id] | unique | length))
   ' >/dev/null 2>&1 || return 1
   tab_rows=$(printf '%s' "$tabs" \
     | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null) || return 1
@@ -3267,18 +3270,33 @@ fm_backend_herdr_list_live() {  # <session>
   ' >/dev/null 2>&1 || return 1
   while IFS=$'\t' read -r tab_id label; do
     [ -n "$tab_id" ] && [ -n "$label" ] || return 1
+    workspace=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" \
+      '.result.tabs[]? | select(.tab_id == $tab) | .workspace_id' 2>/dev/null) || return 1
+    [ -n "$workspace" ] || return 1
     pane_ids=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
       '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || return 1
     [ -n "$pane_ids" ] || return 1
     while IFS= read -r pane_id; do
       [ -n "$pane_id" ] || return 1
-      printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
+      printf '%s:%s\t%s\t%s\t%s\t%s\n' \
+        "$session" "$pane_id" "$label" "$workspace" "$tab_id" "$pane_id"
     done <<EOF_PANES
 $pane_ids
 EOF_PANES
   done <<EOF_TABS
 $tab_rows
 EOF_TABS
+}
+
+fm_backend_herdr_list_live() {  # <session>
+  local details target label workspace tab pane
+  details=$(fm_backend_herdr_list_live_details "$1") || return 1
+  while IFS=$'\t' read -r target label workspace tab pane; do
+    [ -n "$target" ] && [ -n "$label" ] || continue
+    printf '%s\t%s\n' "$target" "$label"
+  done <<EOF
+$details
+EOF
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

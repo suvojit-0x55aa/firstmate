@@ -79,7 +79,7 @@ cmux_surface_id=<surface-uuid>
 ```
 
 The UUID pair is the active endpoint authority within one app run.
-Workspace UUIDs are not stable across an app relaunch, so recovery searches by the scoped title and then resolves the current surface id.
+Workspace UUIDs are not stable across an app relaunch, so recovery searches by the scoped title, requires a unique match, resolves the current surface id, and atomically refreshes the durable endpoint identity before publishing bounded supervision.
 
 ## Current operation and safety
 

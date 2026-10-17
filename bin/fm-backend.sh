@@ -659,6 +659,7 @@ fm_backend_source() {  # <name>
 fm_backend_list_live() {
   local requested=${1-$'tmux\t-\nherdr\tdefault\nzellij\tdefault\ncmux\t-'}
   local backend requested_backend scope extra scopes live sessions session target label part raw status
+  local identity1 identity2 identity3
   [ -n "$requested" ] || return 0
   while IFS=$'\t' read -r requested_backend scope extra; do
     [ -n "$requested_backend" ] && [ -n "$scope" ] && [ -z "$extra" ] || return 1
@@ -703,7 +704,7 @@ EOF
         while IFS= read -r session; do
           [ -n "$session" ] || continue
           case $'\n'"$sessions"$'\n' in *$'\n'"$session"$'\n'*) ;; *) continue ;; esac
-          part=$(fm_backend_herdr_list_live "$session") || return 1
+          part=$(fm_backend_herdr_list_live_details "$session") || return 1
           [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
         done <<EOF
 $scopes
@@ -740,9 +741,13 @@ EOF
         live=$(fm_backend_cmux_list_live) || return 1
         ;;
     esac
-    while IFS="$(printf '\t')" read -r target label; do
+    while IFS="$(printf '\t')" read -r target label identity1 identity2 identity3; do
       [ -n "$target" ] && [ -n "$label" ] || continue
-      printf '%s\t%s\t%s\n' "$backend" "$target" "$label" || return 1
+      [ -n "$identity1" ] || identity1=-
+      [ -n "$identity2" ] || identity2=-
+      [ -n "$identity3" ] || identity3=-
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$backend" "$target" "$label" "$identity1" "$identity2" "$identity3" || return 1
     done <<EOF
 $live
 EOF

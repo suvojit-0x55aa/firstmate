@@ -2169,6 +2169,173 @@ SH
   pass 'bootstrap inventory ignores unrelated backend sessions'
 }
 
+test_bounded_bootstrap_rebinds_unique_live_targets() {
+  local mode dir title old_workspace old_surface new_workspace new_surface second_workspace second_surface
+  local inventory rc current_window current_workspace current_surface
+  old_workspace=aaaaaaaa-0000-0000-0000-000000000000
+  old_surface=bbbbbbbb-1111-1111-1111-111111111111
+  new_workspace=cccccccc-2222-2222-2222-222222222222
+  new_surface=dddddddd-3333-3333-3333-333333333333
+  second_workspace=eeeeeeee-4444-4444-4444-444444444444
+  second_surface=ffffffff-5555-5555-5555-555555555555
+  for mode in unique ambiguous; do
+    dir=$(fixture "bounded-bootstrap-cmux-remap-$mode")
+    mkdir -p "$dir/fakebin"
+    title=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+      . "$1/backends/cmux.sh"
+      fm_backend_cmux_scoped_title fm-live-owner
+    ' _ "$ROOT/bin") || fail 'could not derive the cmux bootstrap title'
+    printf '%s\n' \
+      "window=$old_workspace:$old_surface" 'endpoint_task_id=live-owner' \
+      "worktree=$dir/worktree" "project=$dir" 'kind=ship' 'harness=codex' \
+      'backend=cmux' "cmux_workspace_id=$old_workspace" "cmux_surface_id=$old_surface" \
+      'spawn_gen=owner-1' > "$dir/state/live-owner.meta"
+    cat > "$dir/fakebin/cmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  workspace:list)
+    if [ "$FM_TEST_CMUX_REMAP_MODE" = unique ]; then
+      printf '{"workspaces":[{"id":"%s","title":"%s"}]}\n' \
+        "$FM_TEST_CMUX_WORKSPACE" "$FM_TEST_CMUX_TITLE"
+    else
+      printf '{"workspaces":[{"id":"%s","title":"%s"},{"id":"%s","title":"%s"}]}\n' \
+        "$FM_TEST_CMUX_WORKSPACE" "$FM_TEST_CMUX_TITLE" \
+        "$FM_TEST_CMUX_SECOND_WORKSPACE" "$FM_TEST_CMUX_TITLE"
+    fi
+    ;;
+  list-panes:*)
+    workspace=
+    previous=
+    for argument in "$@"; do
+      [ "$previous" = --workspace ] && workspace=$argument
+      previous=$argument
+    done
+    case "$workspace" in
+      "$FM_TEST_CMUX_WORKSPACE") surface=$FM_TEST_CMUX_SURFACE ;;
+      "$FM_TEST_CMUX_SECOND_WORKSPACE") surface=$FM_TEST_CMUX_SECOND_SURFACE ;;
+      *) exit 71 ;;
+    esac
+    printf '{"panes":[{"selected_surface_id":"%s","surface_ids":["%s"]}]}\n' \
+      "$surface" "$surface"
+    ;;
+  *) exit 72 ;;
+esac
+SH
+    chmod 0700 "$dir/fakebin/cmux"
+    set +e
+    inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$dir/state" FM_TEST_CMUX_REMAP_MODE="$mode" \
+      FM_TEST_CMUX_TITLE="$title" FM_TEST_CMUX_WORKSPACE="$new_workspace" \
+      FM_TEST_CMUX_SURFACE="$new_surface" FM_TEST_CMUX_SECOND_WORKSPACE="$second_workspace" \
+      FM_TEST_CMUX_SECOND_SURFACE="$second_surface" bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-backend.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+        fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+      ' _ "$ROOT/bin")
+    rc=$?
+    set -e
+    current_window=$(sed -n 's/^window=//p' "$dir/state/live-owner.meta")
+    current_workspace=$(sed -n 's/^cmux_workspace_id=//p' "$dir/state/live-owner.meta")
+    current_surface=$(sed -n 's/^cmux_surface_id=//p' "$dir/state/live-owner.meta")
+    if [ "$mode" = unique ]; then
+      [ "$rc" -eq 0 ] || fail 'unique cmux relaunch target blocked bounded bootstrap'
+      [ "$inventory" = "$dir/state/live-owner.meta" ] \
+        || fail "unique cmux relaunch target lost its live owner: $inventory"
+      [ "$current_window" = "$new_workspace:$new_surface" ] \
+        && [ "$current_workspace" = "$new_workspace" ] \
+        && [ "$current_surface" = "$new_surface" ] \
+        || fail 'unique cmux relaunch target did not normalize durable endpoint identity'
+    else
+      [ "$rc" -ne 0 ] || fail 'ambiguous cmux relaunch targets published a snapshot'
+      [ ! -e "$dir/state/.active-supervision-generation" ] \
+        || fail 'ambiguous cmux relaunch targets became authoritative'
+      [ "$current_window" = "$old_workspace:$old_surface" ] \
+        && [ "$current_workspace" = "$old_workspace" ] \
+        && [ "$current_surface" = "$old_surface" ] \
+        || fail 'ambiguous cmux relaunch targets rewrote durable endpoint identity'
+    fi
+  done
+  old_workspace=old-workspace
+  old_surface=old:pane
+  new_workspace=new-workspace
+  new_surface=new:pane
+  second_workspace=second-workspace
+  second_surface=second:pane
+  for mode in unique ambiguous; do
+    dir=$(fixture "bounded-bootstrap-herdr-remap-$mode")
+    mkdir -p "$dir/fakebin"
+    printf '%s\n' \
+      "window=fmtest:$old_surface" 'endpoint_task_id=live-owner' \
+      "worktree=$dir/worktree" "project=$dir" 'kind=ship' 'harness=codex' \
+      'backend=herdr' 'herdr_session=fmtest' "herdr_workspace_id=$old_workspace" \
+      'herdr_tab_id=old-tab' "herdr_pane_id=$old_surface" 'spawn_gen=owner-1' \
+      > "$dir/state/live-owner.meta"
+    cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
+  tab:list)
+    if [ "$FM_TEST_HERDR_REMAP_MODE" = unique ]; then
+      printf '{"result":{"tabs":[{"tab_id":"new-tab","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
+        "$FM_TEST_HERDR_WORKSPACE"
+    else
+      printf '{"result":{"tabs":[{"tab_id":"new-tab","label":"fm-live-owner","workspace_id":"%s"},{"tab_id":"second-tab","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
+        "$FM_TEST_HERDR_WORKSPACE" "$FM_TEST_HERDR_SECOND_WORKSPACE"
+    fi
+    ;;
+  pane:list)
+    if [ "$FM_TEST_HERDR_REMAP_MODE" = unique ]; then
+      printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"new-tab","agent_status":"working"}]}}\n' \
+        "$FM_TEST_HERDR_PANE"
+    else
+      printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"new-tab","agent_status":"working"},{"pane_id":"%s","tab_id":"second-tab","agent_status":"working"}]}}\n' \
+        "$FM_TEST_HERDR_PANE" "$FM_TEST_HERDR_SECOND_PANE"
+    fi
+    ;;
+  *) exit 72 ;;
+esac
+SH
+    chmod 0700 "$dir/fakebin/herdr"
+    set +e
+    inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_REMAP_MODE="$mode" \
+      FM_TEST_HERDR_WORKSPACE="$new_workspace" FM_TEST_HERDR_PANE="$new_surface" \
+      FM_TEST_HERDR_SECOND_WORKSPACE="$second_workspace" \
+      FM_TEST_HERDR_SECOND_PANE="$second_surface" bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-backend.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+        fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+      ' _ "$ROOT/bin")
+    rc=$?
+    set -e
+    current_window=$(sed -n 's/^window=//p' "$dir/state/live-owner.meta")
+    current_workspace=$(sed -n 's/^herdr_workspace_id=//p' "$dir/state/live-owner.meta")
+    current_surface=$(sed -n 's/^herdr_pane_id=//p' "$dir/state/live-owner.meta")
+    if [ "$mode" = unique ]; then
+      [ "$rc" -eq 0 ] || fail 'unique Herdr target remap blocked bounded bootstrap'
+      [ "$inventory" = "$dir/state/live-owner.meta" ] \
+        || fail "unique Herdr target remap lost its live owner: $inventory"
+      [ "$current_window" = "fmtest:$new_surface" ] \
+        && [ "$current_workspace" = "$new_workspace" ] \
+        && [ "$current_surface" = "$new_surface" ] \
+        || fail 'unique Herdr target remap did not normalize durable endpoint identity'
+    else
+      [ "$rc" -ne 0 ] || fail 'ambiguous Herdr target remaps published a snapshot'
+      [ ! -e "$dir/state/.active-supervision-generation" ] \
+        || fail 'ambiguous Herdr target remaps became authoritative'
+      [ "$current_window" = "fmtest:$old_surface" ] \
+        && [ "$current_workspace" = "$old_workspace" ] \
+        && [ "$current_surface" = "$old_surface" ] \
+        || fail 'ambiguous Herdr target remaps rewrote durable endpoint identity'
+    fi
+  done
+  pass 'bounded bootstrap uniquely rebinds remapped live endpoints'
+}
+
 test_zellij_scoped_title_alias_bootstrap_is_conservative() {
   local mode dir home_tag legacy_task title inventory rc
   for mode in scoped legacy ambiguous; do
@@ -5941,6 +6108,7 @@ test_herdr_bulk_snapshot_bootstrap_is_conservative
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts
 test_herdr_bootstrap_uses_bounded_bulk_inventory
 test_bootstrap_inventory_scopes_backend_sessions
+test_bounded_bootstrap_rebinds_unique_live_targets
 test_zellij_scoped_title_alias_bootstrap_is_conservative
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
