@@ -660,47 +660,53 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
   fi
 }
 
-# fm_backend_zellij_list_live: recovery/orphan discovery. Lists every tab in
-# <session> whose title carries THIS firstmate home's own tag
-# (fm-<hometag>-, fm_backend_zellij_home_label) - never any other home's
-# tagged tabs, and never a bare untagged "fm-<id>" tab either (this sweep
-# deliberately does NOT attempt the legacy-bare-title fallback
-# fm_backend_zellij_tab_matches_label uses for a single already-known tab:
-# telling apart "our own pre-migration tab" from "another home's same-shaped
-# bare title" in a bulk, no-numeric-id-in-hand sweep is not something this
-# adapter can do safely - see docs/zellij-backend.md "Home-scoped tab
-# titles"). A pre-migration task is still reachable through its recorded
-# window= meta, which target_ready/kill DO accept via that bare-title
-# fallback. One "<session>:<pane_id>\t<plain fm-<id> label>" line per live,
-# in-home task tab (the home tag is stripped back off before printing, so
-# callers see the same plain label they always have). Read-only: a session
-# that does not exist yet simply lists nothing.
+# fm_backend_zellij_list_live: recovery/orphan discovery. Lists every fm-
+# titled tab in <session>, including home-scoped and pre-tag legacy titles.
+# The current home's tag is stripped to its caller-facing fm-<id> label, while
+# the exact title is also retained as a possible legacy label. Read-only: a
+# session that does not exist yet simply lists nothing.
 fm_backend_zellij_list_live() {  # <session>
-  local session=$1 home prefix tabs panes tab_id name pane_id plain
+  local session=$1 home prefix tabs tab_rows panes tab_id name pane_id pane_ids plain
   home=$(fm_backend_zellij_home_label)
   prefix="fm-$home-"
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e '
     type == "array"
-    and all(.[]; (.tab_id | type) == "number" and (.name | type) == "string")
+    and all(.[];
+      (.tab_id | type) == "number"
+      and (.name | type) == "string"
+      and (.name | test("^[^\\t\\r\\n]+$")))
+  ' >/dev/null 2>&1 || return 1
+  tab_rows=$(printf '%s' "$tabs" \
+    | jq -r '.[]? | select(.name | startswith("fm-")) | "\(.tab_id)\t\(.name)"' 2>/dev/null) || return 1
+  [ -n "$tab_rows" ] || return 0
+  panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '
+    type == "array"
+    and all(.[]; (.tab_id | type) == "number" and (.id | type) == "number" and (.is_plugin | type) == "boolean")
   ' >/dev/null 2>&1 || return 1
   while IFS=$'\t' read -r tab_id name; do
-    [ -n "$tab_id" ] || continue
-    [ -n "$name" ] || return 1
-    case "$tab_id$name" in *[$'\r\n']*) return 1 ;; esac
-    plain=${name#"$prefix"}
-    [ -n "$plain" ] || continue
-    panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || return 1
-    printf '%s' "$panes" | jq -e '
-      type == "array"
-      and all(.[]; (.tab_id | type) == "number" and (.id | type) == "number" and (.is_plugin | type) == "boolean")
-    ' >/dev/null 2>&1 || return 1
-    pane_id=$(printf '%s' "$panes" | jq -r --argjson tab "$tab_id" \
-      '.[]? | select(.tab_id == $tab and .is_plugin == false) | .id' 2>/dev/null | head -1) || return 1
-    [ -n "$pane_id" ] || return 1
-    case "$pane_id" in *[$'\t\r\n']*) return 1 ;; esac
-    printf '%s:%s\tfm-%s\n' "$session" "$pane_id" "$plain"
-  done < <(printf '%s' "$tabs" | jq -r --arg prefix "$prefix" '.[]? | select(.name | startswith($prefix)) | "\(.tab_id)\t\(.name)"' 2>/dev/null)
+    [ -n "$tab_id" ] && [ -n "$name" ] || return 1
+    pane_ids=$(printf '%s' "$panes" | jq -r --argjson tab "$tab_id" \
+      '.[]? | select(.tab_id == $tab and .is_plugin == false) | .id' 2>/dev/null) || return 1
+    [ -n "$pane_ids" ] || return 1
+    while IFS= read -r pane_id; do
+      [ -n "$pane_id" ] || return 1
+      case "$name" in
+        "$prefix"?*)
+          plain=${name#"$prefix"}
+          printf '%s:%s\tfm-%s\n' "$session" "$pane_id" "$plain"
+          printf '%s:%s\t%s\n' "$session" "$pane_id" "$name"
+          ;;
+        fm-?*) printf '%s:%s\t%s\n' "$session" "$pane_id" "$name" ;;
+        *) return 1 ;;
+      esac
+    done <<EOF_PANES
+$pane_ids
+EOF_PANES
+  done <<EOF_TABS
+$tab_rows
+EOF_TABS
 }
 
 # fm_backend_zellij_resolve_bare_selector: the live-tab-listing fallback for

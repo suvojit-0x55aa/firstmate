@@ -1935,6 +1935,91 @@ SH
   pass 'Herdr duplicate workspaces are fully inventoried or rejected'
 }
 
+test_no_snapshot_bootstrap_covers_legacy_backend_layouts() {
+  local backend dir inventory
+  for backend in herdr zellij; do
+    dir=$(fixture "bootstrap-$backend-valid-legacy-layout")
+    mkdir -p "$dir/fakebin"
+    case "$backend" in
+      herdr)
+        printf '%s\n' \
+          'window=fmtest:pane-launcher-worker' "worktree=$dir/launcher-worktree" "project=$dir" \
+          'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=launcher-1' \
+          > "$dir/state/herdr-launcher.meta"
+        printf '%s\n' \
+          'window=fmtest:pane-presentation' "worktree=$dir/presentation-worktree" "project=$dir" \
+          'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=presentation-1' \
+          > "$dir/state/herdr-presentation.meta"
+        cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+workspace=
+previous=
+for argument in "$@"; do
+  if [ "$previous" = --workspace ]; then workspace=$argument; fi
+  previous=$argument
+done
+case "${1:-}:${2:-}" in
+  session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
+  workspace:list)
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"home","label":"firstmate"},{"workspace_id":"launcher","label":"captain"},{"workspace_id":"presentation","label":"firstmate/herdr-presentation · p:token"}]}}'
+    ;;
+  tab:list)
+    case "$workspace" in
+      home) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+      launcher) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-launcher","label":"fm-herdr-launcher"}]}}' ;;
+      presentation) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-presentation","label":"fm-herdr-presentation"}]}}' ;;
+      *) exit 71 ;;
+    esac
+    ;;
+  pane:list)
+    case "$workspace" in
+      launcher) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-shell","tab_id":"tab-launcher"},{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher"}]}}' ;;
+      presentation) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-presentation","tab_id":"tab-presentation"}]}}' ;;
+      *) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-launcher-worker","agent_status":"working"},{"pane_id":"pane-presentation","agent_status":"working"}]}}' ;;
+    esac
+    ;;
+  *) exit 72 ;;
+esac
+SH
+        chmod 0700 "$dir/fakebin/herdr"
+        ;;
+      zellij)
+        printf '%s\n' \
+          'window=zsession:8' "worktree=$dir/legacy-worktree" "project=$dir" \
+          'kind=scout' 'harness=codex' 'backend=zellij' 'spawn_gen=legacy-1' \
+          > "$dir/state/zellij-legacy.meta"
+        cat > "$dir/fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-sessions ]; then
+  printf '%s\n' zsession
+  exit 0
+fi
+case "$*" in
+  *" action list-tabs --json"*) printf '%s\n' '[{"tab_id":7,"name":"fm-zellij-legacy"}]' ;;
+  *" action list-panes --json"*) printf '%s\n' '[{"tab_id":7,"id":6,"is_plugin":false},{"tab_id":7,"id":8,"is_plugin":false}]' ;;
+  *) exit 71 ;;
+esac
+SH
+        chmod 0700 "$dir/fakebin/zellij"
+        ;;
+    esac
+    inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$dir/state" bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-backend.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+        fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+      ' _ "$ROOT/bin" | sed 's|.*/||; s/\.meta$//') \
+      || fail "$backend valid legacy layout blocked no-snapshot bootstrap"
+    case "$backend:$inventory" in
+      herdr:$'herdr-launcher\nherdr-presentation'|zellij:zellij-legacy) ;;
+      *) fail "$backend valid legacy layout produced the wrong inventory: $inventory" ;;
+    esac
+  done
+  pass 'no-snapshot bootstrap retains valid Herdr and legacy Zellij layouts'
+}
+
 test_bounded_event_wait_uses_active_registry() {
   local dir rc
   dir=$(fixture bounded-event-wait-inventory)
@@ -5632,6 +5717,7 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_no_snapshot_bootstrap_discovers_live_ordinary_owners
 test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
 test_herdr_duplicate_workspace_bootstrap_is_conservative
+test_no_snapshot_bootstrap_covers_legacy_backend_layouts
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata

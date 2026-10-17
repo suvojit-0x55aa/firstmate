@@ -44,7 +44,7 @@ Moving a Firstmate installation changes its path hash and leaves old titles unma
 
 A pre-home-tag task remains reachable through its recorded metadata only when exactly one live tab has the old unscoped title.
 Multiple old tabs with the same title cause a refusal rather than a guess.
-Bulk recovery never adopts unscoped legacy tabs because it has no safe home identity for them.
+Bounded list-live includes unscoped legacy tabs as candidates, while exact recorded targets prevent another home's same-shaped title from authorizing ownership.
 
 ```text
 backend=zellij
