@@ -366,6 +366,32 @@ test_lock_empty_pid_uses_minimum_grace() {
   pass "empty mid-acquire lock keeps a minimum grace"
 }
 
+test_lock_unavailable_mid_acquire_age_preserves_lock() {
+  local dir state lockdir out
+  dir=$(make_case lock-unavailable-age)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_path_age() {
+      case "$FM_TEST_LOCK_AGE" in
+        empty) return 0 ;;
+        error) return 1 ;;
+        text) printf "%s\n" unavailable ;;
+      esac
+    }
+    for FM_TEST_LOCK_AGE in empty error text; do
+      if fm_lock_mid_acquire_is_fresh "$2" ""; then rc=0; else rc=$?; fi
+      printf "%s:%s\n" "$FM_TEST_LOCK_AGE" "$rc"
+    done
+  ' _ "$LIB" "$lockdir" 2>&1)
+  case "$out" in
+    $'empty:0\nerror:0\ntext:0') ;;
+    *) fail "unavailable mid-acquire age did not preserve the uncertain lock cleanly: $out" ;;
+  esac
+  pass "unavailable mid-acquire lock age is retried without an arithmetic error"
+}
+
 test_lock_late_claim_loses_after_recreate() {
   local dir state lockdir out
   dir=$(make_case lock-late-claim)
@@ -1135,6 +1161,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
+test_lock_unavailable_mid_acquire_age_preserves_lock
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
 test_watch_restart_rejects_reused_pid

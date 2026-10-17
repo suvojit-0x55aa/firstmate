@@ -484,12 +484,19 @@ fm_lock_remove_path() {
 }
 
 fm_lock_mid_acquire_is_fresh() {
-  local lockdir=$1 pid=$2 mid_acquire_stale
+  local lockdir=$1 pid=$2 mid_acquire_stale age
   case "$pid" in
     ''|*[!0-9]*)
       mid_acquire_stale=$FM_LOCK_STALE_AFTER
       [ "$mid_acquire_stale" -lt 2 ] && mid_acquire_stale=2
-      [ "$(fm_path_age "$lockdir")" -lt "$mid_acquire_stale" ]
+      # The owner path can disappear between the pid read and this probe. An
+      # unavailable or malformed age is uncertainty, not proof that an
+      # in-progress claimant is stale, so preserve the lock for a later retry.
+      age=$(fm_path_age "$lockdir") || return 0
+      case "$age" in
+        ''|*[!0-9]*) return 0 ;;
+      esac
+      [ "$age" -lt "$mid_acquire_stale" ]
       return
       ;;
   esac
