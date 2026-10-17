@@ -809,6 +809,7 @@ test_recurring_probe_honors_transport_deadline() {
   local dir original_root=$TEST_ROOT started elapsed
   dir=$(fixture recurring-probe-deadline)
   install_controlled_watcher "$dir"
+  install_endpoint_inventory_tmux "$dir"
   : > "$dir/state/task.meta"
   mkdir "$dir/probe-fault"
   cat > "$dir/probe-fault/sitecustomize.py" <<'PY'
@@ -842,7 +843,9 @@ def delayed_popen(*args, **kwargs):
 subprocess.Popen = delayed_popen
 PY
   started=$(monotonic_seconds)
-  PYTHONPATH="$dir/probe-fault" FM_TEST_RECURRING_PROBE_MARKER="$dir/recurring-probe" \
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='firstmate:fm-task' \
+    FM_TEST_LIVE_TARGETS='firstmate:fm-task' \
+    PYTHONPATH="$dir/probe-fault" FM_TEST_RECURRING_PROBE_MARKER="$dir/recurring-probe" \
     FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 FM_ARM_CONFIRM_TIMEOUT=1 \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
     FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
