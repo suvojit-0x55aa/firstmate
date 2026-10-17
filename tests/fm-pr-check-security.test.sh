@@ -43,6 +43,29 @@ ack_watcher_cycle() {  # <state>
     --recovery-generation "$generation"
 }
 
+wait_for_owned_watcher_exit() {  # <pid> <kill-grace-secs> <reap-allowance-secs>
+  local pid=$1 kill_grace=$2 reap_allowance=$3 limit i=0 stat
+  limit=$(( (kill_grace + reap_allowance + 1) * 10 ))
+  while [ "$i" -lt "$limit" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return "$?"
+    fi
+    stat=$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]')
+    case "$stat" in
+      Z*)
+        wait "$pid"
+        return "$?"
+        ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return 124
+}
+
 file_mode() {
   if [ "$(uname)" = Darwin ]; then
     stat -f %Lp "$1"
@@ -2502,6 +2525,7 @@ SH
 
 test_custom_snapshot_cleanup_on_signal() {
   local dir state child_pid_file pid child_pid i rc
+  local kill_grace=1 reap_allowance=1
   dir=$(make_case custom-snapshot-signal)
   state="$dir/home/state"
   child_pid_file="$dir/custom-child.pid"
@@ -2516,17 +2540,15 @@ test_custom_snapshot_cleanup_on_signal() {
 #!/usr/bin/env bash
 [ "$#" -ge 4 ] && [ "$1" = -k ] || exit 2
 shift 3
-"$@" &
-child=$!
-trap 'kill -TERM "$child" 2>/dev/null; exit 124' TERM
-wait "$child"
+exec "$@"
 SH
   chmod 0700 "$dir/fakebin/timeout"
   FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
     || fail "could not register signal cleanup custom check"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0 FM_CHECK_INTERVAL=0 \
-    FM_SIGNAL_GRACE=0 FM_TEST_CUSTOM_CHILD_PID="$child_pid_file" \
+    FM_SIGNAL_GRACE=0 FM_CHECK_KILL_GRACE="$kill_grace" \
+    FM_CHECK_REAP_ALLOWANCE="$reap_allowance" FM_TEST_CUSTOM_CHILD_PID="$child_pid_file" \
     PATH="$dir/fakebin:$BASE_PATH" "$WATCH" \
     > "$dir/watch.out" 2> "$dir/watch.err" &
   pid=$!
@@ -2546,7 +2568,7 @@ SH
   child_pid=$(cat "$child_pid_file")
   kill -TERM "$pid" 2>/dev/null || fail "could not signal watcher during custom check"
   rc=0
-  wait_for_exit "$pid" 50 || rc=$?
+  wait_for_owned_watcher_exit "$pid" "$kill_grace" "$reap_allowance" || rc=$?
   [ "$rc" -ne 124 ] || fail "signaled watcher did not exit promptly"
   [ "$rc" -ne 0 ] || fail "signaled watcher exited successfully"
   ! kill -0 "$child_pid" 2>/dev/null || fail "signaled watcher left the custom check child running"
