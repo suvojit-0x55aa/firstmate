@@ -356,9 +356,9 @@ SH
     "kind=scout" "mode=no-mistakes"
   env -u TMUX -u TMUX_PANE FM_TEST_TMUX_SOCKET="$socket_id" \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-    PATH="$dir/fakebin:$PATH" bash -x "$TEARDOWN" "$target_id" --force \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$target_id" --force \
     > "$dir/valid.out" 2> "$dir/valid.err" \
-    || fail "isolated valid endpoint teardown failed: $(tail -n 160 "$dir/valid.err")"
+    || fail "isolated valid endpoint teardown failed: $(cat "$dir/valid.err")"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$target" \
     && fail "valid cleanup did not remove the exact target window"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$control" \

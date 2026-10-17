@@ -377,10 +377,10 @@ EOF
 }
 
 fm_backend_tmux_list_live() {
-  local windows target label tab status
+  local windows target label extra tab status
   tab=$(printf '\t')
   windows=$(LC_ALL=C tmux list-windows -a \
-    -F "#{session_name}:#{window_name}${tab}#{window_name}" 2>&1)
+    -F '#{session_name}:#{window_name}' 2>&1)
   status=$?
   if [ "$status" -ne 0 ]; then
     case "$windows" in
@@ -388,10 +388,13 @@ fm_backend_tmux_list_live() {
       *) return 1 ;;
     esac
   fi
-  while IFS="$tab" read -r target label; do
-    [ -n "$target" ] && [ -n "$label" ] || { [ -z "$target$label" ] && continue; return 1; }
+  while IFS="$tab" read -r target label extra; do
+    [ -n "$target" ] || { [ -z "$target$label$extra" ] && continue; return 1; }
+    [ -z "$extra" ] || return 1
     case "$target" in *:*) ;; *) return 1 ;; esac
-    case "$target$label" in *[$'\r\n']*) return 1 ;; esac
+    [ -n "$label" ] || label=${target#*:}
+    [ -n "$label" ] || return 1
+    case "$target$label" in *[$'\t\r\n']*) return 1 ;; esac
     case "$label" in fm-?*) printf '%s\t%s\n' "$target" "$label" ;; esac
   done <<EOF
 $windows

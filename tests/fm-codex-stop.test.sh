@@ -1119,11 +1119,14 @@ PY
     started=$(monotonic_seconds)
     if [ "$mode" = cancel ]; then
       term_delay=2.5
-      transport_timeout=55
+      transport_timeout=85
     else
       term_delay=0
-      transport_timeout=60
+      transport_timeout=90
     fi
+    # run_stop now registers a real live owner. Preserve this reserve fixture's
+    # original geometry by adding exactly that owner's conservative 20-second
+    # crew-state plus 10-second worktree-write charge.
     PYTHONPATH="$dir/deadline-fault" FM_TEST_DEADLINE_MODE="$mode" \
       FM_TEST_ARM_TERM_DELAY="$term_delay" FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT="$transport_timeout" \
       FM_ARM_CONFIRM_TIMEOUT=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
