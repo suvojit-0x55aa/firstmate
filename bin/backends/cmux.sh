@@ -742,12 +742,14 @@ fm_backend_cmux_panes_inventory() {  # <workspace-id>
 
 fm_backend_cmux_list_live() {
   local windows windows_after wid expected wss wsid title sfid home prefix plain
-  local pane_inventory snapshot snapshot_after live row
+  local pane_inventory snapshot snapshot_after live row task_labels task_labels_after seen_label duplicate
   home=$(fm_backend_cmux_home_label)
   prefix="fm-$home-"
   snapshot=
   snapshot_after=
   live=
+  task_labels=
+  task_labels_after=
   windows=$(fm_backend_cmux_windows_inventory) || return 1
   while IFS=$'\t' read -r wid expected; do
     [ -n "$wid" ] || continue
@@ -765,6 +767,17 @@ fm_backend_cmux_list_live() {
         snapshot="${snapshot}${row}"$'\n'
         continue
       fi
+      duplicate=
+      while IFS= read -r seen_label; do
+        if [ "$seen_label" = "$plain" ]; then
+          duplicate=1
+          break
+        fi
+      done <<EOF
+$task_labels
+EOF
+      [ -z "$duplicate" ] || return 1
+      task_labels="${task_labels}${plain}"$'\n'
       pane_inventory=$(fm_backend_cmux_panes_inventory "$wsid") || return 1
       snapshot="${snapshot}${row}"$'\t'"$pane_inventory"$'\n'
       sfid=$(printf '%s' "$pane_inventory" | jq -r '.target_surface_id // empty' 2>/dev/null) || return 1
@@ -791,6 +804,17 @@ EOF
         *) plain= ;;
       esac
       if [ -n "$plain" ]; then
+        duplicate=
+        while IFS= read -r seen_label; do
+          if [ "$seen_label" = "$plain" ]; then
+            duplicate=1
+            break
+          fi
+        done <<EOF
+$task_labels_after
+EOF
+        [ -z "$duplicate" ] || return 1
+        task_labels_after="${task_labels_after}${plain}"$'\n'
         pane_inventory=$(fm_backend_cmux_panes_inventory "$wsid") || return 1
         row="$row"$'\t'"$pane_inventory"
       fi

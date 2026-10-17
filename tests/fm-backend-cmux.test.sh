@@ -1066,10 +1066,11 @@ test_kill_recovers_stale_target_by_label() {
 # --- list_live: label-based orphan discovery ---------------------------------
 
 test_list_live_filters_by_title_prefix() {
-  local dir fb out title other_title other_root status mode pane_json
+  local dir fb out title title2 other_title other_root status mode pane_json
   dir="$TMP_ROOT/list-live"; mkdir -p "$dir/responses"
   other_root="$dir/other-root"; mkdir -p "$other_root"
   title=$(cmux_expected_scoped_title fm-task1)
+  title2=$(cmux_expected_scoped_title fm-task2)
   other_title=$(cmux_expected_scoped_title fm-task2 "$ROOT" "$other_root")
   mkdir -p "$dir/fakebin"
   cat > "$dir/fakebin/cmux" <<'SH'
@@ -1267,7 +1268,48 @@ SH
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT")
   [ "$out" = $'aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111\tfm-task1' ] \
     || fail "list_live rejected the valid single-surface layout: $out"
-  pass "fm_backend_cmux_list_live: requires one stable unambiguous surface"
+
+  dir="$TMP_ROOT/list-live-duplicate-task-title"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
+  cmux_windows_response "$dir" 5 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 6 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "cccccccc-2222-2222-2222-222222222222" "$title"
+  cmux_panes_response "$dir" 7 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 8 "dddddddd-3333-3333-3333-333333333333"
+  fb=$(make_cmux_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail 'list_live accepted stable duplicate task titles'
+
+  dir="$TMP_ROOT/list-live-unique-task-titles"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "cccccccc-2222-2222-2222-222222222222" "$title2"
+  cmux_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 4 "dddddddd-3333-3333-3333-333333333333"
+  cmux_windows_response "$dir" 5 "e1111111-0000-0000-0000-000000000000" 2
+  cmux_workspace_list_response "$dir" 6 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title" \
+    "cccccccc-2222-2222-2222-222222222222" "$title2"
+  cmux_panes_response "$dir" 7 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_panes_response "$dir" 8 "dddddddd-3333-3333-3333-333333333333"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT")
+  [ "$out" = $'aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111\tfm-task1\ncccccccc-2222-2222-2222-222222222222:dddddddd-3333-3333-3333-333333333333\tfm-task2' ] \
+    || fail "list_live rejected unique task titles: $out"
+  pass "fm_backend_cmux_list_live: requires unique stable task titles and surfaces"
 }
 
 # --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------
