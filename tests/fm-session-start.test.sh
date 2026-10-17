@@ -386,7 +386,7 @@ case "${1:-}" in
       exit 1
     fi
     if [ -e "$spawned" ]; then
-      name=$mate_window
+      name=$(cat "$window_name")
       command=node
     elif [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
       name=$mate_window
@@ -581,9 +581,19 @@ EOF
   mate="$w/secondmate-$id"
   log="$w/tmux.log"
   spawned="$w/tmux.spawned"
+  {
+    printf '%s\n' '.fm-secondmate-home'
+    printf '%s\n' 'config/'
+    printf '%s\n' 'data/'
+    printf '%s\n' 'projects/'
+    printf '%s\n' 'state/'
+  } > "$root/.gitignore"
+  printf '# Firstmate\n' > "$root/AGENTS.md"
+  git -C "$root" add .gitignore AGENTS.md
+  git -C "$root" commit -q -m 'seed secondmate fixture'
+  git -C "$root" worktree add -q --detach "$mate" HEAD
   mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
-  printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'Second mate charter.\n' > "$mate/data/charter.md"
   printf '%s\n' pi > "$home/config/secondmate-harness"
   printf '%s\n' manual > "$home/config/backlog-backend"
