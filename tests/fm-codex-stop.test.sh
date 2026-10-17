@@ -2185,7 +2185,7 @@ SH
 test_bounded_bootstrap_rebinds_unique_live_targets() {
   local mode dir title old_workspace old_surface new_workspace new_surface second_workspace second_surface
   local inventory rc current_window current_workspace current_surface live_workspace workspace_label
-  local expected_workspace canonical_home token foreign_home owner_label foreign_label
+  local canonical_home token foreign_home owner_label foreign_label
   old_workspace=aaaaaaaa-0000-0000-0000-000000000000
   old_surface=bbbbbbbb-1111-1111-1111-111111111111
   new_workspace=cccccccc-2222-2222-2222-222222222222
@@ -2277,26 +2277,38 @@ SH
   new_surface=new:pane
   second_workspace=second-workspace
   second_surface=second:pane
-  for mode in launcher secondmate journal foreign-primary sibling captain ambiguous; do
+  for mode in launcher foreign-primary foreign-secondmate copied-presentation sibling captain ambiguous; do
     dir=$(fixture "bounded-bootstrap-herdr-remap-$mode")
     mkdir -p "$dir/fakebin"
     live_workspace=$new_workspace
     case "$mode" in
       launcher) live_workspace=$old_workspace; workspace_label=captain ;;
-      secondmate)
+      foreign-secondmate)
+        foreign_home="$dir/foreign-home"
+        mkdir -p "$foreign_home/state"
         printf '%s\n' alpha > "$dir/.fm-secondmate-home"
-        workspace_label=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+        printf '%s\n' alpha > "$foreign_home/.fm-secondmate-home"
+        owner_label=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
           . "$1/backends/herdr.sh"
           fm_backend_herdr_workspace_label
-        ' _ "$ROOT/bin") || fail 'could not derive the secondmate Herdr workspace label'
+        ' _ "$ROOT/bin") || fail 'could not derive the owner secondmate Herdr workspace label'
+        foreign_label=$(FM_HOME="$foreign_home" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+          . "$1/backends/herdr.sh"
+          fm_backend_herdr_workspace_label
+        ' _ "$ROOT/bin") || fail 'could not derive the foreign secondmate Herdr workspace label'
+        [ "$owner_label" = 2ndmate-alpha ] && [ "$foreign_label" = 2ndmate-alpha ] \
+          || fail 'secondmate Herdr homes did not reproduce the shared workspace label'
+        workspace_label=$foreign_label
         ;;
-      journal)
+      copied-presentation)
+        foreign_home="$dir/foreign-home"
+        mkdir -p "$foreign_home/state"
         token=abcdefghijklmnopqrstuv
         workspace_label="└ live-owner · p:$token"
         canonical_home=$(cd "$dir" && pwd -P)
         printf '%s\n' \
           'version=2' 'task_id=live-owner' "projection_id=$token" \
-          "home=$canonical_home" 'session=fmtest' "workspace_id=$old_workspace" \
+          "home=$canonical_home" 'session=default' "workspace_id=$old_workspace" \
           'tab_id=old-tab' "pane_id=$old_surface" 'parent_workspace_id=parent-workspace' \
           'parent_label=firstmate' "workspace_label=$workspace_label" 'task_label=fm-live-owner' \
           > "$dir/state/live-owner.herdr-presentation"
@@ -2321,15 +2333,15 @@ SH
       captain) workspace_label=captain ;;
     esac
     printf '%s\n' \
-      "window=fmtest:$old_surface" 'endpoint_task_id=live-owner' \
+      "window=default:$old_surface" 'endpoint_task_id=live-owner' \
       "worktree=$dir/worktree" "project=$dir" 'kind=ship' 'harness=codex' \
-      'backend=herdr' 'herdr_session=fmtest' "herdr_workspace_id=$old_workspace" \
+      'backend=herdr' 'herdr_session=default' "herdr_workspace_id=$old_workspace" \
       'herdr_tab_id=old-tab' "herdr_pane_id=$old_surface" 'spawn_gen=owner-1' \
       > "$dir/state/live-owner.meta"
     cat > "$dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
+  session:list) printf '%s\n' '{"sessions":[{"name":"default","running":true}]}' ;;
   workspace:list)
     if [ "$FM_TEST_HERDR_REMAP_MODE" = ambiguous ]; then
       printf '{"result":{"workspaces":[{"workspace_id":"%s","label":"%s"},{"workspace_id":"%s","label":"%s"}]}}\n' \
@@ -2385,22 +2397,20 @@ SH
     current_workspace=$(sed -n 's/^herdr_workspace_id=//p' "$dir/state/live-owner.meta")
     current_surface=$(sed -n 's/^herdr_pane_id=//p' "$dir/state/live-owner.meta")
     case "$mode" in
-      launcher|secondmate|journal)
+      launcher)
         [ "$rc" -eq 0 ] || fail "$mode-owned Herdr target remap blocked bounded bootstrap"
         [ "$inventory" = "$dir/state/live-owner.meta" ] \
           || fail "$mode-owned Herdr target remap lost its live owner: $inventory"
-        expected_workspace=$new_workspace
-        [ "$mode" != launcher ] || expected_workspace=$old_workspace
-        [ "$current_window" = "fmtest:$new_surface" ] \
-          && [ "$current_workspace" = "$expected_workspace" ] \
+        [ "$current_window" = "default:$new_surface" ] \
+          && [ "$current_workspace" = "$old_workspace" ] \
           && [ "$current_surface" = "$new_surface" ] \
           || fail "$mode-owned Herdr target remap did not normalize durable endpoint identity"
         ;;
-      foreign-primary|sibling|captain|ambiguous)
+      foreign-primary|foreign-secondmate|copied-presentation|sibling|captain|ambiguous)
         [ "$rc" -ne 0 ] || fail "$mode Herdr target remap published a snapshot"
         [ ! -e "$dir/state/.active-supervision-generation" ] \
           || fail "$mode Herdr target remap became authoritative"
-        [ "$current_window" = "fmtest:$old_surface" ] \
+        [ "$current_window" = "default:$old_surface" ] \
           && [ "$current_workspace" = "$old_workspace" ] \
           && [ "$current_surface" = "$old_surface" ] \
           || fail "$mode Herdr target remap rewrote durable endpoint identity"
