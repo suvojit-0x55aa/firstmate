@@ -1814,6 +1814,55 @@ test_no_snapshot_bootstrap_discovers_live_ordinary_owners() {
   pass 'no-snapshot bootstrap retains live ordinary ship and scout owners'
 }
 
+test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories() {
+  local backend observation dir rc leftovers
+  for backend in tmux herdr zellij cmux; do
+    for observation in unavailable invalid; do
+      dir=$(fixture "bootstrap-$backend-$observation")
+      mkdir -p "$dir/fakebin"
+      printf '%s\n' \
+        'window=firstmate:fm-live-owner' "worktree=$dir/worktree" "project=$dir" \
+        'kind=ship' 'harness=codex' "backend=$backend" 'spawn_gen=owner-1' \
+        > "$dir/state/live-owner.meta"
+      cat > "$dir/fakebin/$backend" <<'SH'
+#!/usr/bin/env bash
+case "$(basename "$0"):${FM_TEST_INVENTORY_OBSERVATION:-unavailable}" in
+  tmux:invalid) printf '%s\n' 'invalid-row'; exit 0 ;;
+  herdr:invalid) printf '%s\n' '{invalid'; exit 0 ;;
+  zellij:invalid)
+    case "${1:-}" in
+      list-sessions) printf '%s\n' firstmate ;;
+      *) printf '%s\n' '{invalid' ;;
+    esac
+    exit 0
+    ;;
+  cmux:invalid) printf '%s\n' '{invalid'; exit 0 ;;
+  *) exit 71 ;;
+esac
+SH
+      chmod 0700 "$dir/fakebin/$backend"
+      set +e
+      PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+        FM_STATE_OVERRIDE="$dir/state" FM_TEST_INVENTORY_OBSERVATION="$observation" bash -c '
+          . "$1/fm-wake-lib.sh"
+          . "$1/fm-backend.sh"
+          . "$1/fm-supervision-registry-lib.sh"
+          fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
+        ' _ "$ROOT/bin"
+      rc=$?
+      set -e
+      [ "$rc" -ne 0 ] \
+        || fail "$backend $observation inventory published a first registry generation"
+      [ ! -e "$dir/state/.active-supervision-generation" ] \
+        || fail "$backend $observation inventory left an authoritative registry snapshot"
+      leftovers=$(find "$dir/state" -maxdepth 1 -name '.active-supervision-live.*' -print)
+      [ -z "$leftovers" ] \
+        || fail "$backend $observation inventory left bootstrap scratch state"
+    done
+  done
+  pass 'no-snapshot bootstrap refuses unavailable and invalid backend inventories'
+}
+
 test_bounded_event_wait_uses_active_registry() {
   local dir rc
   dir=$(fixture bounded-event-wait-inventory)
@@ -5509,6 +5558,7 @@ test_retired_status_history_does_not_consume_cycle_budget
 test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_no_snapshot_bootstrap_discovers_live_ordinary_owners
+test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata

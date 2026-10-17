@@ -673,18 +673,31 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
 # whose title is scoped to this firstmate home, by TITLE - never by trusting a
 # stored uuid, since workspace ids do NOT survive an app relaunch (finding #5).
 # One "<workspace_id>:<surface_id>\t<fm-id>" line per live task workspace.
-# Read-only: an unreachable cmux simply lists nothing.
+# Read-only.
 fm_backend_cmux_list_live() {
-  local wss wsid title sfid home prefix plain
+  local wss panes wsid title sfid home prefix plain
   home=$(fm_backend_cmux_home_label)
   prefix="fm-$home-"
-  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 0
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wss" | jq -e '
+    (.workspaces | type) == "array"
+    and all(.workspaces[]; (.id | type) == "string" and (.title | type) == "string")
+  ' >/dev/null 2>&1 || return 1
   while IFS=$'\t' read -r wsid title; do
     [ -n "$wsid" ] || continue
+    [ -n "$title" ] || return 1
+    case "$wsid$title" in *[$'\r\n']*) return 1 ;; esac
     plain=${title#"$prefix"}
     [ -n "$plain" ] || continue
-    sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-    [ -n "$sfid" ] || continue
+    panes=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+    printf '%s' "$panes" | jq -e '
+      (.panes | type) == "array"
+      and all(.panes[]; (.selected_surface_id == null or (.selected_surface_id | type) == "string")
+        and (.surface_ids == null or (.surface_ids | type) == "array"))
+    ' >/dev/null 2>&1 || return 1
+    sfid=$(printf '%s' "$panes" | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null) || return 1
+    [ -n "$sfid" ] || return 1
+    case "$sfid" in *[$'\t\r\n']*) return 1 ;; esac
     printf '%s:%s\tfm-%s\n' "$wsid" "$sfid" "$plain"
   done < <(printf '%s' "$wss" | jq -r --arg prefix "$prefix" '.workspaces[]? | select(.title | startswith($prefix)) | "\(.id)\t\(.title)"' 2>/dev/null)
 }

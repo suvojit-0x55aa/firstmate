@@ -657,8 +657,9 @@ fm_backend_source() {  # <name>
 }
 
 fm_backend_list_live() {
-  local backend live sessions session target label
-  for backend in tmux herdr zellij cmux; do
+  local requested=${1-tmux herdr zellij cmux} backend live sessions session target label part raw status
+  for backend in $requested; do
+    case "$backend" in tmux|herdr|zellij|cmux) ;; *) return 1 ;; esac
     fm_backend_source "$backend" || return 1
     case "$backend" in
       tmux)
@@ -666,21 +667,38 @@ fm_backend_list_live() {
         ;;
       herdr)
         live=
-        sessions=$(herdr session list --json 2>/dev/null \
-          | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+        raw=$(herdr session list --json 2>/dev/null) || return 1
+        printf '%s' "$raw" | jq -e '
+          (.sessions | type) == "array"
+          and all(.sessions[]; (.running | type) == "boolean" and (.name | type) == "string")
+        ' >/dev/null 2>&1 || return 1
+        sessions=$(printf '%s' "$raw" \
+          | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null) || return 1
         while IFS= read -r session; do
           [ -n "$session" ] || continue
-          live="${live}${live:+$'\n'}$(fm_backend_herdr_list_live "$session")"
+          case "$session" in *[$'\t\r\n']*) return 1 ;; esac
+          part=$(fm_backend_herdr_list_live "$session") || return 1
+          [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
         done <<EOF
 $sessions
 EOF
         ;;
       zellij)
         live=
-        sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null)
+        raw=$(zellij list-sessions --short --no-formatting 2>&1)
+        status=$?
+        if [ "$status" -ne 0 ]; then
+          case "$raw" in
+            *"No active zellij sessions found"*|*"No active sessions found"*) raw= ;;
+            *) return 1 ;;
+          esac
+        fi
+        sessions=$raw
         while IFS= read -r session; do
           [ -n "$session" ] || continue
-          live="${live}${live:+$'\n'}$(fm_backend_zellij_list_live "$session")"
+          case "$session" in *[$'\t\r']*) return 1 ;; esac
+          part=$(fm_backend_zellij_list_live "$session") || return 1
+          [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
         done <<EOF
 $sessions
 EOF

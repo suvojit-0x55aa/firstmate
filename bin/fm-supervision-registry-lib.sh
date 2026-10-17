@@ -1109,10 +1109,33 @@ fm_supervision_registry_bounded_migration_candidate() {
   return 1
 }
 
+fm_supervision_registry_bounded_backends() {
+  local state=$1 meta task backend route endpoint owner_kind seen=
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    task=${meta##*/}; task=${task%.meta}
+    fm_supervision_registry_task_valid "$task" || continue
+    fm_supervision_registry_meta_load "$meta" "$task" || continue
+    backend=$FM_SUPERVISION_FACT_BACKEND
+    route=$FM_SUPERVISION_FACT_ROUTE
+    endpoint=$FM_SUPERVISION_FACT_ENDPOINT
+    owner_kind=$FM_SUPERVISION_FACT_KIND
+    [ "$route" = local ] && [ "$endpoint" = present ] || continue
+    case "$owner_kind:$backend" in
+      ship:tmux|ship:herdr|ship:zellij|ship:cmux|scout:tmux|scout:herdr|scout:zellij|scout:cmux) ;;
+      *) continue ;;
+    esac
+    case " $seen " in *" $backend "*) continue ;; esac
+    seen="$seen${seen:+ }$backend"
+    printf '%s\n' "$backend" || return 1
+  done
+}
+
 fm_supervision_registry_bounded_live_index() {
-  local index=$1 backend target label task live
+  local state=$1 index=$2 backend target label task live backends
   mkdir "$index" || return 1
-  live=$(fm_backend_list_live) || return 1
+  backends=$(fm_supervision_registry_bounded_backends "$state") || return 1
+  live=$(fm_backend_list_live "$backends") || return 1
   while IFS="$(printf '\t')" read -r backend target label; do
     case "$label" in fm-?*) task=${label#fm-} ;; *) continue ;; esac
     fm_backend_is_known "$backend" || continue
@@ -1158,7 +1181,7 @@ fm_supervision_registry_recover_mode() {
   if [ "$mode" = bounded ]; then
     live_index=$(umask 077; mktemp -d "$state/.active-supervision-live.XXXXXX") \
       || { rm -f -- "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"; fm_lock_release "$lock"; return 1; }
-    if ! fm_supervision_registry_bounded_live_index "$live_index/tasks"; then
+    if ! fm_supervision_registry_bounded_live_index "$state" "$live_index/tasks"; then
       fm_supervision_registry_recovery_cleanup \
         "$live_index" "$candidates" "$states" "$endpoints" "$surfaced" "$filtered"
       fm_lock_release "$lock"

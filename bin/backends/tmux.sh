@@ -377,11 +377,21 @@ EOF
 }
 
 fm_backend_tmux_list_live() {
-  local windows target label tab
+  local windows target label tab status
   tab=$(printf '\t')
   windows=$(LC_ALL=C tmux list-windows -a \
-    -F "#{session_name}:#{window_name}${tab}#{window_name}" 2>/dev/null) || return 0
+    -F "#{session_name}:#{window_name}${tab}#{window_name}" 2>&1)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    case "$windows" in
+      *"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)") return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   while IFS="$tab" read -r target label; do
+    [ -n "$target" ] && [ -n "$label" ] || { [ -z "$target$label" ] && continue; return 1; }
+    case "$target" in *:*) ;; *) return 1 ;; esac
+    case "$target$label" in *[$'\r\n']*) return 1 ;; esac
     case "$label" in fm-?*) printf '%s\t%s\n' "$target" "$label" ;; esac
   done <<EOF
 $windows

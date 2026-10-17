@@ -676,17 +676,29 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
 # callers see the same plain label they always have). Read-only: a session
 # that does not exist yet simply lists nothing.
 fm_backend_zellij_list_live() {  # <session>
-  local session=$1 home prefix tabs tab_id name pane_id plain
-  fm_backend_zellij_session_exists "$session" || return 0
+  local session=$1 home prefix tabs panes tab_id name pane_id plain
   home=$(fm_backend_zellij_home_label)
   prefix="fm-$home-"
-  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 0
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '
+    type == "array"
+    and all(.[]; (.tab_id | type) == "number" and (.name | type) == "string")
+  ' >/dev/null 2>&1 || return 1
   while IFS=$'\t' read -r tab_id name; do
     [ -n "$tab_id" ] || continue
+    [ -n "$name" ] || return 1
+    case "$tab_id$name" in *[$'\r\n']*) return 1 ;; esac
     plain=${name#"$prefix"}
     [ -n "$plain" ] || continue
-    pane_id=$(fm_backend_zellij_pane_for_tab "$session" "$tab_id") || continue
-    [ -n "$pane_id" ] || continue
+    panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || return 1
+    printf '%s' "$panes" | jq -e '
+      type == "array"
+      and all(.[]; (.tab_id | type) == "number" and (.id | type) == "number" and (.is_plugin | type) == "boolean")
+    ' >/dev/null 2>&1 || return 1
+    pane_id=$(printf '%s' "$panes" | jq -r --argjson tab "$tab_id" \
+      '.[]? | select(.tab_id == $tab and .is_plugin == false) | .id' 2>/dev/null | head -1) || return 1
+    [ -n "$pane_id" ] || return 1
+    case "$pane_id" in *[$'\t\r\n']*) return 1 ;; esac
     printf '%s:%s\tfm-%s\n' "$session" "$pane_id" "$plain"
   done < <(printf '%s' "$tabs" | jq -r --arg prefix "$prefix" '.[]? | select(.name | startswith($prefix)) | "\(.tab_id)\t\(.name)"' 2>/dev/null)
 }
