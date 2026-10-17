@@ -1208,8 +1208,13 @@ def generation_probe_popen(*args, **kwargs):
 
 subprocess.Popen = generation_probe_popen
 PY
+  # This fixture has no remote recovery work. Keep its shortened transport
+  # lease internally consistent: the admission probe reserves the configured
+  # remote-send bound before it can launch, while the regression begins only
+  # after a watcher has been established.
   PYTHONPATH="$dir/retired-generation-fault" FM_TEST_ARM_TERM_DELAY=2.5 \
     FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_SEND_REMOTE_BUDGET=1 \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
     FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
