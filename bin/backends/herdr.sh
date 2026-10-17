@@ -3244,56 +3244,41 @@ EOF
 # exist yet simply lists nothing. One "<session>:<pane_id>\t<label>" line per
 # live task pane.
 fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid workspace_ids workspaces tabs tab_rows panes tab_id label pane_id pane_ids
-  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  printf '%s' "$workspaces" | jq -e '
-    (.result.workspaces | type) == "array"
-    and all(.result.workspaces[];
-      (.workspace_id | type) == "string"
-      and (.workspace_id | test("^[^[:space:]]+$"))
-      and (.label | type) == "string")
+  local session=$1 tabs tab_rows panes tab_id label pane_id pane_ids
+  tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[];
+      (.tab_id | type) == "string"
+      and (.tab_id | test("^[^[:space:]]+$"))
+      and (.label | type) == "string"
+      and (.label | test("^[^\\t\\r\\n]+$")))
   ' >/dev/null 2>&1 || return 1
-  workspace_ids=$(printf '%s' "$workspaces" \
-    | jq -r '.result.workspaces[]? | .workspace_id' 2>/dev/null) || return 1
-  while IFS= read -r wsid; do
-    [ -n "$wsid" ] || continue
-    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-    printf '%s' "$tabs" | jq -e '
-      (.result.tabs | type) == "array"
-      and all(.result.tabs[];
-        (.tab_id | type) == "string"
-        and (.tab_id | test("^[^[:space:]]+$"))
-        and (.label | type) == "string"
-        and (.label | test("^[^\\t\\r\\n]+$")))
-    ' >/dev/null 2>&1 || return 1
-    tab_rows=$(printf '%s' "$tabs" \
-      | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null) || return 1
-    [ -n "$tab_rows" ] || continue
-    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-    printf '%s' "$panes" | jq -e '
-      (.result.panes | type) == "array"
-      and all(.result.panes[];
-        (.tab_id | type) == "string"
-        and (.pane_id | type) == "string"
-        and (.pane_id | test("^[^[:space:]]+$")))
-    ' >/dev/null 2>&1 || return 1
-    while IFS=$'\t' read -r tab_id label; do
-      [ -n "$tab_id" ] && [ -n "$label" ] || return 1
-      pane_ids=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-        '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || return 1
-      [ -n "$pane_ids" ] || return 1
-      while IFS= read -r pane_id; do
-        [ -n "$pane_id" ] || return 1
-        printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-      done <<EOF_PANES
+  tab_rows=$(printf '%s' "$tabs" \
+    | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null) || return 1
+  [ -n "$tab_rows" ] || return 0
+  panes=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '
+    (.result.panes | type) == "array"
+    and all(.result.panes[];
+      (.tab_id | type) == "string"
+      and (.pane_id | type) == "string"
+      and (.pane_id | test("^[^[:space:]]+$")))
+  ' >/dev/null 2>&1 || return 1
+  while IFS=$'\t' read -r tab_id label; do
+    [ -n "$tab_id" ] && [ -n "$label" ] || return 1
+    pane_ids=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
+      '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || return 1
+    [ -n "$pane_ids" ] || return 1
+    while IFS= read -r pane_id; do
+      [ -n "$pane_id" ] || return 1
+      printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
+    done <<EOF_PANES
 $pane_ids
 EOF_PANES
-    done <<EOF_TABS
+  done <<EOF_TABS
 $tab_rows
 EOF_TABS
-  done <<EOF
-$workspace_ids
-EOF
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

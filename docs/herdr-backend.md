@@ -62,7 +62,7 @@ That path needs the home label to identify exactly one workspace: two workspaces
 Avoid naming a personal workspace `firstmate` or `2ndmate-<id>` for that reason, and because the adapter cannot distinguish that label collision from its own container.
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically; rename it manually before expecting new tasks or recovery to use it.
 Recorded-endpoint recovery still scans the first workspace matching the home label because it addresses a pane already recorded rather than choosing where new work goes.
-Bounded list-live inventories every workspace in each running session and refuses a partial inventory so home, launcher, and presentation layouts remain visible.
+Bounded list-live takes one validated session-wide tab snapshot and at most one pane snapshot per running session, so home, launcher, and presentation layouts remain visible without per-workspace calls, and incomplete snapshots refuse publication.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.

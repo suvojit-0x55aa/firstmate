@@ -1863,7 +1863,7 @@ SH
   pass 'no-snapshot bootstrap refuses unavailable and invalid backend inventories'
 }
 
-test_herdr_duplicate_workspace_bootstrap_is_conservative() {
+test_herdr_bulk_snapshot_bootstrap_is_conservative() {
   local mode dir target inventory rc
   for mode in later-live partial; do
     dir=$(fixture "herdr-duplicate-workspace-$mode")
@@ -1878,33 +1878,22 @@ test_herdr_duplicate_workspace_bootstrap_is_conservative() {
       > "$dir/state/live-owner.meta"
     cat > "$dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-workspace=
-previous=
-for argument in "$@"; do
-  if [ "$previous" = --workspace ]; then workspace=$argument; fi
-  previous=$argument
-done
 case "${1:-}:${2:-}" in
   session:list)
     printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}'
     ;;
-  workspace:list)
-    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"firstmate"},{"workspace_id":"w3","label":"personal"}]}}'
-    ;;
   tab:list)
-    case "${FM_TEST_HERDR_DUPLICATE_MODE:-}:$workspace" in
-      later-live:w1) printf '%s\n' '{"result":{"tabs":[]}}' ;;
-      later-live:w2) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-live","label":"fm-live-owner"}]}}' ;;
-      partial:w1) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-first","label":"fm-live-owner"}]}}' ;;
-      partial:w2) exit 71 ;;
-      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    case "${FM_TEST_HERDR_DUPLICATE_MODE:-}" in
+      later-live) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-shell","label":"shell","workspace_id":"w1"},{"tab_id":"tab-live","label":"fm-live-owner","workspace_id":"w2"}]}}' ;;
+      partial) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-first","label":"fm-live-owner","workspace_id":"w1"}]}}' ;;
+      *) exit 71 ;;
     esac
     ;;
   pane:list)
-    case "$workspace" in
-      w1) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-first","tab_id":"tab-first"}]}}' ;;
-      w2) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-live","tab_id":"tab-live"}]}}' ;;
-      *) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-first","agent_status":"working"},{"pane_id":"pane-live","agent_status":"working"}]}}' ;;
+    case "${FM_TEST_HERDR_DUPLICATE_MODE:-}" in
+      later-live) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-shell","tab_id":"tab-shell","agent_status":"unknown"},{"pane_id":"pane-live","tab_id":"tab-live","agent_status":"working"}]}}' ;;
+      partial) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-other","tab_id":"tab-other","agent_status":"unknown"}]}}' ;;
+      *) exit 71 ;;
     esac
     ;;
   *) exit 72 ;;
@@ -1932,7 +1921,7 @@ SH
         || fail 'partial Herdr duplicate workspace inventory became authoritative'
     fi
   done
-  pass 'Herdr duplicate workspaces are fully inventoried or rejected'
+  pass 'Herdr session-wide snapshots are complete or rejected'
 }
 
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts() {
@@ -1952,32 +1941,11 @@ test_no_snapshot_bootstrap_covers_legacy_backend_layouts() {
           > "$dir/state/herdr-presentation.meta"
         cat > "$dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
-workspace=
-previous=
-for argument in "$@"; do
-  if [ "$previous" = --workspace ]; then workspace=$argument; fi
-  previous=$argument
-done
 case "${1:-}:${2:-}" in
   session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
-  workspace:list)
-    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"home","label":"firstmate"},{"workspace_id":"launcher","label":"captain"},{"workspace_id":"presentation","label":"firstmate/herdr-presentation · p:token"}]}}'
-    ;;
-  tab:list)
-    case "$workspace" in
-      home) printf '%s\n' '{"result":{"tabs":[]}}' ;;
-      launcher) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-launcher","label":"fm-herdr-launcher"}]}}' ;;
-      presentation) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-presentation","label":"fm-herdr-presentation"}]}}' ;;
-      *) exit 71 ;;
-    esac
-    ;;
-  pane:list)
-    case "$workspace" in
-      launcher) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-shell","tab_id":"tab-launcher"},{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher"}]}}' ;;
-      presentation) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-presentation","tab_id":"tab-presentation"}]}}' ;;
-      *) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-launcher-worker","agent_status":"working"},{"pane_id":"pane-presentation","agent_status":"working"}]}}' ;;
-    esac
-    ;;
+  workspace:list) exit 71 ;;
+  tab:list) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-launcher","label":"fm-herdr-launcher","workspace_id":"launcher"},{"tab_id":"tab-presentation","label":"fm-herdr-presentation","workspace_id":"presentation"}]}}' ;;
+  pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-shell","tab_id":"tab-launcher","agent_status":"unknown"},{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher","agent_status":"working"},{"pane_id":"pane-presentation","tab_id":"tab-presentation","agent_status":"working"}]}}' ;;
   *) exit 72 ;;
 esac
 SH
@@ -2018,6 +1986,58 @@ SH
     esac
   done
   pass 'no-snapshot bootstrap retains valid Herdr and legacy Zellij layouts'
+}
+
+test_herdr_bootstrap_uses_bounded_bulk_inventory() {
+  local dir inventory rc
+  dir=$(fixture herdr-bounded-bulk-bootstrap)
+  mkdir -p "$dir/fakebin"
+  printf '%s\n' \
+    'window=fmtest:pane-live' "worktree=$dir/worktree" "project=$dir" \
+    'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=owner-1' \
+    > "$dir/state/live-owner.meta"
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
+  workspace:list)
+    printf '%s\n' called > "$FM_TEST_HERDR_WORKSPACE_SCAN"
+    sleep 10
+    exit 71
+    ;;
+  tab:list) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-live","label":"fm-live-owner","workspace_id":"w-live"}]}}' ;;
+  pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-live","tab_id":"tab-live","agent_status":"working"}]}}' ;;
+  *) exit 72 ;;
+esac
+SH
+  chmod 0700 "$dir/fakebin/herdr"
+  set +e
+  inventory=$(perl -e '
+    my $timeout=shift @ARGV;
+    my $pid=fork;
+    die unless defined $pid;
+    if (!$pid) { exec @ARGV }
+    local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 };
+    alarm $timeout;
+    waitpid $pid, 0;
+    alarm 0;
+    exit($? >> 8)
+  ' 4 env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_WORKSPACE_SCAN="$dir/workspace-scan" \
+    bash -c '
+      . "$1/fm-wake-lib.sh"
+      . "$1/fm-backend.sh"
+      . "$1/fm-supervision-registry-lib.sh"
+      fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+      fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+    ' _ "$ROOT/bin")
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Herdr bulk bootstrap exceeded its bounded admission window: $rc"
+  [ "$inventory" = "$dir/state/live-owner.meta" ] \
+    || fail "Herdr bulk bootstrap lost its live owner: $inventory"
+  [ ! -e "$dir/workspace-scan" ] || fail 'Herdr bootstrap enumerated unrelated workspaces'
+  pass 'Herdr bootstrap uses bounded session-wide bulk inventory'
 }
 
 test_zellij_scoped_title_alias_bootstrap_is_conservative() {
@@ -5788,8 +5808,9 @@ test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_no_snapshot_bootstrap_discovers_live_ordinary_owners
 test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
-test_herdr_duplicate_workspace_bootstrap_is_conservative
+test_herdr_bulk_snapshot_bootstrap_is_conservative
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts
+test_herdr_bootstrap_uses_bounded_bulk_inventory
 test_zellij_scoped_title_alias_bootstrap_is_conservative
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
