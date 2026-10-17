@@ -1,0 +1,43 @@
+=== Initial task contract ===
+window=prior-0:pane-0
+kind=scout
+worktree=/tmp/promote-retry
+backend=herdr
+herdr_session=prior-0
+herdr_workspace_id=workspace-0
+herdr_tab_id=tab-0
+herdr_pane_id=pane-0
+spawn_gen=promote-retry-1
+
+=== Attempt 1: registry coverage cannot be proven ===
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  9 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  repair missing watcher supervision according to the session-start block for this harness; do not use shell &.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+exit_code=1
+metadata_preserved=yes (still retryable scout)
+active_generation=absent (incomplete registry was not published)
+task_kind=scout
+
+=== Attempt 2: bounded registry coverage succeeds ===
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+promoted promote-retry to ship mode=local-only yolo=off (teardown protection restored)
+next: FM_HOME=/var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-promote-evidence.G2XJqG/home bin/fm-send.sh fm-promote-retry '<ship instructions for mode=local-only: review scratch state with git status and git log; reset to a clean default-branch base; carry over only intended fix changes; create branch fm/promote-retry; implement; report done>'
+exit_code=0
+--- final task contract ---
+window=prior-0:pane-0
+worktree=/tmp/promote-retry
+backend=herdr
+herdr_session=prior-0
+herdr_workspace_id=workspace-0
+herdr_tab_id=tab-0
+herdr_pane_id=pane-0
+spawn_gen=promote-retry-1
+kind=ship
+mode=local-only
+yolo=off
+--- active supervision inventory ---
+/var/folders/4d/mv45q3wx5plb8001rvccrqnr0000gn/T//fm-promote-evidence.G2XJqG/home/state/promote-retry.meta
