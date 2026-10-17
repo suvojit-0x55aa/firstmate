@@ -44,7 +44,7 @@ Moving a Firstmate installation changes its path hash and leaves old titles unma
 
 A pre-home-tag task remains reachable through its recorded metadata only when exactly one live tab has the old unscoped title.
 Multiple old tabs with the same title cause a refusal rather than a guess.
-Bounded list-live includes unscoped legacy tabs as candidates, while exact recorded targets prevent another home's same-shaped title from authorizing ownership.
+Bounded list-live includes unscoped legacy tabs as candidates, resolves current-home-looking aliases against exact recorded targets, and refuses bootstrap when both task identities remain plausible.
 
 ```text
 backend=zellij

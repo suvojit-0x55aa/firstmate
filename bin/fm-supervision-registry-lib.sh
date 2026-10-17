@@ -1131,16 +1131,52 @@ fm_supervision_registry_bounded_backends() {
   done
 }
 
+fm_supervision_registry_zellij_live_task() {
+  local state=$1 target=$2 label=$3 prefix raw scoped candidate match= matches=0
+  case "$label" in fm-?*) raw=${label#fm-} ;; *) return 1 ;; esac
+  fm_backend_source zellij || return 2
+  prefix="fm-$(fm_backend_zellij_home_label)-"
+  scoped=
+  case "$label" in "$prefix"?*) scoped=${label#"$prefix"} ;; esac
+  for candidate in "$scoped" "$raw"; do
+    [ -n "$candidate" ] || continue
+    [ "$candidate" != "$match" ] || continue
+    fm_supervision_registry_task_valid "$candidate" || continue
+    if fm_supervision_registry_meta_load "$state/$candidate.meta" "$candidate" \
+      && [ "$FM_SUPERVISION_FACT_ENDPOINT" = present ] \
+      && [ "$FM_SUPERVISION_FACT_BACKEND" = zellij ] \
+      && [ "$FM_SUPERVISION_FACT_TARGET" = "$target" ] \
+      && [ "$FM_SUPERVISION_FACT_ROUTE" = local ]; then
+      match=$candidate
+      matches=$((matches + 1))
+    fi
+  done
+  case "$matches" in
+    0) return 1 ;;
+    1) printf '%s\n' "$match" ;;
+    *) return 2 ;;
+  esac
+}
+
 fm_supervision_registry_bounded_live_index() {
-  local state=$1 index=$2 backend target label task live backends
+  local state=$1 index=$2 backend target label task live backends rc
   mkdir "$index" || return 1
   backends=$(fm_supervision_registry_bounded_backends "$state") || return 1
   live=$(fm_backend_list_live "$backends") || return 1
   while IFS="$(printf '\t')" read -r backend target label; do
-    case "$label" in fm-?*) task=${label#fm-} ;; *) continue ;; esac
     fm_backend_is_known "$backend" || continue
-    fm_supervision_registry_task_valid "$task" || continue
     case "$target" in ''|*[$'\t\r\n']*) continue ;; esac
+    if [ "$backend" = zellij ]; then
+      if task=$(fm_supervision_registry_zellij_live_task "$state" "$target" "$label"); then
+        rc=0
+      else
+        rc=$?
+      fi
+      case "$rc" in 0) ;; 1) continue ;; *) return 1 ;; esac
+    else
+      case "$label" in fm-?*) task=${label#fm-} ;; *) continue ;; esac
+    fi
+    fm_supervision_registry_task_valid "$task" || continue
     fm_supervision_tsv_row "$backend" "$target" >> "$index/$task" || return 1
   done <<EOF
 $live

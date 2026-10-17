@@ -662,13 +662,11 @@ fm_backend_zellij_kill() {  # <target> [tab_id] [expected_label]
 
 # fm_backend_zellij_list_live: recovery/orphan discovery. Lists every fm-
 # titled tab in <session>, including home-scoped and pre-tag legacy titles.
-# The current home's tag is stripped to its caller-facing fm-<id> label, while
-# the exact title is also retained as a possible legacy label. Read-only: a
-# session that does not exist yet simply lists nothing.
+# The exact tab title is retained so the registry can resolve a current-home
+# scoped title against legacy metadata without assigning one pane twice.
+# Read-only: a session that does not exist yet simply lists nothing.
 fm_backend_zellij_list_live() {  # <session>
-  local session=$1 home prefix tabs tab_rows panes tab_id name pane_id pane_ids plain
-  home=$(fm_backend_zellij_home_label)
-  prefix="fm-$home-"
+  local session=$1 tabs tab_rows panes tab_id name pane_id pane_ids
   tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e '
     type == "array"
@@ -692,15 +690,7 @@ fm_backend_zellij_list_live() {  # <session>
     [ -n "$pane_ids" ] || return 1
     while IFS= read -r pane_id; do
       [ -n "$pane_id" ] || return 1
-      case "$name" in
-        "$prefix"?*)
-          plain=${name#"$prefix"}
-          printf '%s:%s\tfm-%s\n' "$session" "$pane_id" "$plain"
-          printf '%s:%s\t%s\n' "$session" "$pane_id" "$name"
-          ;;
-        fm-?*) printf '%s:%s\t%s\n' "$session" "$pane_id" "$name" ;;
-        *) return 1 ;;
-      esac
+      printf '%s:%s\t%s\n' "$session" "$pane_id" "$name"
     done <<EOF_PANES
 $pane_ids
 EOF_PANES

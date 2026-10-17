@@ -321,11 +321,11 @@ test_list_live_covers_scoped_and_legacy_titles() {
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_list_live firstmate' "$ROOT" )
-  expected=$(printf 'firstmate:7\tfm-task1\nfirstmate:7\t%s\nfirstmate:8\t%s\nfirstmate:9\tfm-legacy' \
+  expected=$(printf 'firstmate:7\t%s\nfirstmate:8\t%s\nfirstmate:9\tfm-legacy' \
     "$own_title" "$foreign_title")
   [ "$out" = "$expected" ] \
     || fail "list_live should cover scoped and legacy fm- titles, got '$out'"
-  pass "fm_backend_zellij_list_live: covers scoped and legacy titles with exact pane targets"
+  pass "fm_backend_zellij_list_live: preserves exact scoped and legacy titles with exact pane targets"
 }
 
 test_resolve_bare_selector_prefers_scoped_title() {

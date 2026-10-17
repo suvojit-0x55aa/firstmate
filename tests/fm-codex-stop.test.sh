@@ -2020,6 +2020,78 @@ SH
   pass 'no-snapshot bootstrap retains valid Herdr and legacy Zellij layouts'
 }
 
+test_zellij_scoped_title_alias_bootstrap_is_conservative() {
+  local mode dir home_tag legacy_task title inventory rc
+  for mode in scoped legacy ambiguous; do
+    dir=$(fixture "zellij-scoped-title-alias-$mode")
+    mkdir -p "$dir/fakebin"
+    home_tag=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" bash -c '
+      . "$1/backends/zellij.sh"
+      fm_backend_zellij_home_label
+    ' _ "$ROOT/bin") || fail 'could not derive the Zellij home tag'
+    legacy_task="$home_tag-job"
+    title="fm-$legacy_task"
+    case "$mode" in
+      scoped|ambiguous)
+        printf '%s\n' \
+          'window=zsession:8' "worktree=$dir/scoped-worktree" "project=$dir" \
+          'kind=ship' 'harness=codex' 'backend=zellij' 'spawn_gen=scoped-1' \
+          > "$dir/state/job.meta"
+        ;;
+    esac
+    case "$mode" in
+      legacy|ambiguous)
+        printf '%s\n' \
+          'window=zsession:8' "worktree=$dir/legacy-worktree" "project=$dir" \
+          'kind=ship' 'harness=codex' 'backend=zellij' 'spawn_gen=legacy-1' \
+          > "$dir/state/$legacy_task.meta"
+        ;;
+    esac
+    cat > "$dir/fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-sessions ]; then
+  printf '%s\n' zsession
+  exit 0
+fi
+case "$*" in
+  *" action list-tabs --json"*) printf '[{"tab_id":7,"name":"%s"}]\n' "$FM_TEST_ZELLIJ_ALIAS_TITLE" ;;
+  *" action list-panes --json"*) printf '%s\n' '[{"tab_id":7,"id":8,"is_plugin":false}]' ;;
+  *) exit 71 ;;
+esac
+SH
+    chmod 0700 "$dir/fakebin/zellij"
+    set +e
+    inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$dir/state" FM_TEST_ZELLIJ_ALIAS_TITLE="$title" bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-backend.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+        fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+      ' _ "$ROOT/bin")
+    rc=$?
+    set -e
+    case "$mode" in
+      scoped)
+        [ "$rc" -eq 0 ] || fail 'scoped Zellij identity blocked bootstrap'
+        [ "$inventory" = "$dir/state/job.meta" ] \
+          || fail "scoped Zellij identity resolved incorrectly: $inventory"
+        ;;
+      legacy)
+        [ "$rc" -eq 0 ] || fail 'legacy Zellij identity blocked bootstrap'
+        [ "$inventory" = "$dir/state/$legacy_task.meta" ] \
+          || fail "legacy Zellij identity resolved incorrectly: $inventory"
+        ;;
+      ambiguous)
+        [ "$rc" -ne 0 ] || fail 'ambiguous Zellij title alias published two owners'
+        [ ! -e "$dir/state/.active-supervision-generation" ] \
+          || fail 'ambiguous Zellij title alias became authoritative'
+        ;;
+    esac
+  done
+  pass 'Zellij title aliases resolve uniquely or block bootstrap'
+}
+
 test_bounded_event_wait_uses_active_registry() {
   local dir rc
   dir=$(fixture bounded-event-wait-inventory)
@@ -5718,6 +5790,7 @@ test_no_snapshot_bootstrap_discovers_live_ordinary_owners
 test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
 test_herdr_duplicate_workspace_bootstrap_is_conservative
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts
+test_zellij_scoped_title_alias_bootstrap_is_conservative
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata
