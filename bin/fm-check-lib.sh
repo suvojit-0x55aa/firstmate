@@ -6,13 +6,13 @@ FM_CUSTOM_CHECK_SNAPSHOT=
 fm_check_index_root() { printf '%s/.registered-checks-v1\n' "$1"; }
 
 fm_check_index_recover() { # <state>
-  local state=$1 root ready check id marker tmp protocol
+  local state=$1 root ready check id marker tmp protocol ready_valid=0
   root=$(fm_check_index_root "$state")
   ready="$root/.ready"
   if [ -f "$ready" ] && [ ! -L "$ready" ]; then
     IFS= read -r protocol < "$ready" || return 1
-    [ "$protocol" = fm-registered-checks.v1 ]
-    return
+    [ "$protocol" = fm-registered-checks.v1 ] || return 1
+    ready_valid=1
   fi
   [ ! -e "$root" ] || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
   mkdir -p "$root" || return 1
@@ -20,6 +20,11 @@ fm_check_index_recover() { # <state>
     [ -f "$check" ] && [ ! -L "$check" ] || continue
     id=${check##*/}; id=${id%.check.sh}
     fm_pr_task_id_valid "$id" || continue
+    if [ "$ready_valid" -eq 1 ] && [ "$id" != x-watch ] \
+      && [ ! -f "$state/$id.check-trust" ] \
+      && [ ! -f "$state/$id.pr-poll-registration" ]; then
+      continue
+    fi
     marker="$root/$id"
     tmp="$root/.$id.tmp.${BASHPID:-$$}"
     if ! ( umask 077; printf '%s\n' "$id.check.sh" > "$tmp" ) \
@@ -28,11 +33,13 @@ fm_check_index_recover() { # <state>
       return 1
     fi
   done
-  tmp="$root/.ready.tmp.${BASHPID:-$$}"
-  if ! ( umask 077; printf 'fm-registered-checks.v1\n' > "$tmp" ) \
-    || ! mv -f -- "$tmp" "$ready"; then
-    rm -f -- "$tmp"
-    return 1
+  if [ "$ready_valid" -eq 0 ]; then
+    tmp="$root/.ready.tmp.${BASHPID:-$$}"
+    if ! ( umask 077; printf 'fm-registered-checks.v1\n' > "$tmp" ) \
+      || ! mv -f -- "$tmp" "$ready"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
   fi
 }
 

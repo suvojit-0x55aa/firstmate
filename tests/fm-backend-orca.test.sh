@@ -642,12 +642,18 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when terminal creation fails"
   assert_absent "$state/$id.meta" "terminal-create abort should not record metadata after successful cleanup"
+  assert_contains "$(cat "$LOG")" "fm-$id--i" \
+    "Orca worktree creation should use a transaction-unique provisional identity"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail'$'\x1f''--title'$'\x1f'"fm-$id"$'\x1f''--json' \
     "Orca spawn should attempt terminal creation before abort cleanup"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the worktree when terminal creation fails"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
     "Orca spawn should not close a terminal when no handle was recorded"
+  if [ -f "$state/.active-supervision-generation" ]; then
+    assert_not_contains "$(cat "$state/.active-supervision-generation")" "${id}" \
+      "successful exact Orca abort cleanup should retire lifecycle ownership"
+  fi
   pass "fm-spawn.sh --backend orca: removes worktree when terminal creation fails"
 }
 

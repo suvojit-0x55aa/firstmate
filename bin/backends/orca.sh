@@ -199,7 +199,10 @@ fm_backend_orca_worktree_path() {
 fm_backend_orca_recover_planned() {  # <task> <target> <project>
   local task=$1 target=$2 project=$3 repo_out repo_status repo_id list parsed
   local count truncated worktree_id worktree_path
-  [ "$target" = "fm-$task" ] || return 1
+  case "$target" in
+    "fm-$task"|"fm-$task"--i[0-9]*.[0-9a-f]*) ;;
+    *) return 1 ;;
+  esac
   fm_backend_orca_runtime_check >/dev/null 2>&1 || return 1
   repo_out=$(orca repo show --repo "path:$project" --json 2>/dev/null)
   repo_status=$?

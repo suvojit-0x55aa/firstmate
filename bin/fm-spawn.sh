@@ -623,13 +623,8 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     [ -z "$out" ] || printf '%s\n' "$out" >&2
-    if [ "$rc" -eq 255 ]; then
-      SPAWN_REGISTRY_RESERVED=0
-      echo "error: remote secondmate $id is unavailable or launch completion is unknown; preserved route $host:$home" >&2
-    else
-      fm_supervision_registry_cancel_reservation "$STATE" "$id" "$SPAWN_GEN" || true
-      SPAWN_REGISTRY_RESERVED=0
-    fi
+    SPAWN_REGISTRY_RESERVED=0
+    echo "error: remote secondmate $id launch completion is unknown; preserved route $host:$home" >&2
     return "$rc"
   fi
   SPAWN_REGISTRY_RESERVED=0
@@ -895,12 +890,15 @@ spawn_abort_cleanup() {
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    local orca_cleanup_proven=0
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
     fi
     if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+      if fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        orca_cleanup_proven=1
+      else
         mkdir -p "$STATE" 2>/dev/null || true
         if [ -d "$STATE" ]; then
           if {
@@ -929,6 +927,13 @@ spawn_abort_cleanup() {
           fi
         fi
       fi
+    fi
+    if [ "$orca_cleanup_proven" = 1 ]; then
+      if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" = "$SPAWN_GEN" ]; then
+        rm -f -- "$STATE/$ID.meta" || true
+      fi
+      fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" any || true
+      SPAWN_REGISTRY_RESERVED=0
     fi
   fi
   if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ] \
@@ -2331,9 +2336,10 @@ EOF
     SPAWN_RESERVATION_DETAIL=$CMUX_WORKSPACE_ID
     ;;
   orca)
-    spawn_plan_endpoint orca "$W" "$PROJ_ABS" || exit 1
+    ORCA_PLAN_LABEL="$W--$SPAWN_GEN"
+    spawn_plan_endpoint orca "$ORCA_PLAN_LABEL" "$PROJ_ABS" || exit 1
     set +e
-    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
+    ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$ORCA_PLAN_LABEL")
     ORCA_WT_STATUS=$?
     set -e
     if [ "$ORCA_WT_STATUS" -ne 0 ]; then

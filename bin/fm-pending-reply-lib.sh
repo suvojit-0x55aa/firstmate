@@ -136,7 +136,8 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
 
 # A task-keyed open-record index keeps bounded supervision from walking the
 # historical pending-reply archive.  The records remain the schema owner; index
-# entries contain only the correlation id and are rebuilt once on upgrade.
+# entries contain only the correlation id, with unfinished publications kept
+# as a bounded journal beside the index after the one-time archive rebuild.
 fm_pending_reply_index_root() { printf '%s/.pending-reply-active-v1' "$1"; }
 fm_pending_reply_task_key() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
 fm_pending_reply_index_task_dir() {
@@ -161,18 +162,40 @@ fm_pending_reply_index_remove() {  # <state> <task> <corr>
   rm -f -- "$dir/$3"
   rmdir "$dir" 2>/dev/null || true
 }
+fm_pending_reply_index_prepare() {  # <state> <task> <corr>
+  local root marker tmp
+  fm_pending_reply_corr_valid "$3" || return 1
+  root=$(fm_pending_reply_index_root "$1")
+  [ ! -e "$root" ] || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
+  mkdir -p "$root" || return 1
+  marker="$root/.publish-$3"
+  tmp="$root/.publish-$3.tmp.${BASHPID:-$$}"
+  if ! ( umask 077; printf '%s\n' "$2" > "$tmp" ) \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+fm_pending_reply_index_commit() {  # <state> <task> <corr>
+  fm_pending_reply_index_add "$1" "$2" "$3" || return 1
+  rm -f -- "$(fm_pending_reply_index_root "$1")/.publish-$3"
+}
+fm_pending_reply_index_abort() {  # <state> <corr>
+  fm_pending_reply_corr_valid "$2" || return 1
+  rm -f -- "$(fm_pending_reply_index_root "$1")/.publish-$2"
+}
 fm_pending_reply_index_recover() {  # <state>
-  local state=$1 root dir rec corr task phase tmp protocol
+  local state=$1 root dir rec corr task phase tmp protocol marker ready=0
   root=$(fm_pending_reply_index_root "$state")
   if [ -f "$root/.ready" ] && [ ! -L "$root/.ready" ]; then
     IFS= read -r protocol < "$root/.ready" || return 1
-    [ "$protocol" = fm-pending-reply-active.v1 ]
-    return
+    [ "$protocol" = fm-pending-reply-active.v1 ] || return 1
+    ready=1
   fi
   [ ! -e "$root" ] || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
   mkdir -p "$root" || return 1
   dir=$(fm_pending_reply_dir "$state")
-  if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+  if [ "$ready" -eq 0 ] && [ -d "$dir" ] && [ ! -L "$dir" ]; then
     for rec in "$dir"/*; do
       [ -f "$rec" ] && [ ! -L "$rec" ] || continue
       case "${rec##*/}" in .*) continue ;; esac
@@ -184,12 +207,33 @@ fm_pending_reply_index_recover() {  # <state>
       fm_pending_reply_index_add "$state" "$task" "$corr" || return 1
     done
   fi
-  tmp="$root/.ready.tmp.${BASHPID:-$$}"
-  if ! ( umask 077; printf 'fm-pending-reply-active.v1\n' > "$tmp" ) \
-    || ! mv -f -- "$tmp" "$root/.ready"; then
-    rm -f -- "$tmp"
-    return 1
+  if [ "$ready" -eq 0 ]; then
+    tmp="$root/.ready.tmp.${BASHPID:-$$}"
+    if ! ( umask 077; printf 'fm-pending-reply-active.v1\n' > "$tmp" ) \
+      || ! mv -f -- "$tmp" "$root/.ready"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
   fi
+  for marker in "$root"/.publish-*; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    corr=${marker##*/.publish-}
+    case "$corr" in *.tmp.*) continue ;; esac
+    fm_pending_reply_corr_valid "$corr" || return 1
+    IFS= read -r task < "$marker" || return 1
+    [ -n "$task" ] || return 1
+    rec=$(fm_pending_reply_path "$state" "$corr") || return 1
+    [ -e "$rec" ] || continue
+    [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+    [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 1
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task" ] || return 1
+    phase=$(fm_pending_reply_get "$rec" phase)
+    if [ "$phase" = resolved ]; then
+      rm -f -- "$marker" || return 1
+      continue
+    fi
+    fm_pending_reply_index_commit "$state" "$task" "$corr" || return 1
+  done
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -365,9 +409,17 @@ wrong_home_scan_signature=
 grace_secs=$(fm_pending_reply_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$rec" || return 1
-  if ! fm_pending_reply_index_add "$state" "$task_id" "$corr"; then
+  if ! fm_pending_reply_index_prepare "$state" "$task_id" "$corr"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$rec"; then
+    fm_pending_reply_index_abort "$state" "$corr" || true
+    return 1
+  fi
+  if ! fm_pending_reply_index_commit "$state" "$task_id" "$corr"; then
     rm -f -- "$rec"
+    fm_pending_reply_index_abort "$state" "$corr" || true
     return 1
   fi
   printf '%s' "$corr"

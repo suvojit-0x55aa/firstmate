@@ -117,7 +117,7 @@ fm_supervision_registry_staged_meta_valid() { # <meta> <task> <spawn> <phase> <b
     [ "$backend" = orca ] && [ "$endpoint_state" = worktree-only ] || return 1
     fm_backend_validate_task_endpoint "$meta" "$task" >/dev/null 2>&1 || return 1
     [ "$FM_BACKEND_VALIDATED_BACKEND" = orca ] || return 1
-    [ "$(fm_backend_meta_exact_value "$meta" window 2>/dev/null || true)" = "$target" ] || return 1
+    [ "$(fm_backend_meta_exact_value "$meta" window 2>/dev/null || true)" = "fm-$task" ] || return 1
     [ "$(fm_backend_meta_exact_value "$meta" orca_worktree_id 2>/dev/null || true)" = "$detail" ] || return 1
     return 0
   fi
@@ -200,6 +200,43 @@ fm_supervision_registry_transaction_meta_locked() {  # <state> <task> <spawn> <p
   fm_supervision_registry_staged_meta_valid \
     "$dir/meta" "$2" "$3" "$4" "$5" "$6" "$(fm_meta_get "$record" detail)" || return 1
   printf '%s\n' "$dir/meta"
+}
+
+fm_supervision_registry_transaction_fields_locked() {  # <state> <task> <spawn>
+  local dir record protocol task spawn owner_pid owner_identity phase backend target detail metadata
+  dir=$(fm_supervision_registry_transaction_dir "$1" "$2") || return 1
+  record="$dir/record"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  IFS= read -r protocol < "$record" || return 1
+  [ "$protocol" = fm-supervision-transaction.v2 ] || return 1
+  task=$(fm_meta_get "$record" task); spawn=$(fm_meta_get "$record" spawn_gen)
+  owner_pid=$(fm_meta_get "$record" owner_pid); owner_identity=$(fm_meta_get "$record" owner_identity)
+  phase=$(fm_meta_get "$record" phase); backend=$(fm_meta_get "$record" backend)
+  target=$(fm_meta_get "$record" target); detail=$(fm_meta_get "$record" detail)
+  metadata=$(fm_meta_get "$record" metadata)
+  [ "$task" = "$2" ] && [ "$spawn" = "$3" ] || return 1
+  case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$owner_identity" ] || return 1
+  case "$phase" in reserved|planned|endpoint-only|worktree-only|created|remote-unknown) ;; *) return 1 ;; esac
+  if [ "$phase" = reserved ]; then
+    [ "$metadata" = none ] || return 1
+  else
+    [ "$metadata" = staged ] || return 1
+    [ -f "$dir/meta" ] && [ ! -L "$dir/meta" ] || return 1
+    fm_supervision_registry_staged_meta_valid \
+      "$dir/meta" "$task" "$spawn" "$phase" "$backend" "$target" "$detail" || return 1
+  fi
+  fm_supervision_tsv_row "$owner_pid" "$owner_identity" "$phase" "$backend" "$target" "$detail"
+}
+
+fm_supervision_registry_phase_rank() {
+  case "$1" in
+    reserved) printf '0' ;;
+    planned) printf '1' ;;
+    endpoint-only|worktree-only|remote-unknown) printf '2' ;;
+    created) printf '3' ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_supervision_registry_snapshot_header() {
@@ -395,7 +432,7 @@ fm_supervision_registry_publish_planned_locked() { # <state> <task> <spawn> <bac
         ;;
       orca)
         [ "$phase" = worktree-only ] || { rm -f -- "$tmp"; return 1; }
-        printf 'window=%s\nendpoint_state=worktree-only\nbackend=orca\n' "$target"
+        printf 'window=fm-%s\nendpoint_state=worktree-only\nbackend=orca\n' "$task"
         printf 'orca_worktree_id=%s\n' "$id1"
         ;;
       *) rm -f -- "$tmp"; return 1 ;;
@@ -440,25 +477,34 @@ fm_supervision_registry_reconcile_endpoint_only_locked() { # <state> <task> <spa
     fm_supervision_registry_write_locked "$state" "$task" '' '' cancel
     return
   fi
-  [ "$verdict" = dead ] || return 0
-  if [ "$backend" = tmux ]; then
+  if [ "$verdict" = dead ] && [ "$backend" = tmux ]; then
     recovery_identity=$(fm_backend_reservation_identity "$backend" "$target" "$detail") \
       || recovery_identity=$'unverified\t-'
     IFS="$(printf '\t')" read -r recovery_state recovery_path <<EOF
 $recovery_identity
 EOF
-    [ "$recovery_state" = match ] || return 0
-    fm_backend_retire_reservation "$backend" "$target" || return 0
-  else
-    fm_backend_kill "$backend" "$target" >/dev/null 2>&1 || return 0
+    if [ "$recovery_state" = match ] \
+      && fm_backend_retire_reservation "$backend" "$target"; then
+      fm_supervision_registry_write_locked "$state" "$task" '' '' cancel
+      return
+    fi
+  elif [ "$verdict" = dead ] \
+    && fm_backend_kill "$backend" "$target" >/dev/null 2>&1; then
+    fm_supervision_registry_write_locked "$state" "$task" '' '' cancel
+    return
   fi
-  fm_supervision_registry_write_locked "$state" "$task" '' '' cancel
+  cp -p -- "$transaction_meta" "$state/$task.meta" || return 1
+  fm_supervision_registry_staged_meta_valid \
+    "$state/$task.meta" "$task" "$spawn_gen" endpoint-only "$backend" "$target" "$detail" || return 1
+  fm_supervision_registry_write_locked "$state" "$task" "$state/$task.meta" pending set
 }
 
 fm_supervision_registry_reconcile_locked() {
   local state=$1 path protocol generation kind task spawn_gen owner_pid owner_identity reservation_phase backend target detail meta current identity verdict
   local recovery_identity recovery_state recovery_path recovery_target transaction_meta recovery_result recovery_tmp
-  local recovery_harness expected_harness planned_result planned_verdict planned_phase
+  local recovery_harness expected_harness planned_result planned_verdict planned_phase transaction_fields
+  local transaction_owner_pid transaction_owner_identity transaction_phase transaction_backend transaction_target transaction_detail
+  local reservation_rank transaction_rank transaction_dir transaction_staged
   local planned_target planned_detail planned_worktree planned_id1 planned_id2 planned_id3 planned_id4
   path=$(fm_supervision_registry_generation_path "$state")
   fm_supervision_registry_snapshot_valid "$path" || return 1
@@ -474,6 +520,42 @@ fm_supervision_registry_reconcile_locked() {
     fi
     identity=$(fm_pid_identity "$owner_pid" 2>/dev/null || true)
     [ -n "$identity" ] && [ "$identity" = "$owner_identity" ] && continue
+    transaction_fields=$(fm_supervision_registry_transaction_fields_locked \
+      "$state" "$task" "$spawn_gen" 2>/dev/null || true)
+    if [ -n "$transaction_fields" ]; then
+      IFS="$(printf '\t')" read -r transaction_owner_pid transaction_owner_identity \
+        transaction_phase transaction_backend transaction_target transaction_detail <<EOF
+$transaction_fields
+EOF
+      reservation_rank=$(fm_supervision_registry_phase_rank "$reservation_phase") || return 1
+      transaction_rank=$(fm_supervision_registry_phase_rank "$transaction_phase") || return 1
+      if [ "$transaction_rank" -gt "$reservation_rank" ]; then
+        owner_pid=$transaction_owner_pid
+        owner_identity=$transaction_owner_identity
+        reservation_phase=$transaction_phase
+        backend=$transaction_backend
+        target=$transaction_target
+        detail=$transaction_detail
+        fm_supervision_registry_write_locked "$state" "$task" "$spawn_gen" '' reserve \
+          "$owner_pid" "$owner_identity" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+      elif [ "$transaction_rank" -lt "$reservation_rank" ]; then
+        transaction_dir=$(fm_supervision_registry_transaction_dir "$state" "$task") || return 1
+        transaction_staged="$transaction_dir/meta"
+        [ -f "$transaction_staged" ] && [ ! -L "$transaction_staged" ] || return 1
+        fm_supervision_registry_staged_meta_valid \
+          "$transaction_staged" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+        fm_supervision_registry_transaction_write_locked "$state" "$task" "$spawn_gen" \
+          "$owner_pid" "$owner_identity" "$reservation_phase" "$backend" "$target" "$detail" "$transaction_staged" || return 1
+      fi
+    elif [ "$reservation_phase" != reserved ]; then
+      transaction_dir=$(fm_supervision_registry_transaction_dir "$state" "$task") || return 1
+      transaction_staged="$transaction_dir/meta"
+      [ -f "$transaction_staged" ] && [ ! -L "$transaction_staged" ] || return 1
+      fm_supervision_registry_staged_meta_valid \
+        "$transaction_staged" "$task" "$spawn_gen" "$reservation_phase" "$backend" "$target" "$detail" || return 1
+      fm_supervision_registry_transaction_write_locked "$state" "$task" "$spawn_gen" \
+        "$owner_pid" "$owner_identity" "$reservation_phase" "$backend" "$target" "$detail" "$transaction_staged" || return 1
+    fi
     if [ "$current" = "$spawn_gen" ]; then
       fm_supervision_registry_write_locked "$state" "$task" "$meta" pending set || return 1
       continue
@@ -741,6 +823,11 @@ fm_supervision_registry_mark_reservation() {
 fm_supervision_registry_plan_reservation() {
   local state=$1 task=$2 spawn_gen=$3 backend=$4 target=$5 detail=$6 staged_meta=$7
   local discovery verdict
+  if [ "$backend" = orca ] && [ "$target" = "fm-$task--$spawn_gen" ]; then
+    fm_supervision_registry_mark_reservation \
+      "$state" "$task" "$spawn_gen" planned "$backend" "$target" "$detail" "$staged_meta"
+    return
+  fi
   discovery=$(fm_backend_recover_planned "$backend" "$task" "$target" "$detail" 2>/dev/null) || return 1
   IFS="$(printf '\t')" read -r verdict _rest <<EOF
 $discovery

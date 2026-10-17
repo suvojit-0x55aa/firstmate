@@ -1883,6 +1883,100 @@ test_active_indexes_discover_new_obligations() {
   pass 'active indexes discover status, turn-end, inbox, and reply obligations'
 }
 
+test_registered_check_index_reconciles_after_ready() {
+  local dir inventory
+  dir=$(fixture registered-check-index-reconcile)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    fm_check_index_recover "$FM_STATE_OVERRIDE" || exit 1
+  ' _ "$ROOT/bin" || fail 'could not initialize registered-check index'
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" recovered-check' \
+    > "$dir/state/recovered.check.sh"
+  chmod 0700 "$dir/state/recovered.check.sh"
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" recovered >/dev/null \
+    || fail 'could not publish registered-check fixture'
+  rm -f -- "$dir/state/.registered-checks-v1/recovered"
+  inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    fm_check_index_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin") || fail 'registered-check reconciliation failed'
+  [ "$inventory" = "$dir/state/recovered.check.sh" ] \
+    || fail "runnable check stayed absent after ready marker: $inventory"
+  [ "$("$inventory")" = recovered-check ] \
+    || fail 'reconciled registered check was not executable'
+  pass 'registered-check index reconciles runnable artifacts after readiness'
+}
+
+test_registry_phase_transition_recovers_torn_publication() {
+  local dir inventory txdir
+  dir=$(fixture registry-torn-transition)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+    printf "%s\n" "window=zellij-main:fm-torn" "endpoint_task_id=torn" \
+      "endpoint_state=planned" "worktree=-" "project=/project/torn" \
+      "harness=codex" "kind=ship" "backend=zellij" \
+      "recovery_detail=zellij-main" "spawn_gen=torn-gen" \
+      > "$FM_STATE_OVERRIDE/.torn.plan" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" torn torn-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" torn torn-gen \
+      planned zellij zellij-main:fm-torn zellij-main "$FM_STATE_OVERRIDE/.torn.plan" || exit 1
+    cp "$FM_STATE_OVERRIDE/.active-supervision-generation" "$FM_STATE_OVERRIDE/.planned-snapshot" || exit 1
+    printf "%s\n" "window=zellij-main:8" "endpoint_task_id=torn" \
+      "endpoint_state=endpoint-only" "worktree=-" "project=/project/torn" \
+      "harness=codex" "kind=ship" "backend=zellij" "zellij_session=zellij-main" \
+      "zellij_tab_id=7" "zellij_pane_id=8" "spawn_gen=torn-gen" \
+      > "$FM_STATE_OVERRIDE/.torn.endpoint" || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" torn torn-gen \
+      endpoint-only zellij zellij-main:8 7 "$FM_STATE_OVERRIDE/.torn.endpoint" || exit 1
+    cp "$FM_STATE_OVERRIDE/.planned-snapshot" "$FM_STATE_OVERRIDE/.active-supervision-generation" || exit 1
+
+    printf "%s\n" "window=zellij-main:fm-reverse" "endpoint_task_id=reverse" \
+      "endpoint_state=planned" "worktree=-" "project=/project/reverse" \
+      "harness=codex" "kind=ship" "backend=zellij" \
+      "recovery_detail=zellij-main" "spawn_gen=reverse-gen" \
+      > "$FM_STATE_OVERRIDE/.reverse.plan" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" reverse reverse-gen || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" reverse reverse-gen \
+      planned zellij zellij-main:fm-reverse zellij-main "$FM_STATE_OVERRIDE/.reverse.plan" || exit 1
+    reverse_dir=$(fm_supervision_registry_transaction_dir "$FM_STATE_OVERRIDE" reverse) || exit 1
+    cp "$reverse_dir/record" "$FM_STATE_OVERRIDE/.reverse.planned-record" || exit 1
+    printf "%s\n" "window=zellij-main:10" "endpoint_task_id=reverse" \
+      "endpoint_state=endpoint-only" "worktree=-" "project=/project/reverse" \
+      "harness=codex" "kind=ship" "backend=zellij" "zellij_session=zellij-main" \
+      "zellij_tab_id=9" "zellij_pane_id=10" "spawn_gen=reverse-gen" \
+      > "$FM_STATE_OVERRIDE/.reverse.endpoint" || exit 1
+    fm_supervision_registry_mark_reservation "$FM_STATE_OVERRIDE" reverse reverse-gen \
+      endpoint-only zellij zellij-main:10 9 "$FM_STATE_OVERRIDE/.reverse.endpoint" || exit 1
+    cp "$FM_STATE_OVERRIDE/.reverse.planned-record" "$reverse_dir/record" || exit 1
+  ' _ "$ROOT/bin" || fail 'could not construct torn reservation transition'
+  inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_backend_agent_state_batch() {
+      while IFS="$(printf "\t")" read -r backend target route home; do
+        printf "%s\t%s\tunverified\t%s\t%s\n" "$backend" "$target" "$route" "$home"
+      done
+    }
+    fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin") || fail 'torn reservation transition did not recover'
+  [ "$inventory" = "$(printf '%s\n%s' "$dir/state/reverse.meta" "$dir/state/torn.meta")" ] \
+    || fail "unverified endpoint-only owner did not enter usable inventory: $inventory"
+  grep -F "$(printf 'entry\ttorn\ttorn-gen\tpending')" \
+    "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'torn reservation transition did not converge to pending ownership'
+  grep -F "$(printf 'entry\treverse\treverse-gen\tpending')" \
+    "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'reverse-order reservation transition did not converge to pending ownership'
+  txdir="$dir/state/.active-supervision-transactions-v1"
+  [ -d "$txdir" ] && [ -z "$(find "$txdir" -mindepth 1 -print -quit)" ] \
+    || fail 'recovered reservation transaction was not retired'
+  pass 'reservation phase transition recovers torn publication'
+}
+
 test_small_live_endpoint_inventory_remains_bounded() {
   local dir id
   dir=$(fixture live-endpoint-inventory)
@@ -5244,12 +5338,14 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata
 test_active_indexes_discover_new_obligations
+test_registered_check_index_reconciles_after_ready
 test_active_supervision_registry_owns_lifecycle_inventory
 test_registry_receipt_recovery_is_owner_addressed
 test_registry_pending_snapshot_is_immediately_authoritative
 test_registry_snapshot_index_is_generation_bound
 test_incarnation_allocator_is_durable_unique_and_nonreusable
 test_registry_reservation_recovers_spawn_crash_windows
+test_registry_phase_transition_recovers_torn_publication
 test_remote_recovery_protocol_reports_exact_endpoint
 test_transaction_journals_recover_every_backend
 test_planned_reservations_converge_after_backend_creation_crashes
