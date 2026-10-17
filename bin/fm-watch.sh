@@ -1649,14 +1649,17 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
     if [ -e "$BEAT" ]; then
-      beat_age=$(fm_path_age "$BEAT")
+      beat_age=$(fm_path_age "$BEAT") || beat_age=$WATCHER_STALE_GRACE
       if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
         echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
         exit 1
       fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
-      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
-      exit 1
+    else
+      lock_age=$(fm_path_age "$WATCH_LOCK") || lock_age=$WATCHER_STALE_GRACE
+      if [ "$lock_age" -ge "$WATCHER_STALE_GRACE" ]; then
+        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
+        exit 1
+      fi
     fi
     echo "watcher: already running pid $FM_LOCK_HELD_PID"
   else

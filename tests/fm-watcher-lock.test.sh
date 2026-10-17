@@ -42,37 +42,40 @@ drain_and_ack() {  # <state>
 }
 
 test_singleton_start() {
-  local dir state fakebin out1 out2 pid1 pid2 live i
+  local dir state fakebin out1 out2 pid1 pid2 lock_pid i rc
   dir=$(make_case singleton)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out1="$dir/watch-one.out"
   out2="$dir/watch-two.out"
   mark_pr_check_migration_complete "$state"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out1" &
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 bash "$WATCH" > "$out1" &
   pid1=$!
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out2" &
-  pid2=$!
   i=0
-  while [ "$i" -lt 50 ]; do
-    live=0
-    is_live_non_zombie "$pid1" && live=$((live + 1))
-    is_live_non_zombie "$pid2" && live=$((live + 1))
-    [ "$live" -eq 1 ] && break
+  lock_pid=
+  while [ "$i" -lt 200 ]; do
+    lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    [ "$lock_pid" = "$pid1" ] && [ -e "$state/.last-watcher-beat" ] && break
     sleep 0.1
     i=$((i + 1))
   done
-  [ "$live" -eq 1 ] || fail "expected exactly one live watcher, got $live"
-  i=0
-  while [ "$i" -lt 50 ] && ! grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null 2>&1; do
-    sleep 0.02
-    i=$((i + 1))
-  done
-  grep -h 'watcher: already running pid ' "$out1" "$out2" >/dev/null || fail "second watcher did not report existing singleton"
+  [ "$lock_pid" = "$pid1" ] || fail "first watcher did not publish singleton ownership within 20 seconds"
+  is_live_non_zombie "$pid1" || fail "first watcher exited after publishing singleton ownership"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 bash "$WATCH" > "$out2" &
+  pid2=$!
+  rc=0
+  wait_for_exit "$pid2" 100 || rc=$?
+  [ "$rc" -eq 0 ] || fail "second watcher did not exit within 10 seconds of the proven singleton"
+  is_live_non_zombie "$pid1" || fail "singleton watcher exited while rejecting a contender"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$pid1" ] \
+    || fail "second watcher replaced the proven live singleton lock"
+  grep 'watcher: already running pid ' "$out2" >/dev/null \
+    || fail "second watcher did not report the existing singleton"
   kill "$pid1" "$pid2" 2>/dev/null || true
   wait "$pid1" 2>/dev/null || true
   wait "$pid2" 2>/dev/null || true
-  pass "simultaneous watcher starts leave exactly one live process"
+  pass "a proven watcher singleton rejects a second launch without lock replacement"
 }
 
 test_stale_watch_lock_reclaimed() {
@@ -275,6 +278,85 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"
+}
+
+# Start a process that claims each given link lock, then SIGKILL it so every
+# claim is left behind with a dead owner - an acquirer interrupted mid-steal.
+leave_dead_link_locks() {  # <state> <lock>...
+  local state=$1 holder i last
+  shift
+  last=${!#}
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    shift
+    for lock do fm_lock_try_create "$lock" || exit 7; done
+    exec sleep 30
+  ' _ "$LIB" "$@" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$last/pid" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -s "$last/pid" ] || fail "dead link-lock owner did not publish its pid"
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+}
+
+test_lock_reclaims_dead_steal_owner_without_nested_markers() {
+  local dir state lockdir fakebin lnlog rc
+  dir=$(make_case lock-dead-steal-owner)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/fakebin"
+  lnlog="$dir/ln.log"
+  mkdir "$lockdir"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  leave_dead_link_locks "$state" "$lockdir.steal"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg do last=$arg; done
+printf '%s\n' "$last" >> "$FM_TEST_LN_LOG"
+exec /bin/ln "$@"
+SH
+  chmod +x "$fakebin/ln"
+  : > "$lnlog"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_LOG="$lnlog" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 8
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "acquirer could not reclaim dead steal owner (rc=$rc)"
+  ! grep -q '\.steal\.steal$' "$lnlog" \
+    || fail "reclaiming a dead steal owner created a nested steal marker: $(tr '\n' ' ' < "$lnlog")"
+  [ ! -e "$lockdir.steal" ] && [ ! -L "$lockdir.steal" ] \
+    || fail "dead steal mutex remained linked after successful reclaim"
+  pass "dead steal owner is reclaimed once without a nested steal marker"
+}
+
+test_lock_recovers_dead_nested_steal_chain() {
+  local dir state lockdir rc marker
+  dir=$(make_case lock-dead-nested-steal-chain)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  leave_dead_link_locks "$state" "$lockdir.steal" "$lockdir.steal.steal"
+
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 8
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 0 ] || fail "dead nested steal chain kept the lock unrecoverable (rc=$rc)"
+  for marker in "$lockdir.steal" "$lockdir.steal.steal"; do
+    [ ! -e "$marker" ] && [ ! -L "$marker" ] || fail "dead steal marker remained: $marker"
+  done
+  pass "dead nested steal chain from an interrupted reclaim is recovered"
 }
 
 test_lock_live_steal_mutex_is_not_reclaimed() {
@@ -1158,6 +1240,8 @@ test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
+test_lock_reclaims_dead_steal_owner_without_nested_markers
+test_lock_recovers_dead_nested_steal_chain
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace

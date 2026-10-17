@@ -58,6 +58,10 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# When a nested remote teardown keeps its supervision registry beneath the
+# secondmate home, successful home removal retires that in-home registry too;
+# teardown must not recreate or lock it afterward. The parent home's distinct
+# registry is still retired only after the remote teardown succeeds.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -694,6 +698,8 @@ fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 SUPERVISION_REGISTRY_READY=0
+SUPERVISION_REGISTRY_OWNED_BY_HOME=0
+SUPERVISION_REGISTRY_RETIRED_WITH_HOME=0
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -1220,6 +1226,16 @@ canonical_existing_dir() {
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
   ( cd "$target" && pwd -P )
+}
+
+# Return 0 when a supervision state directory is canonically contained by the
+# home that teardown will remove, 1 when it is outside, and 2 when either path
+# cannot be resolved while both are still expected to exist.
+supervision_registry_owned_by_home() {  # <state-dir> <home-dir>
+  local state_abs home_abs
+  state_abs=$(canonical_existing_dir "$1") || return 2
+  home_abs=$(canonical_existing_dir "$2") || return 2
+  [ "$state_abs" = "$home_abs" ] || path_is_ancestor_of "$home_abs" "$state_abs"
 }
 
 retry_wait_secs_is_valid() {
@@ -2539,6 +2555,15 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_stage_recover "$HOME_PATH" || exit 1
   handoff_wake_retire_validate || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+  if supervision_registry_owned_by_home "$STATE" "$HOME_PATH"; then
+    SUPERVISION_REGISTRY_OWNED_BY_HOME=1
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      echo "error: cannot resolve secondmate home and supervision state containment before teardown" >&2
+      exit 1
+    fi
+  fi
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     preflight_descendant_task_locks "$HOME_PATH" || exit 1
@@ -2815,7 +2840,9 @@ if [ "$KIND" = secondmate ]; then
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
-    :
+    if [ "$SUPERVISION_REGISTRY_OWNED_BY_HOME" -eq 1 ]; then
+      SUPERVISION_REGISTRY_RETIRED_WITH_HOME=1
+    fi
   else
     rc=$?
     handoff_wake_retire_stage_restore \
@@ -2835,7 +2862,9 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
-fm_supervision_registry_retire "$STATE" "$ID" || exit 1
+if [ "$SUPERVISION_REGISTRY_RETIRED_WITH_HOME" -ne 1 ]; then
+  fm_supervision_registry_retire "$STATE" "$ID" || exit 1
+fi
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

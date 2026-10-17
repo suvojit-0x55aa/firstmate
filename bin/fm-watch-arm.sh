@@ -142,7 +142,7 @@ cycle_log_append() {
   local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after size tmp raw i
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
-  beacon_age=$(fm_path_age "$BEAT")
+  beacon_age=$(fm_path_age "$BEAT") || beacon_age=unavailable
   lock_after=$(lock_snapshot)
 
   i=0
@@ -250,7 +250,7 @@ healthy_watcher() {
 
 report_attached() {
   local age
-  age=$(fm_path_age "$BEAT")
+  age=$(fm_path_age "$BEAT") || age=unavailable
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 

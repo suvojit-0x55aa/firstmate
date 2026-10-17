@@ -295,21 +295,21 @@ autoarm_owns_recovery() {
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     rewake)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$STATE/.claude-autoarm-epoch") || age=$EPOCH_FRESH
       if [ "$age" -lt "$EPOCH_FRESH" ]; then
         [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
         return 0
       fi
       ;;
     failed)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$STATE/.claude-autoarm-epoch") || age=$EPOCH_FRESH
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         [ "$BUDGET_INITIALIZED_FAILURE" -eq 1 ] && return 0
       fi
       ;;
     failed-suppressed)
-      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      age=$(fm_path_age "$STATE/.claude-autoarm-epoch") || age=$EPOCH_FRESH
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && budget_account_current_epoch; then
         :

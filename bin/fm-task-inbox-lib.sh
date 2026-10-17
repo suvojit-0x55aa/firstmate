@@ -320,7 +320,7 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last age
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
@@ -329,7 +329,8 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   fi
   base=${oldest##*/}
   grace=$(fm_task_inbox_grace_secs)
-  if [ "$(fm_path_age "$oldest")" -lt "$grace" ]; then
+  age=$(fm_path_age "$oldest") || age=$grace
+  if [ "$age" -lt "$grace" ]; then
     printf 'quiet'
     return 0
   fi

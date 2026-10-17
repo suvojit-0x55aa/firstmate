@@ -74,7 +74,7 @@ fm_path_mtime() {
 
 fm_path_age() {
   local path=$1 m
-  m=$(fm_path_mtime "$path") || { echo 999999; return; }
+  m=$(fm_path_mtime "$path") || return 1
   echo $(( $(date +%s) - m ))
 }
 
@@ -119,7 +119,7 @@ fm_watcher_healthy() {
   fm_pid_alive "$pid" || return 1
   fm_watcher_lock_matches_pid "$state" "$watch_path" "$pid" "$home" || return 1
   identity=$FM_WATCHER_MATCHED_IDENTITY
-  age=$(fm_path_age "$beat")
+  age=$(fm_path_age "$beat") || return 1
   [ "$age" -lt "$grace" ] || return 1
   # shellcheck disable=SC2034 # Read by callers after fm_watcher_healthy returns.
   FM_WATCHER_HEALTHY_PID=$pid
@@ -270,7 +270,7 @@ fm_watcher_supervision_verdict() {
   FM_WATCHER_VERDICT_OK=false
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
-  age=$(fm_path_age "$beat")
+  age=$(fm_path_age "$beat") || age=
   case "$age" in
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
@@ -363,8 +363,8 @@ fm_lock_abs_path() {
 
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
-  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
-  mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 2
+  mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null || return 2
 }
 
 fm_lock_prepare_owner() {
@@ -445,9 +445,14 @@ fm_lock_claim() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir rc
   FM_LOCK_OWNER_DIR=
-  ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
+  if ownerdir=$(fm_lock_owner_dir "$lockdir"); then
+    :
+  else
+    rc=$?
+    return "$rc"
+  fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
     return 1
@@ -687,7 +692,7 @@ _fm_recovery_marker_ack() {
 FM_RECOVERY_MARKER_ACKED_RESURFACE_SECS_DEFAULT=3600
 
 _fm_recovery_marker_arm_check() {
-  local marker=$1 lock line quarantine throttle throttle_secs
+  local marker=$1 lock line quarantine throttle throttle_secs throttle_age
   FM_RECOVERY_MARKER_ACTION='none'
   lock="${marker}.lock"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
@@ -749,7 +754,8 @@ _fm_recovery_marker_arm_check() {
     acked:*)
       throttle="${marker}.acked-resurfaced"
       throttle_secs="${FM_RECOVERY_MARKER_ACKED_RESURFACE_SECS:-$FM_RECOVERY_MARKER_ACKED_RESURFACE_SECS_DEFAULT}"
-      if [ -s "$FM_WAKE_QUEUE" ] && [ "$(fm_path_age "$throttle")" -ge "$throttle_secs" ]; then
+      throttle_age=$(fm_path_age "$throttle") || throttle_age=$throttle_secs
+      if [ -s "$FM_WAKE_QUEUE" ] && [ "$throttle_age" -ge "$throttle_secs" ]; then
         if ! _fm_recovery_marker_write_locked "$marker" downtime "" announced; then
           fm_lock_release "$lock"
           fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -909,6 +915,74 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# fm_lock_reap_dead_link <lockdir>
+# Remove a link lock whose owner is dead without a nested mutex. Renaming the
+# dead owner directory to this process's tombstone elects exactly one reaper,
+# so a competing reaper that verified the same dead owner cannot remove a
+# successor's link. A reaper that died after winning leaves its tombstone; a
+# later reaper re-elects itself by renaming that dead reaper's tombstone, and a
+# reaper whose own election a trap interrupted resumes it from its tombstone.
+fm_lock_reap_dead_link() {
+  local lockdir=$1 owner pid token tomb current
+  [ -L "$lockdir" ] || return 1
+  owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
+  fm_lock_current_pid || return 1
+  current=$FM_LOCK_CURRENT_PID
+  if [ -d "$owner" ]; then
+    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    fm_lock_recheck_stale_owner "$lockdir" "$owner" "$pid" || return 1
+    token=$owner
+  else
+    token=
+    for tomb in "$owner".reaped.*; do
+      [ -d "$tomb" ] || continue
+      if [ "${tomb##*.reaped.}" != "$current" ]; then
+        fm_pid_alive "${tomb##*.reaped.}" && return 1
+      fi
+      token=$tomb
+    done
+    [ -n "$token" ] || return 1
+  fi
+  tomb="$owner.reaped.$current"
+  if [ "$token" != "$tomb" ]; then
+    mv -- "$token" "$tomb" 2>/dev/null || return 1
+  fi
+  if fm_lock_points_to_owner "$lockdir" "$owner"; then
+    rm -f "$lockdir" 2>/dev/null || true
+  fi
+  fm_lock_discard_owner "$tomb"
+}
+
+# Acquire the short-lived steal mutex without recursively creating another
+# steal mutex. A dead holder is reaped once; a dead nested steal marker left by
+# the former recursive reclaim is reaped too so it cannot block the claim. A
+# hold abandoned by this very process (a trap interrupted its critical section)
+# is reclaimed like fm_lock_try_acquire's self-held branch. Status 2 means the
+# lock parent cannot be used, so callers must not retry it as contention.
+fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
+  local lockdir=$1 current rc
+  FM_LOCK_OWNER_DIR=
+  if fm_lock_try_create "$lockdir"; then
+    return 0
+  else
+    rc=$?
+    [ "$rc" -ne 2 ] || return 2
+  fi
+  fm_lock_current_pid || return 1
+  current=$FM_LOCK_CURRENT_PID
+  fm_lock_reap_dead_link "$lockdir.steal" || true
+  if [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$current" ]; then
+    fm_lock_remove_path "$lockdir" || true
+  elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    fm_lock_reap_dead_link "$lockdir" || return 1
+  fi
+  if fm_lock_try_create "$lockdir"; then
+    return 0
+  else
+    return $?
+  fi
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
@@ -917,6 +991,9 @@ fm_lock_try_acquire() {
 
   if fm_lock_try_create "$lockdir"; then
     return 0
+  else
+    rc=$?
+    [ "$rc" -ne 2 ] || return 2
   fi
 
   fm_lock_current_pid || return 1
@@ -933,6 +1010,9 @@ fm_lock_try_acquire() {
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
       return 0
+    else
+      rc=$?
+      [ "$rc" -ne 2 ] || return 2
     fi
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
@@ -947,10 +1027,13 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if fm_lock_try_acquire_steal_mutex "$steal"; then
+    :
+  else
+    rc=$?
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
-    return 1
+    return "$rc"
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
@@ -994,11 +1077,12 @@ fm_lock_try_acquire() {
     return 1
   fi
   fm_lock_remove_path "$lockdir" || true
-  rc=1
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
     FM_LOCK_RECOVERED_PID=$cur
+  else
+    rc=$?
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
@@ -1010,8 +1094,14 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while :; do
+    if fm_lock_try_acquire "$lockdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -ne 2 ] || return 2
     sleep 0.1
   done
 }
@@ -1221,14 +1311,14 @@ fm_autoarm_ledger_read() {  # <state-dir>
 # True while the CURRENT ledger claim is open and healthy - the defer predicate
 # both Stop participants use. Open means: outcome "arming", a live owner whose
 # mandatory recorded identity recomputes and matches its pid, and not stuck
-# (the contract comment above owns the stuck proof). fm_path_age reports an
-# absent beacon as ancient, which is exactly right: arming for a full grace
-# window without producing a first beat is the same hang. An identityless
+# (the contract comment above owns the stuck proof). An unavailable beacon is
+# treated as ancient here: arming for a full grace window without producing a
+# first beat is the same hang. An identityless
 # entry is never open: real generation claims always record identity, a legacy
 # build's entry gets its deference from its held role-carrying lock through
 # the legacy shim, and anything else must not defer.
 fm_autoarm_claim_open() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch current epoch_age beat_age
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
     ''|*[!0-9]*|0) grace=300 ;;
@@ -1240,8 +1330,9 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
   current=$(fm_pid_identity "$FM_AUTOARM_OWNER" 2>/dev/null) || return 1
   [ -n "$current" ] || return 1
   [ "$current" = "$FM_AUTOARM_IDENTITY" ] || return 1
-  if [ "$(fm_path_age "$epoch")" -ge "$grace" ] \
-    && [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ]; then
+  epoch_age=$(fm_path_age "$epoch") || epoch_age=$grace
+  beat_age=$(fm_path_age "$state/.last-watcher-beat") || beat_age=$grace
+  if [ "$epoch_age" -ge "$grace" ] && [ "$beat_age" -ge "$grace" ]; then
     return 1
   fi
   return 0
@@ -1373,7 +1464,7 @@ fm_autoarm_reset_owned() {  # <state-dir> <gen>
 #      and the watcher beacon are older than the guard grace (the same stuck
 #      proof as fm_autoarm_claim_open).
 fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} epoch lock role pid owner outcome recorded current epoch_age beat_age
   lock="$state/.claude-autoarm.lock"
   epoch="$state/.claude-autoarm-epoch"
   case "$grace" in
@@ -1397,8 +1488,10 @@ fm_autoarm_claim_abandoned() {  # <state-dir> [grace]
   case "$outcome" in
     '') return 1 ;;
     arming)
-      [ "$(fm_path_age "$epoch")" -ge "$grace" ] || return 1
-      [ "$(fm_path_age "$state/.last-watcher-beat")" -ge "$grace" ] || return 1
+      epoch_age=$(fm_path_age "$epoch") || epoch_age=$grace
+      beat_age=$(fm_path_age "$state/.last-watcher-beat") || beat_age=$grace
+      [ "$epoch_age" -ge "$grace" ] || return 1
+      [ "$beat_age" -ge "$grace" ] || return 1
       return 0
       ;;
   esac
@@ -1429,7 +1522,7 @@ fm_autoarm_release_abandoned() {  # <state-dir> [grace]
   steal="$lock.steal"
   epoch="$state/.claude-autoarm-epoch"
   fm_autoarm_claim_abandoned "$state" "$grace" || return 1
-  fm_lock_try_acquire "$steal" || return 1
+  fm_lock_try_acquire_steal_mutex "$steal" || return 1
   if ! fm_autoarm_claim_abandoned "$state" "$grace"; then
     fm_lock_release "$steal"
     return 1
