@@ -3201,11 +3201,13 @@ test_remote_endpoints_avoid_local_backend_probes() {
   local dir inventory_count
   dir=$(fixture remote-endpoint-isolation)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=remote:mate' 'kind=secondmate' \
     'remote_host=remote.invalid' 'home=/remote/firstmate' > "$dir/state/mate.meta"
   printf '%s\n' 'paused: waiting for the captain' > "$dir/state/mate.status"
   prime_status_seen "$dir/state" "$dir/state/mate.status"
   printf '%s\n' 'window=fleet:dead' 'kind=ship' 'backend=tmux' > "$dir/state/z-dead.meta"
+  register_active_supervision_tasks "$dir" mate z-dead
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='remote:mate fleet:dead' \
     FM_TEST_INVENTORY_LOG="$dir/inventories" FM_TEST_BACKEND_PROBE_LOG="$dir/backend-probes" \
     FM_TEST_CAPTURE_LOG="$dir/captures" FM_SIGNAL_GRACE=0 run_stop "$dir" 180
@@ -3954,11 +3956,12 @@ SH
   for id in $(seq 1 25); do
     [ "$(cat "$dir/state/.stale-fleet_dead-history-$id")" = authoritatively-dead ] \
       || fail "explicit death marker $id changed unexpectedly"
-    [ ! -e "$dir/state/.death-notified-fleet_dead-history-$id" ] \
-      || fail "legacy death receipt $id was not migrated"
+    grep -Fqx "$(printf 'fm-death-notified.v2\tspawn:spawn-%s\tdead-history-%s\ttmux\tfleet:dead-history-%s' \
+      "$id" "$id" "$id")" "$dir/state/.death-notified-fleet_dead-history-$id" \
+      || fail "dormant death receipt $id changed unexpectedly"
   done
-  [ "$(death_receipt_count "$dir")" -eq 25 ] \
-    || fail 'explicit death receipts did not migrate to exact owner identities'
+  [ "$(death_receipt_count "$dir")" -eq 0 ] \
+    || fail 'dormant death receipts entered active exact-owner storage'
   [ ! -e "$dir/capture-calls" ] || fail 'explicit death receipts captured an exact-dead endpoint'
   if [ -f "$dir/meta-read-log" ]; then
     meta_reads=$(wc -l < "$dir/meta-read-log")
@@ -3969,7 +3972,7 @@ SH
     || fail "exact-dead inventory performed $meta_reads metadata reads instead of linear work"
   assert_no_watcher "$dir"
   finish "$dir"
-  pass 'exact-dead inventory is linear and explicit receipts suppress duplicates'
+  pass 'dormant exact-dead history remains bounded and explicit receipts suppress duplicates'
 }
 
 test_absorbed_dead_endpoint_emits_new_death_notification() {
@@ -5119,11 +5122,11 @@ ARM
   arm=$(cat "$dir/arm-pid")
   watcher=$(cat "$dir/watcher-pid")
   [ -s "$dir/arm-direct-term" ] || fail 'adapter did not let its owned arm handle cancellation'
-  [ ! -e "$dir/watcher-group-term" ] || fail 'adapter broadcast its initial cancellation to the owned process group'
+  [ -s "$dir/watcher-group-term" ] || fail 'adapter did not cancel the complete owned process group'
   if kill -0 "$arm" 2>/dev/null; then fail 'adapter abandoned its identity-mismatched child group'; fi
   if kill -0 "$watcher" 2>/dev/null; then fail 'adapter abandoned the arm-owned watcher child'; fi
   finish "$dir"
-  pass 'identity mismatch fails closed and lets the arm retire its owned watcher in order'
+  pass 'identity mismatch fails closed and retires the complete owned watcher group'
 }
 
 # The persisted record is an observation, never sufficient authority by itself.

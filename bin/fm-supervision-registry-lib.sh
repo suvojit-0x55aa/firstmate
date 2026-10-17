@@ -1137,6 +1137,8 @@ fm_supervision_registry_bounded_migration_candidate() {
   local state=$1 task=$2 backend=$3 target=$4 home=$5 worktree=$6 owner_kind=$7 live_index=$8
   local record live_backend live_target live_identity1 live_identity2 live_identity3
   local resolved='' resolved_identity1=- resolved_identity2=- resolved_identity3=- count=0
+  local herdr_total=0 herdr_owned=0 herdr_exact=0
+  local exact_identity1=- exact_identity2=- exact_identity3=-
   FM_SUPERVISION_MIGRATION_TARGET=$target
   FM_SUPERVISION_MIGRATION_IDENTITY1=-
   FM_SUPERVISION_MIGRATION_IDENTITY2=-
@@ -1166,17 +1168,16 @@ fm_supervision_registry_bounded_migration_candidate() {
           count=$((count + 1))
           ;;
         herdr)
-          # A legacy task tab can retain its launcher shell beside the worker.
-          # Accept the recorded pane only when the live inventory also proves
-          # its exact session, workspace, and tab; the pane id alone is never
-          # sufficient ownership evidence.
-          if [ "$live_target" = "$target" ] \
-            && fm_supervision_registry_herdr_remap_owned \
-              "$state" "$task" "$live_target" "$live_identity1" "$live_identity2"; then
-            FM_SUPERVISION_MIGRATION_IDENTITY1=$live_identity1
-            FM_SUPERVISION_MIGRATION_IDENTITY2=$live_identity2
-            FM_SUPERVISION_MIGRATION_IDENTITY3=$live_identity3
-            return 0
+          herdr_total=$((herdr_total + 1))
+          if fm_supervision_registry_herdr_remap_owned \
+            "$state" "$task" "$live_target" "$live_identity1" "$live_identity2"; then
+            herdr_owned=$((herdr_owned + 1))
+            if [ "$live_target" = "$target" ]; then
+              herdr_exact=1
+              exact_identity1=$live_identity1
+              exact_identity2=$live_identity2
+              exact_identity3=$live_identity3
+            fi
           fi
           resolved=$live_target
           resolved_identity1=$live_identity1
@@ -1194,6 +1195,17 @@ fm_supervision_registry_bounded_migration_candidate() {
           ;;
       esac
     done < "$record"
+    # A legacy task tab can retain its launcher shell beside the worker.
+    # Accept the recorded pane only when every same-label candidate belongs to
+    # that exact recorded session/workspace/tab. A matching pane id beside a
+    # foreign duplicate tab remains ambiguous and fails closed.
+    if [ "$backend" = herdr ] && [ "$herdr_exact" -eq 1 ] \
+      && [ "$herdr_owned" -eq "$herdr_total" ]; then
+      FM_SUPERVISION_MIGRATION_IDENTITY1=$exact_identity1
+      FM_SUPERVISION_MIGRATION_IDENTITY2=$exact_identity2
+      FM_SUPERVISION_MIGRATION_IDENTITY3=$exact_identity3
+      return 0
+    fi
     case "$backend:$count" in
       cmux:1)
         FM_SUPERVISION_MIGRATION_TARGET=$resolved
