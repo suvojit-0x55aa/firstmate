@@ -3238,47 +3238,53 @@ EOF
 
 # fm_backend_herdr_list_live: recovery/orphan discovery. Lists every tab whose
 # label looks like a firstmate task window (fm-<id>) in <session>'s, THIS
-# HOME'S OWN workspace (fm_backend_herdr_workspace_label - never another
+# HOME'S OWN workspace set (fm_backend_herdr_workspace_label - never another
 # home's), by LABEL - never by trusting a stored pane id, since ids are not
 # guaranteed stable across every server lifecycle (see herdr-verification-p2.md
 # "ID stability"). A caller running as a given home (e.g. a secondmate
 # recovering its own in-flight work) naturally scopes to that home's own
 # workspace because FM_HOME already names it - no glue needed, unlike the
-# primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session/
-# workspace that does not exist yet simply lists nothing. One
+# primary-spawns-a-secondmate path in fm-spawn.sh. Read-only: a session or
+# matching workspace set that does not exist yet simply lists nothing. One
 # "<session>:<pane_id>\t<label>" line per live task tab.
 fm_backend_herdr_list_live() {  # <session>
-  local session=$1 wsid workspaces tabs panes tab_id label pane_id home_label
+  local session=$1 wsid workspace_ids workspaces tabs panes tab_id label pane_id home_label
   home_label=$(fm_backend_herdr_workspace_label)
   workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$workspaces" | jq -e '
     (.result.workspaces | type) == "array"
-    and all(.result.workspaces[]; (.workspace_id | type) == "string" and (.label | type) == "string")
+    and all(.result.workspaces[];
+      (.workspace_id | type) == "string"
+      and (.workspace_id | test("^[^[:space:]]+$"))
+      and (.label | type) == "string")
   ' >/dev/null 2>&1 || return 1
-  wsid=$(printf '%s' "$workspaces" | jq -r --arg want "$home_label" \
-    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null | head -1) || return 1
-  [ -n "$wsid" ] || return 0
-  case "$wsid" in *[$'\t\r\n']*) return 1 ;; esac
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$tabs" | jq -e '
-    (.result.tabs | type) == "array"
-    and all(.result.tabs[]; (.tab_id | type) == "string" and (.label | type) == "string")
-  ' >/dev/null 2>&1 || return 1
-  while IFS=$'\t' read -r tab_id label; do
-    [ -n "$tab_id" ] || continue
-    [ -n "$label" ] || return 1
-    case "$tab_id$label" in *[$'\r\n']*) return 1 ;; esac
-    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-    printf '%s' "$panes" | jq -e '
-      (.result.panes | type) == "array"
-      and all(.result.panes[]; (.tab_id | type) == "string" and (.pane_id | type) == "string")
+  workspace_ids=$(printf '%s' "$workspaces" | jq -r --arg want "$home_label" \
+    '.result.workspaces[]? | select(.label == $want) | .workspace_id' 2>/dev/null) || return 1
+  while IFS= read -r wsid; do
+    [ -n "$wsid" ] || continue
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
+    printf '%s' "$tabs" | jq -e '
+      (.result.tabs | type) == "array"
+      and all(.result.tabs[]; (.tab_id | type) == "string" and (.label | type) == "string")
     ' >/dev/null 2>&1 || return 1
-    pane_id=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-      '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1) || return 1
-    [ -n "$pane_id" ] || return 1
-    case "$pane_id" in *[$'\t\r\n']*) return 1 ;; esac
-    printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
-  done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+    while IFS=$'\t' read -r tab_id label; do
+      [ -n "$tab_id" ] || continue
+      [ -n "$label" ] || return 1
+      case "$tab_id$label" in *[$'\r\n']*) return 1 ;; esac
+      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
+      printf '%s' "$panes" | jq -e '
+        (.result.panes | type) == "array"
+        and all(.result.panes[]; (.tab_id | type) == "string" and (.pane_id | type) == "string")
+      ' >/dev/null 2>&1 || return 1
+      pane_id=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
+        '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1) || return 1
+      [ -n "$pane_id" ] || return 1
+      case "$pane_id" in *[$'\t\r\n']*) return 1 ;; esac
+      printf '%s:%s\t%s\n' "$session" "$pane_id" "$label"
+    done < <(printf '%s' "$tabs" | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null)
+  done <<EOF
+$workspace_ids
+EOF
 }
 
 # --- native event push: pane.agent_status_changed subscriber -----------------

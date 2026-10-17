@@ -61,7 +61,8 @@ Firstmate running outside Herdr entirely has no launcher workspace to inherit, s
 That path needs the home label to identify exactly one workspace: two workspaces sharing it are an unresolvable placement and refuse rather than adopting either.
 Avoid naming a personal workspace `firstmate` or `2ndmate-<id>` for that reason, and because the adapter cannot distinguish that label collision from its own container.
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically; rename it manually before expecting new tasks or recovery to use it.
-Recovery and list-live still scan the first workspace matching the home label, because they address panes they already recorded rather than choosing where new work goes.
+Recorded-endpoint recovery still scans the first workspace matching the home label because it addresses a pane already recorded rather than choosing where new work goes.
+Bounded list-live inventories every workspace matching the home label and refuses a partial inventory so duplicate labels cannot hide a live owner.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.

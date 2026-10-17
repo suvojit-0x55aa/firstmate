@@ -1863,6 +1863,78 @@ SH
   pass 'no-snapshot bootstrap refuses unavailable and invalid backend inventories'
 }
 
+test_herdr_duplicate_workspace_bootstrap_is_conservative() {
+  local mode dir target inventory rc
+  for mode in later-live partial; do
+    dir=$(fixture "herdr-duplicate-workspace-$mode")
+    mkdir -p "$dir/fakebin"
+    case "$mode" in
+      later-live) target=pane-live ;;
+      partial) target=pane-first ;;
+    esac
+    printf '%s\n' \
+      "window=fmtest:$target" "worktree=$dir/worktree" "project=$dir" \
+      'kind=ship' 'harness=codex' 'backend=herdr' 'spawn_gen=owner-1' \
+      > "$dir/state/live-owner.meta"
+    cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+workspace=
+previous=
+for argument in "$@"; do
+  if [ "$previous" = --workspace ]; then workspace=$argument; fi
+  previous=$argument
+done
+case "${1:-}:${2:-}" in
+  session:list)
+    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}'
+    ;;
+  workspace:list)
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"firstmate"},{"workspace_id":"w3","label":"personal"}]}}'
+    ;;
+  tab:list)
+    case "${FM_TEST_HERDR_DUPLICATE_MODE:-}:$workspace" in
+      later-live:w1) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+      later-live:w2) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-live","label":"fm-live-owner"}]}}' ;;
+      partial:w1) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-first","label":"fm-live-owner"}]}}' ;;
+      partial:w2) exit 71 ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
+    ;;
+  pane:list)
+    case "$workspace" in
+      w1) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-first","tab_id":"tab-first"}]}}' ;;
+      w2) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-live","tab_id":"tab-live"}]}}' ;;
+      *) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-first","agent_status":"working"},{"pane_id":"pane-live","agent_status":"working"}]}}' ;;
+    esac
+    ;;
+  *) exit 72 ;;
+esac
+SH
+    chmod 0700 "$dir/fakebin/herdr"
+    set +e
+    inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_DUPLICATE_MODE="$mode" bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-backend.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+        fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+      ' _ "$ROOT/bin")
+    rc=$?
+    set -e
+    if [ "$mode" = later-live ]; then
+      [ "$rc" -eq 0 ] || fail 'later Herdr duplicate workspace blocked bootstrap'
+      [ "$inventory" = "$dir/state/live-owner.meta" ] \
+        || fail "later Herdr duplicate workspace lost its live owner: $inventory"
+    else
+      [ "$rc" -ne 0 ] || fail 'partial Herdr duplicate workspace inventory published a snapshot'
+      [ ! -e "$dir/state/.active-supervision-generation" ] \
+        || fail 'partial Herdr duplicate workspace inventory became authoritative'
+    fi
+  done
+  pass 'Herdr duplicate workspaces are fully inventoried or rejected'
+}
+
 test_bounded_event_wait_uses_active_registry() {
   local dir rc
   dir=$(fixture bounded-event-wait-inventory)
@@ -5559,6 +5631,7 @@ test_fresh_checks_do_not_consume_cycle_budget
 test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_no_snapshot_bootstrap_discovers_live_ordinary_owners
 test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
+test_herdr_duplicate_workspace_bootstrap_is_conservative
 test_bounded_event_wait_uses_active_registry
 test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata
