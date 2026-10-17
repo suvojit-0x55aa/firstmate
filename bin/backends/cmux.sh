@@ -704,9 +704,41 @@ fm_backend_cmux_workspaces_inventory() {  # <window-id> <expected-count>
   printf '%s' "$wss" | jq -r '.workspaces | sort_by([.id, .title])[] | [.id, .title] | @tsv' 2>/dev/null
 }
 
+fm_backend_cmux_panes_inventory() {  # <workspace-id>
+  local panes
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$1" --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '
+    (.panes | type) == "array"
+    and all(.panes[];
+      . as $pane
+      | type == "object"
+      and ($pane.selected_surface_id == null
+        or (($pane.selected_surface_id | type) == "string"
+          and ($pane.selected_surface_id | length) > 0
+          and ($pane.selected_surface_id | test("[\\t\\r\\n]") | not)))
+      and ($pane.surface_ids == null
+        or (($pane.surface_ids | type) == "array"
+          and all($pane.surface_ids[]; type == "string" and length > 0
+            and (test("[\\t\\r\\n]") | not))
+          and ($pane.surface_ids | length) == ($pane.surface_ids | unique | length)))
+      and ($pane.selected_surface_id == null
+        or $pane.surface_ids == null
+        or ($pane.surface_ids | index($pane.selected_surface_id)) != null))
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$panes" | jq -c '
+    {
+      target_surface_id: ((.panes[0] // {}) | .selected_surface_id // (.surface_ids[0] // null)),
+      panes: ([.panes[] | {
+        selected_surface_id: (.selected_surface_id // null),
+        surface_ids: ((.surface_ids // []) | sort)
+      }] | sort_by([(.selected_surface_id // ""), (.surface_ids | join("\\u0000"))]))
+    }
+  ' 2>/dev/null
+}
+
 fm_backend_cmux_list_live() {
-  local windows windows_after wid expected wss panes wsid title sfid home prefix plain
-  local snapshot snapshot_after live row
+  local windows windows_after wid expected wss wsid title sfid home prefix plain
+  local pane_inventory snapshot snapshot_after live row
   home=$(fm_backend_cmux_home_label)
   prefix="fm-$home-"
   snapshot=
@@ -720,19 +752,19 @@ fm_backend_cmux_list_live() {
     while IFS=$'\t' read -r wsid title; do
       [ -n "$wsid" ] || continue
       row="$wid"$'\t'"$wsid"$'\t'"$title"
-      snapshot="${snapshot}${row}"$'\n'
-      case "$title" in "$prefix"*) ;; *) continue ;; esac
+      case "$title" in
+        "$prefix"*) ;;
+        *) snapshot="${snapshot}${row}"$'\n'; continue ;;
+      esac
       plain=${title#"$prefix"}
-      [ -n "$plain" ] || continue
-      panes=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
-      printf '%s' "$panes" | jq -e '
-        (.panes | type) == "array"
-        and all(.panes[]; (.selected_surface_id == null or (.selected_surface_id | type) == "string")
-          and (.surface_ids == null or (.surface_ids | type) == "array"))
-      ' >/dev/null 2>&1 || return 1
-      sfid=$(printf '%s' "$panes" | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null) || return 1
+      if [ -z "$plain" ]; then
+        snapshot="${snapshot}${row}"$'\n'
+        continue
+      fi
+      pane_inventory=$(fm_backend_cmux_panes_inventory "$wsid") || return 1
+      snapshot="${snapshot}${row}"$'\t'"$pane_inventory"$'\n'
+      sfid=$(printf '%s' "$pane_inventory" | jq -r '.target_surface_id // empty' 2>/dev/null) || return 1
       [ -n "$sfid" ] || return 1
-      case "$sfid" in *[$'\t\r\n']*) return 1 ;; esac
       live="${live}${wsid}:${sfid}"$'\t'"fm-${plain}"$'\n'
     done <<EOF
 $wss
@@ -750,6 +782,14 @@ EOF
     while IFS=$'\t' read -r wsid title; do
       [ -n "$wsid" ] || continue
       row="$wid"$'\t'"$wsid"$'\t'"$title"
+      case "$title" in
+        "$prefix"*) plain=${title#"$prefix"} ;;
+        *) plain= ;;
+      esac
+      if [ -n "$plain" ]; then
+        pane_inventory=$(fm_backend_cmux_panes_inventory "$wsid") || return 1
+        row="$row"$'\t'"$pane_inventory"
+      fi
       snapshot_after="${snapshot_after}${row}"$'\n'
     done <<EOF
 $wss

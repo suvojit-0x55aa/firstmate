@@ -1189,7 +1189,40 @@ SH
     status=$?
   fi
   [ "$status" -ne 0 ] || fail 'list_live accepted workspace identity churn at a stable count'
-  pass "fm_backend_cmux_list_live: requires a complete stable all-window inventory"
+
+  dir="$TMP_ROOT/list-live-surface-churn"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  cmux_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 5 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  cmux_panes_response "$dir" 6 "cccccccc-2222-2222-2222-222222222222"
+  fb=$(make_cmux_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail 'list_live accepted surface replacement at stable workspace identity'
+
+  dir="$TMP_ROOT/list-live-invalid-surface-ids"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  printf '%s\n' '{"panes":[{"selected_surface_id":"bbbbbbbb-1111-1111-1111-111111111111","surface_ids":[17]}]}' \
+    > "$dir/responses/3.out"
+  fb=$(make_cmux_fakebin "$dir")
+  if PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail 'list_live accepted a non-string surface_ids member'
+  pass "fm_backend_cmux_list_live: requires stable valid surface identity"
 }
 
 # --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------
