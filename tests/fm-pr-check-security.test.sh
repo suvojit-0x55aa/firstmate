@@ -2545,18 +2545,9 @@ SH
     || fail "watcher did not create the custom check snapshot"
   child_pid=$(cat "$child_pid_file")
   kill -TERM "$pid" 2>/dev/null || fail "could not signal watcher during custom check"
-  i=0
-  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
-    sleep 0.02
-    i=$((i + 1))
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    fail "signaled watcher did not exit promptly"
-  fi
   rc=0
-  wait "$pid" || rc=$?
+  wait_for_exit "$pid" 50 || rc=$?
+  [ "$rc" -ne 124 ] || fail "signaled watcher did not exit promptly"
   [ "$rc" -ne 0 ] || fail "signaled watcher exited successfully"
   ! kill -0 "$child_pid" 2>/dev/null || fail "signaled watcher left the custom check child running"
   ! find "$state" -maxdepth 1 -name '.fm-custom-check.*' -print | grep . >/dev/null \
@@ -2592,7 +2583,8 @@ SH
     if [ "$backend" = installed-timeout ]; then
       cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
-shift
+[ "$#" -ge 4 ] && [ "$1" = -k ] || exit 2
+shift 3
 exec "$@"
 SH
       chmod 0700 "$fakebin/timeout"
