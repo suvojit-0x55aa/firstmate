@@ -1133,7 +1133,11 @@ PY
       FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 FM_POLL=0.05 \
       TEST_ROOT="$dir" run_stop "$dir" 1
     TEST_ROOT=$original_root
-    wait_file "$dir/rc" 250
+    # finish-identity deliberately stacks the 22-second recurring probe with
+    # a 2-second cleanup identity probe.  A 25-second observation ceiling left
+    # less than one second for startup, cancellation, and reap on clean Linux.
+    # Let the explicit sub-40-second assertion below own the semantic bound.
+    wait_file "$dir/rc" 450
     elapsed=$(( $(monotonic_seconds) - started ))
     [ "$(cat "$dir/rc")" = 2 ] || fail "$mode reserve path allowed Stop to fail open"
     assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
