@@ -3241,10 +3241,11 @@ EOF
 # home, launcher, and presentation workspaces. Never trusts a stored pane id,
 # since ids are not guaranteed stable across every server lifecycle (see
 # herdr-verification-p2.md "ID stability"). Read-only: a session that does not
-# exist yet simply lists nothing. One "<session>:<pane_id>\t<label>" line per
-# live task pane.
+# exist yet simply lists nothing. The public wrapper emits one
+# "<session>:<pane_id>\t<label>" line per live task pane.
 fm_backend_herdr_list_live_details() {  # <session>
-  local session=$1 tabs tab_rows panes tab_id label pane_id pane_ids workspace
+  local session=$1 tabs tab_rows workspaces panes tab_id label pane_id pane_ids workspace
+  local workspace_label workspace_label_count
   tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e '
     (.result.tabs | type) == "array"
@@ -3260,6 +3261,16 @@ fm_backend_herdr_list_live_details() {  # <session>
   tab_rows=$(printf '%s' "$tabs" \
     | jq -r '.result.tabs[]? | select(.label | startswith("fm-")) | "\(.tab_id)\t\(.label)"' 2>/dev/null) || return 1
   [ -n "$tab_rows" ] || return 0
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$workspaces" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[];
+      (.workspace_id | type) == "string"
+      and (.workspace_id | test("^[^[:space:]]+$"))
+      and (.label | type) == "string"
+      and (.label | test("^[^\\t\\r\\n]+$")))
+    and (([.result.workspaces[].workspace_id] | length) == ([.result.workspaces[].workspace_id] | unique | length))
+  ' >/dev/null 2>&1 || return 1
   panes=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || return 1
   printf '%s' "$panes" | jq -e '
     (.result.panes | type) == "array"
@@ -3273,13 +3284,20 @@ fm_backend_herdr_list_live_details() {  # <session>
     workspace=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" \
       '.result.tabs[]? | select(.tab_id == $tab) | .workspace_id' 2>/dev/null) || return 1
     [ -n "$workspace" ] || return 1
+    workspace_label=$(printf '%s' "$workspaces" | jq -r --arg workspace "$workspace" \
+      '.result.workspaces[]? | select(.workspace_id == $workspace) | .label' 2>/dev/null) || return 1
+    [ -n "$workspace_label" ] || return 1
+    workspace_label_count=$(printf '%s' "$workspaces" | jq -r --arg label "$workspace_label" \
+      '[.result.workspaces[]? | select(.label == $label)] | length' 2>/dev/null) || return 1
+    case "$workspace_label_count" in ''|*[!0-9]*|0) return 1 ;; esac
     pane_ids=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
       '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null) || return 1
     [ -n "$pane_ids" ] || return 1
     while IFS= read -r pane_id; do
       [ -n "$pane_id" ] || return 1
-      printf '%s:%s\t%s\t%s\t%s\t%s\n' \
-        "$session" "$pane_id" "$label" "$workspace" "$tab_id" "$pane_id"
+      printf '%s:%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$session" "$pane_id" "$label" "$workspace" "$tab_id" "$pane_id" \
+        "$workspace_label" "$workspace_label_count"
     done <<EOF_PANES
 $pane_ids
 EOF_PANES
@@ -3289,9 +3307,9 @@ EOF_TABS
 }
 
 fm_backend_herdr_list_live() {  # <session>
-  local details target label workspace tab pane
+  local details target label workspace tab pane workspace_label workspace_label_count
   details=$(fm_backend_herdr_list_live_details "$1") || return 1
-  while IFS=$'\t' read -r target label workspace tab pane; do
+  while IFS=$'\t' read -r target label workspace tab pane workspace_label workspace_label_count; do
     [ -n "$target" ] && [ -n "$label" ] || continue
     printf '%s\t%s\n' "$target" "$label"
   done <<EOF

@@ -1882,6 +1882,9 @@ case "${1:-}:${2:-}" in
   session:list)
     printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}'
     ;;
+  workspace:list)
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"launcher"}]}}'
+    ;;
   tab:list)
     case "${FM_TEST_HERDR_DUPLICATE_MODE:-}" in
       later-live) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-shell","label":"shell","workspace_id":"w1"},{"tab_id":"tab-live","label":"fm-live-owner","workspace_id":"w2"}]}}' ;;
@@ -1943,7 +1946,7 @@ test_no_snapshot_bootstrap_covers_legacy_backend_layouts() {
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
   session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
-  workspace:list) exit 71 ;;
+  workspace:list) printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"launcher","label":"captain"},{"workspace_id":"presentation","label":"└ herdr-presentation · p:abcdefghijklmnopqrstuv"}]}}' ;;
   tab:list) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-launcher","label":"fm-herdr-launcher","workspace_id":"launcher"},{"tab_id":"tab-presentation","label":"fm-herdr-presentation","workspace_id":"presentation"}]}}' ;;
   pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-shell","tab_id":"tab-launcher","agent_status":"unknown"},{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher","agent_status":"working"},{"pane_id":"pane-presentation","tab_id":"tab-presentation","agent_status":"working"}]}}' ;;
   *) exit 72 ;;
@@ -1989,7 +1992,7 @@ SH
 }
 
 test_herdr_bootstrap_uses_bounded_bulk_inventory() {
-  local dir inventory rc
+  local dir inventory rc workspace_calls
   dir=$(fixture herdr-bounded-bulk-bootstrap)
   mkdir -p "$dir/fakebin"
   printf '%s\n' \
@@ -2001,9 +2004,8 @@ test_herdr_bootstrap_uses_bounded_bulk_inventory() {
 case "${1:-}:${2:-}" in
   session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
   workspace:list)
-    printf '%s\n' called > "$FM_TEST_HERDR_WORKSPACE_SCAN"
-    sleep 10
-    exit 71
+    printf '%s\n' "$*" >> "$FM_TEST_HERDR_WORKSPACE_SCAN"
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-live","label":"firstmate"}]}}'
     ;;
   tab:list) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-live","label":"fm-live-owner","workspace_id":"w-live"}]}}' ;;
   pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-live","tab_id":"tab-live","agent_status":"working"}]}}' ;;
@@ -2036,7 +2038,10 @@ SH
   [ "$rc" -eq 0 ] || fail "Herdr bulk bootstrap exceeded its bounded admission window: $rc"
   [ "$inventory" = "$dir/state/live-owner.meta" ] \
     || fail "Herdr bulk bootstrap lost its live owner: $inventory"
-  [ ! -e "$dir/workspace-scan" ] || fail 'Herdr bootstrap enumerated unrelated workspaces'
+  workspace_calls=$(wc -l < "$dir/workspace-scan" | tr -d '[:space:]')
+  [ "$workspace_calls" = 1 ] || fail "Herdr bootstrap took $workspace_calls workspace snapshots"
+  ! grep -F -- '--workspace' "$dir/workspace-scan" >/dev/null \
+    || fail 'Herdr bootstrap performed a per-workspace inventory read'
   pass 'Herdr bootstrap uses bounded session-wide bulk inventory'
 }
 
@@ -2075,6 +2080,14 @@ case "${1:-}:${2:-}" in
       n=$((n + 1))
     done
     printf '%s\n' ',{"name":"bootstrap-target","running":true}]}'
+    ;;
+  workspace:list)
+    if [ "$session" != bootstrap-target ]; then
+      printf '%s\n' "$session" >> "$FM_TEST_UNRELATED_SESSION_LOG"
+      sleep 10
+      exit 71
+    fi
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-live","label":"firstmate"}]}}'
     ;;
   tab:list)
     if [ "$session" != bootstrap-target ]; then
@@ -2171,7 +2184,8 @@ SH
 
 test_bounded_bootstrap_rebinds_unique_live_targets() {
   local mode dir title old_workspace old_surface new_workspace new_surface second_workspace second_surface
-  local inventory rc current_window current_workspace current_surface
+  local inventory rc current_window current_workspace current_surface live_workspace workspace_label
+  local expected_workspace canonical_home token
   old_workspace=aaaaaaaa-0000-0000-0000-000000000000
   old_surface=bbbbbbbb-1111-1111-1111-111111111111
   new_workspace=cccccccc-2222-2222-2222-222222222222
@@ -2263,9 +2277,27 @@ SH
   new_surface=new:pane
   second_workspace=second-workspace
   second_surface=second:pane
-  for mode in unique ambiguous; do
+  for mode in launcher home journal sibling captain ambiguous; do
     dir=$(fixture "bounded-bootstrap-herdr-remap-$mode")
     mkdir -p "$dir/fakebin"
+    live_workspace=$new_workspace
+    case "$mode" in
+      launcher) live_workspace=$old_workspace; workspace_label=captain ;;
+      home|ambiguous) workspace_label=firstmate ;;
+      journal)
+        token=abcdefghijklmnopqrstuv
+        workspace_label="└ live-owner · p:$token"
+        canonical_home=$(cd "$dir" && pwd -P)
+        printf '%s\n' \
+          'version=2' 'task_id=live-owner' "projection_id=$token" \
+          "home=$canonical_home" 'session=fmtest' "workspace_id=$old_workspace" \
+          'tab_id=old-tab' "pane_id=$old_surface" 'parent_workspace_id=parent-workspace' \
+          'parent_label=firstmate' "workspace_label=$workspace_label" 'task_label=fm-live-owner' \
+          > "$dir/state/live-owner.herdr-presentation"
+        ;;
+      sibling) workspace_label=2ndmate-sibling ;;
+      captain) workspace_label=captain ;;
+    esac
     printf '%s\n' \
       "window=fmtest:$old_surface" 'endpoint_task_id=live-owner' \
       "worktree=$dir/worktree" "project=$dir" 'kind=ship' 'harness=codex' \
@@ -2276,19 +2308,33 @@ SH
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
   session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
+  workspace:list)
+    if [ "$FM_TEST_HERDR_REMAP_MODE" = ambiguous ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"%s","label":"%s"},{"workspace_id":"%s","label":"%s"}]}}\n' \
+        "$FM_TEST_HERDR_WORKSPACE" "$FM_TEST_HERDR_WORKSPACE_LABEL" \
+        "$FM_TEST_HERDR_SECOND_WORKSPACE" "$FM_TEST_HERDR_WORKSPACE_LABEL"
+    else
+      printf '{"result":{"workspaces":[{"workspace_id":"%s","label":"%s"}]}}\n' \
+        "$FM_TEST_HERDR_WORKSPACE" "$FM_TEST_HERDR_WORKSPACE_LABEL"
+    fi
+    ;;
   tab:list)
-    if [ "$FM_TEST_HERDR_REMAP_MODE" = unique ]; then
-      printf '{"result":{"tabs":[{"tab_id":"new-tab","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
-        "$FM_TEST_HERDR_WORKSPACE"
+    if [ "$FM_TEST_HERDR_REMAP_MODE" != ambiguous ]; then
+      tab=new-tab
+      [ "$FM_TEST_HERDR_REMAP_MODE" != launcher ] || tab=old-tab
+      printf '{"result":{"tabs":[{"tab_id":"%s","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
+        "$tab" "$FM_TEST_HERDR_WORKSPACE"
     else
       printf '{"result":{"tabs":[{"tab_id":"new-tab","label":"fm-live-owner","workspace_id":"%s"},{"tab_id":"second-tab","label":"fm-live-owner","workspace_id":"%s"}]}}\n' \
         "$FM_TEST_HERDR_WORKSPACE" "$FM_TEST_HERDR_SECOND_WORKSPACE"
     fi
     ;;
   pane:list)
-    if [ "$FM_TEST_HERDR_REMAP_MODE" = unique ]; then
-      printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"new-tab","agent_status":"working"}]}}\n' \
-        "$FM_TEST_HERDR_PANE"
+    if [ "$FM_TEST_HERDR_REMAP_MODE" != ambiguous ]; then
+      tab=new-tab
+      [ "$FM_TEST_HERDR_REMAP_MODE" != launcher ] || tab=old-tab
+      printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"%s","agent_status":"working"}]}}\n' \
+        "$FM_TEST_HERDR_PANE" "$tab"
     else
       printf '{"result":{"panes":[{"pane_id":"%s","tab_id":"new-tab","agent_status":"working"},{"pane_id":"%s","tab_id":"second-tab","agent_status":"working"}]}}\n' \
         "$FM_TEST_HERDR_PANE" "$FM_TEST_HERDR_SECOND_PANE"
@@ -2301,7 +2347,8 @@ SH
     set +e
     inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
       FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_REMAP_MODE="$mode" \
-      FM_TEST_HERDR_WORKSPACE="$new_workspace" FM_TEST_HERDR_PANE="$new_surface" \
+      FM_TEST_HERDR_WORKSPACE="$live_workspace" FM_TEST_HERDR_WORKSPACE_LABEL="$workspace_label" \
+      FM_TEST_HERDR_PANE="$new_surface" \
       FM_TEST_HERDR_SECOND_WORKSPACE="$second_workspace" \
       FM_TEST_HERDR_SECOND_PANE="$second_surface" bash -c '
         . "$1/fm-wake-lib.sh"
@@ -2315,25 +2362,30 @@ SH
     current_window=$(sed -n 's/^window=//p' "$dir/state/live-owner.meta")
     current_workspace=$(sed -n 's/^herdr_workspace_id=//p' "$dir/state/live-owner.meta")
     current_surface=$(sed -n 's/^herdr_pane_id=//p' "$dir/state/live-owner.meta")
-    if [ "$mode" = unique ]; then
-      [ "$rc" -eq 0 ] || fail 'unique Herdr target remap blocked bounded bootstrap'
-      [ "$inventory" = "$dir/state/live-owner.meta" ] \
-        || fail "unique Herdr target remap lost its live owner: $inventory"
-      [ "$current_window" = "fmtest:$new_surface" ] \
-        && [ "$current_workspace" = "$new_workspace" ] \
-        && [ "$current_surface" = "$new_surface" ] \
-        || fail 'unique Herdr target remap did not normalize durable endpoint identity'
-    else
-      [ "$rc" -ne 0 ] || fail 'ambiguous Herdr target remaps published a snapshot'
-      [ ! -e "$dir/state/.active-supervision-generation" ] \
-        || fail 'ambiguous Herdr target remaps became authoritative'
-      [ "$current_window" = "fmtest:$old_surface" ] \
-        && [ "$current_workspace" = "$old_workspace" ] \
-        && [ "$current_surface" = "$old_surface" ] \
-        || fail 'ambiguous Herdr target remaps rewrote durable endpoint identity'
-    fi
+    case "$mode" in
+      launcher|home|journal)
+        [ "$rc" -eq 0 ] || fail "$mode-owned Herdr target remap blocked bounded bootstrap"
+        [ "$inventory" = "$dir/state/live-owner.meta" ] \
+          || fail "$mode-owned Herdr target remap lost its live owner: $inventory"
+        expected_workspace=$new_workspace
+        [ "$mode" != launcher ] || expected_workspace=$old_workspace
+        [ "$current_window" = "fmtest:$new_surface" ] \
+          && [ "$current_workspace" = "$expected_workspace" ] \
+          && [ "$current_surface" = "$new_surface" ] \
+          || fail "$mode-owned Herdr target remap did not normalize durable endpoint identity"
+        ;;
+      sibling|captain|ambiguous)
+        [ "$rc" -ne 0 ] || fail "$mode Herdr target remap published a snapshot"
+        [ ! -e "$dir/state/.active-supervision-generation" ] \
+          || fail "$mode Herdr target remap became authoritative"
+        [ "$current_window" = "fmtest:$old_surface" ] \
+          && [ "$current_workspace" = "$old_workspace" ] \
+          && [ "$current_surface" = "$old_surface" ] \
+          || fail "$mode Herdr target remap rewrote durable endpoint identity"
+        ;;
+    esac
   done
-  pass 'bounded bootstrap uniquely rebinds remapped live endpoints'
+  pass 'bounded bootstrap requires Herdr ownership provenance for remapped endpoints'
 }
 
 test_zellij_scoped_title_alias_bootstrap_is_conservative() {

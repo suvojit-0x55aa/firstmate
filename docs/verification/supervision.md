@@ -488,7 +488,7 @@ ok - 59 stale task records and one overdue check preserve live-only Stop admissi
 ok - paused remote endpoints stay isolated from local stale handling
 ok - remote inboxes remain owned by durable remote delivery
 ok - Herdr histories use bounded bulk snapshots without endpoint probes
-ok - bounded bootstrap uniquely rebinds remapped live endpoints
+ok - bounded bootstrap requires Herdr ownership provenance for remapped endpoints
 ok - small live endpoint inventories remain conservatively bounded
 ok - admission timeout terminates its probe process group
 ok - retained dead endpoints stay cheap and preserve notification

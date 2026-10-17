@@ -2806,14 +2806,15 @@ test_list_live_covers_every_workspace() {
   dir="$TMP_ROOT/list-live-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   home="$TMP_ROOT/list-live-scoped-home"; mkdir -p "$home"; printf 'bravo-b2\n' > "$home/.fm-secondmate-home"
   printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"fm-primarytask","workspace_id":"w1"},{"tab_id":"w2:t1","label":"fm-secondmatetask","workspace_id":"w2"},{"tab_id":"w3:t1","label":"shell","workspace_id":"w3"}]}}\n' > "$resp/1.out"
-  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w2:p1","tab_id":"w2:t1"},{"pane_id":"w3:p1","tab_id":"w3:t1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-bravo-b2"},{"workspace_id":"w3","label":"captain"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"},{"pane_id":"w2:p1","tab_id":"w2:t1"},{"pane_id":"w3:p1","tab_id":"w3:t1"}]}}\n' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
   [ "$out" = $'fmtest:w1:p1\tfm-primarytask\nfmtest:w2:p1\tfm-secondmatetask' ] \
     || fail "list_live should report tasks from every workspace, got '$out'"
-  assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list' \
-    "list_live should not enumerate workspaces"
+  [ "$(grep -c $'\x1f''workspace'$'\x1f''list' "$log")" = 1 ] \
+    || fail "list_live should take one session-wide workspace snapshot"
   assert_not_contains "$(cat "$log")" $'\x1f''--workspace' \
     "list_live should use session-wide snapshots"
   pass "fm_backend_herdr_list_live: discovers task tabs through bounded session-wide snapshots"

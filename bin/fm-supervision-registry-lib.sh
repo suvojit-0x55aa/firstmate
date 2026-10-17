@@ -1087,10 +1087,39 @@ fm_supervision_registry_secondmate_registered() {
   [ "$registered_home" = "$home" ]
 }
 
+fm_supervision_registry_herdr_remap_owned() {
+  local state=$1 task=$2 target=$3 workspace=$4 tab=$5 workspace_label=$6 workspace_label_count=$7
+  local meta session recorded_session recorded_workspace recorded_tab expected_home_label journal canonical_home
+  meta="$state/$task.meta"
+  session=${target%%:*}
+  [ "$session" != "$target" ] || return 1
+  recorded_session=$(fm_backend_meta_exact_value "$meta" herdr_session 2>/dev/null) || return 1
+  recorded_workspace=$(fm_backend_meta_exact_value "$meta" herdr_workspace_id 2>/dev/null) || return 1
+  recorded_tab=$(fm_backend_meta_exact_value "$meta" herdr_tab_id 2>/dev/null) || return 1
+  [ "$recorded_session" = "$session" ] || return 1
+  if [ "$recorded_workspace" = "$workspace" ] && [ "$recorded_tab" = "$tab" ]; then
+    return 0
+  fi
+  case "$workspace_label_count" in ''|*[!0-9]*|0) return 1 ;; esac
+  [ "$workspace_label_count" -eq 1 ] || return 1
+  fm_backend_source herdr || return 1
+  expected_home_label=$(fm_backend_herdr_workspace_label) || return 1
+  [ "$workspace_label" != "$expected_home_label" ] || return 0
+  journal=$(fm_backend_herdr_projection_journal_path "$state" "$task")
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$task" || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 1
+  canonical_home=$(fm_backend_herdr_projection_home_identity "$FM_HOME") || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$canonical_home" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$workspace_label" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "fm-$task" ]
+}
+
 fm_supervision_registry_bounded_migration_candidate() {
   local state=$1 task=$2 backend=$3 target=$4 home=$5 worktree=$6 owner_kind=$7 live_index=$8
-  local record live_backend live_target live_identity1 live_identity2 live_identity3
-  local resolved= resolved_identity1=- resolved_identity2=- resolved_identity3=- count=0
+  local record live_backend live_target live_identity1 live_identity2 live_identity3 live_identity4 live_identity5
+  local resolved= resolved_identity1=- resolved_identity2=- resolved_identity3=-
+  local resolved_identity4=- resolved_identity5=- count=0
   FM_SUPERVISION_MIGRATION_TARGET=$target
   FM_SUPERVISION_MIGRATION_IDENTITY1=-
   FM_SUPERVISION_MIGRATION_IDENTITY2=-
@@ -1102,7 +1131,7 @@ fm_supervision_registry_bounded_migration_candidate() {
   case "$owner_kind" in ship|scout) ;; *) return 1 ;; esac
   record="$live_index/$task"
   if [ -f "$record" ] && [ ! -L "$record" ]; then
-    while IFS="$(printf '\t')" read -r live_backend live_target live_identity1 live_identity2 live_identity3; do
+    while IFS="$(printf '\t')" read -r live_backend live_target live_identity1 live_identity2 live_identity3 live_identity4 live_identity5; do
       [ "$live_backend" = "$backend" ] || continue
       case "$backend" in
         cmux|herdr)
@@ -1117,6 +1146,8 @@ fm_supervision_registry_bounded_migration_candidate() {
           resolved_identity1=$live_identity1
           resolved_identity2=$live_identity2
           resolved_identity3=$live_identity3
+          resolved_identity4=$live_identity4
+          resolved_identity5=$live_identity5
           count=$((count + 1))
           ;;
         *)
@@ -1130,7 +1161,17 @@ fm_supervision_registry_bounded_migration_candidate() {
       esac
     done < "$record"
     case "$backend:$count" in
-      cmux:1|herdr:1)
+      cmux:1)
+        FM_SUPERVISION_MIGRATION_TARGET=$resolved
+        FM_SUPERVISION_MIGRATION_IDENTITY1=$resolved_identity1
+        FM_SUPERVISION_MIGRATION_IDENTITY2=$resolved_identity2
+        FM_SUPERVISION_MIGRATION_IDENTITY3=$resolved_identity3
+        return 0
+        ;;
+      herdr:1)
+        fm_supervision_registry_herdr_remap_owned \
+          "$state" "$task" "$resolved" "$resolved_identity1" "$resolved_identity2" \
+          "$resolved_identity4" "$resolved_identity5" || return 2
         FM_SUPERVISION_MIGRATION_TARGET=$resolved
         FM_SUPERVISION_MIGRATION_IDENTITY1=$resolved_identity1
         FM_SUPERVISION_MIGRATION_IDENTITY2=$resolved_identity2
@@ -1252,11 +1293,12 @@ fm_supervision_registry_zellij_live_task() {
 }
 
 fm_supervision_registry_bounded_live_index() {
-  local state=$1 index=$2 backend target label task live scopes rc identity1 identity2 identity3
+  local state=$1 index=$2 backend target label task live scopes rc
+  local identity1 identity2 identity3 identity4 identity5
   mkdir "$index" || return 1
   scopes=$(fm_supervision_registry_bounded_scopes "$state") || return 1
   live=$(fm_backend_list_live "$scopes") || return 1
-  while IFS="$(printf '\t')" read -r backend target label identity1 identity2 identity3; do
+  while IFS="$(printf '\t')" read -r backend target label identity1 identity2 identity3 identity4 identity5; do
     fm_backend_is_known "$backend" || continue
     case "$target" in ''|*[$'\t\r\n']*) continue ;; esac
     if [ "$backend" = zellij ]; then
@@ -1271,7 +1313,7 @@ fm_supervision_registry_bounded_live_index() {
     fi
     fm_supervision_registry_task_valid "$task" || continue
     fm_supervision_tsv_row \
-      "$backend" "$target" "$identity1" "$identity2" "$identity3" \
+      "$backend" "$target" "$identity1" "$identity2" "$identity3" "$identity4" "$identity5" \
       >> "$index/$task" || return 1
   done <<EOF
 $live
