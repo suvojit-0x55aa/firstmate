@@ -709,6 +709,7 @@ fm_backend_cmux_panes_inventory() {  # <workspace-id>
   panes=$(fm_backend_cmux_cli list-panes --workspace "$1" --json --id-format uuids 2>/dev/null) || return 1
   printf '%s' "$panes" | jq -e '
     (.panes | type) == "array"
+    and (.panes | length) == 1
     and all(.panes[];
       . as $pane
       | type == "object"
@@ -724,10 +725,13 @@ fm_backend_cmux_panes_inventory() {  # <workspace-id>
       and ($pane.selected_surface_id == null
         or $pane.surface_ids == null
         or ($pane.surface_ids | index($pane.selected_surface_id)) != null))
+    and ([.panes[0].selected_surface_id, ((.panes[0].surface_ids // [])[])]
+      | map(select(. != null)) | unique | length) == 1
   ' >/dev/null 2>&1 || return 1
   printf '%s' "$panes" | jq -c '
     {
-      target_surface_id: ((.panes[0] // {}) | .selected_surface_id // (.surface_ids[0] // null)),
+      target_surface_id: ([.panes[0].selected_surface_id, ((.panes[0].surface_ids // [])[])]
+        | map(select(. != null)) | unique | .[0]),
       panes: ([.panes[] | {
         selected_surface_id: (.selected_surface_id // null),
         surface_ids: ((.surface_ids // []) | sort)

@@ -1066,7 +1066,7 @@ test_kill_recovers_stale_target_by_label() {
 # --- list_live: label-based orphan discovery ---------------------------------
 
 test_list_live_filters_by_title_prefix() {
-  local dir fb out title other_title other_root status
+  local dir fb out title other_title other_root status mode pane_json
   dir="$TMP_ROOT/list-live"; mkdir -p "$dir/responses"
   other_root="$dir/other-root"; mkdir -p "$other_root"
   title=$(cmux_expected_scoped_title fm-task1)
@@ -1222,7 +1222,52 @@ SH
     status=$?
   fi
   [ "$status" -ne 0 ] || fail 'list_live accepted a non-string surface_ids member'
-  pass "fm_backend_cmux_list_live: requires stable valid surface identity"
+
+  for mode in multiple-panes multiple-surfaces duplicate-selected inconsistent-selected; do
+    dir="$TMP_ROOT/list-live-$mode"; mkdir -p "$dir/responses"
+    cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+    cmux_workspace_list_response "$dir" 2 \
+      "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+    case "$mode" in
+      multiple-panes)
+        pane_json='{"panes":[{"selected_surface_id":"bbbbbbbb-1111-1111-1111-111111111111","surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]},{"selected_surface_id":"cccccccc-2222-2222-2222-222222222222","surface_ids":["cccccccc-2222-2222-2222-222222222222"]}]}'
+        ;;
+      multiple-surfaces)
+        pane_json='{"panes":[{"selected_surface_id":"bbbbbbbb-1111-1111-1111-111111111111","surface_ids":["bbbbbbbb-1111-1111-1111-111111111111","cccccccc-2222-2222-2222-222222222222"]}]}'
+        ;;
+      duplicate-selected)
+        pane_json='{"panes":[{"selected_surface_id":"bbbbbbbb-1111-1111-1111-111111111111","surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]},{"selected_surface_id":"bbbbbbbb-1111-1111-1111-111111111111","surface_ids":["bbbbbbbb-1111-1111-1111-111111111111"]}]}'
+        ;;
+      inconsistent-selected)
+        pane_json='{"panes":[{"selected_surface_id":"bbbbbbbb-1111-1111-1111-111111111111","surface_ids":["cccccccc-2222-2222-2222-222222222222"]}]}'
+        ;;
+    esac
+    printf '%s\n' "$pane_json" > "$dir/responses/3.out"
+    fb=$(make_cmux_fakebin "$dir")
+    if PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+      bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT" >/dev/null; then
+      status=0
+    else
+      status=$?
+    fi
+    [ "$status" -ne 0 ] || fail "list_live accepted ambiguous pane layout: $mode"
+  done
+
+  dir="$TMP_ROOT/list-live-single-surface"; mkdir -p "$dir/responses"
+  cmux_windows_response "$dir" 1 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 2 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  cmux_panes_response "$dir" 3 "bbbbbbbb-1111-1111-1111-111111111111"
+  cmux_windows_response "$dir" 4 "e1111111-0000-0000-0000-000000000000" 1
+  cmux_workspace_list_response "$dir" 5 \
+    "aaaaaaaa-0000-0000-0000-000000000000" "$title"
+  cmux_panes_response "$dir" 6 "bbbbbbbb-1111-1111-1111-111111111111"
+  fb=$(make_cmux_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_list_live' "$ROOT")
+  [ "$out" = $'aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111\tfm-task1' ] \
+    || fail "list_live rejected the valid single-surface layout: $out"
+  pass "fm_backend_cmux_list_live: requires one stable unambiguous surface"
 }
 
 # --- fm-spawn.sh: --secondmate refuses backend=cmux --------------------------

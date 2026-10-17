@@ -79,7 +79,7 @@ cmux_surface_id=<surface-uuid>
 ```
 
 The UUID pair is the active endpoint authority within one app run.
-Workspace UUIDs are not stable across an app relaunch, so bounded-bootstrap recovery takes two count-validated all-window inventories, refuses publication if window, workspace, pane, or selected-surface identity changes, requires a unique scoped-title match, and atomically refreshes the durable endpoint identity before publishing bounded supervision.
+Workspace UUIDs are not stable across an app relaunch, so bounded-bootstrap recovery takes two count-validated all-window inventories, requires a unique scoped-title match with exactly one unambiguous surface, refuses publication if window, workspace, pane, or selected-surface identity changes, and atomically refreshes the durable endpoint identity before publishing bounded supervision.
 
 ## Current operation and safety
 
