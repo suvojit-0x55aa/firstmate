@@ -2523,6 +2523,10 @@ SH
   chmod 0700 "$dir/fakebin/timeout"
   FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
     || fail "could not register signal cleanup custom check"
+  # This case verifies signal cleanup after a due custom check starts. Give it
+  # the valid empty live-inventory snapshot an established home already has so
+  # unrelated first-use endpoint migration cannot delay the child assertion.
+  printf 'fm-active-supervision.v6\tg1\n' > "$state/.active-supervision-generation"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0 FM_CHECK_INTERVAL=0 \
     FM_SIGNAL_GRACE=0 FM_TEST_CUSTOM_CHILD_PID="$child_pid_file" \

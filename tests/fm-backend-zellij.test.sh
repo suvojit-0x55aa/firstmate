@@ -848,6 +848,8 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "kind=scout" \
     "decisions_reviewed=1" \
     "decision_keys="
+  printf 'fm-active-supervision.v6\tg1\nentry\tzghost\t-\tactive\n' \
+    > "$state/.active-supervision-generation"
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
@@ -892,6 +894,10 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
     "worktree=$dir/missing-child-worktree" \
     "project=$project" \
     "kind=scout"
+  printf 'fm-active-supervision.v6\tg1\nentry\tsmz\t-\tactive\n' \
+    > "$state/.active-supervision-generation"
+  printf 'fm-active-supervision.v6\tg1\nentry\tchildz\t-\tactive\n' \
+    > "$home/state/.active-supervision-generation"
   child_title=$(zellij_expected_scoped_title fm-childz "$home" "$home")
   zellij_pane_response "$dir" 1 7 4
   zellij_tab_response "$dir" 2 4 "$child_title"

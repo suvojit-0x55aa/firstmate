@@ -994,6 +994,10 @@ test_teardown_conformance_old_vs_new() {
   fm_write_meta "$state_new/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "decisions_reviewed=1" "decision_keys="
+  printf 'fm-active-supervision.v6\tg1\nentry\t%s\t-\tactive\n' "$id" \
+    > "$state_old/.active-supervision-generation"
+  printf 'fm-active-supervision.v6\tg1\nentry\t%s\t-\tactive\n' "$id" \
+    > "$state_new/.active-supervision-generation"
   touch "$state_old/.last-watcher-beat" "$state_new/.last-watcher-beat"
 
   log_old="$TMP_ROOT/teardown-old.log"; log_new="$TMP_ROOT/teardown-new.log"

@@ -65,7 +65,13 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"},"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
       "$wsid" "$label" "$wsid:t$dn" "$wsid:p$dn"
     ;;
-  "tab list") jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}' ;;
+  "tab list")
+    if [ -n "$ws" ]; then
+      jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}'
+    else
+      jq_state '{result:{tabs:.tabs}}'
+    fi
+    ;;
   "tab create")
     n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
     jq_state --arg w "$ws" --arg wlabel "$label" --arg cwd "$cwd" --arg tabid "$tabid" --arg paneid "$paneid" \
@@ -75,14 +81,23 @@ case "${1:-} ${2:-}" in
     ;;
   "tab close")
     jq_state --arg t "${3:-}" '.tabs |= [.[]|select(.tab_id != $t)]' | save ;;
+  "tab rename")
+    jq_state --arg t "${3:-}" --arg label "${4:-}" \
+      '(.tabs[]|select(.tab_id == $t)|.label) = $label' | save ;;
   "pane list")
-    jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}' ;;
+    if [ -n "$ws" ]; then
+      jq_state --arg w "$ws" '{result:{panes:[.tabs[]|select(.workspace_id==$w)|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    else
+      jq_state '{result:{panes:[.tabs[]|{pane_id:.pane_id, tab_id:.tab_id}]}}'
+    fi
+    ;;
   "pane get")
     pane=${3:-}
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      jq_state --arg p "$pane" \
+        '{result:{pane:(.tabs[]|select(.pane_id==$p)|{pane_id:.pane_id, tab_id:.tab_id, workspace_id:.workspace_id})}}'
     fi
     ;;
   "pane close")

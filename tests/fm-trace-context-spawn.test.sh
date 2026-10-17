@@ -33,7 +33,17 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
-    [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
+    if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
+      case "$*" in
+        *'#{window_id}'*'#{session_name}:#{window_name}'*'#{pane_current_path}'*)
+          printf '@100\tfirstmate:%s\t%s\n' "$FM_FAKE_DUPLICATE_WINDOW" "${FM_FAKE_PANE_PATH:-}"
+          ;;
+        *'#{session_name}:#{window_name}'*'#{window_name}'*)
+          printf 'firstmate:%s\t%s\n' "$FM_FAKE_DUPLICATE_WINDOW" "$FM_FAKE_DUPLICATE_WINDOW"
+          ;;
+        *) printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW" ;;
+      esac
+    fi
     exit 0
     ;;
   new-window)

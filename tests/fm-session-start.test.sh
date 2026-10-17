@@ -467,6 +467,8 @@ case "${1:-} ${2:-}" in
     : > "$spawned"
     printf '%s\n' '{"result":{"tab":{"tab_id":"t-new"},"root_pane":{"pane_id":"p-new"}}}'
     ;;
+  "tab rename")
+    ;;
   "pane list")
     if [ -e "$spawned" ]; then
       printf '%s\n' '{"result":{"panes":[{"pane_id":"p-new","tab_id":"t-new"}]}}'
@@ -592,6 +594,8 @@ EOF
     printf 'harness=pi\n'
     printf 'home=%s\n' "$mate"
   } > "$home/state/$id.meta"
+  printf 'fm-active-supervision.v6\tg1\nentry\t%s\t-\tactive\n' "$id" \
+    > "$home/state/.active-supervision-generation"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
@@ -639,6 +643,8 @@ EOF
     printf 'herdr_tab_id=t-old\n'
     printf 'herdr_pane_id=p-old\n'
   } > "$home/state/$id.meta"
+  printf 'fm-active-supervision.v6\tg1\nentry\t%s\t-\tactive\n' "$id" \
+    > "$home/state/.active-supervision-generation"
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
