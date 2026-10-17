@@ -755,6 +755,7 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_GEN=
 SPAWN_REGISTRY_RESERVED=0
+SPAWN_RESERVATION_PHASE=reserved
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -807,7 +808,7 @@ spawn_plan_endpoint() {
     printf 'window=%s\n' "$target"
     printf 'endpoint_task_id=%s\n' "$ID"
     printf 'endpoint_state=planned\n'
-    printf 'worktree=%s\n' "${WT:-$PROJ_ABS}"
+    printf 'worktree=-\n'
     printf 'project=%s\n' "$PROJ_ABS"
     printf 'harness=%s\nkind=%s\n' "$HARNESS" "$KIND"
     printf 'backend=%s\nrecovery_detail=%s\nspawn_gen=%s\n' \
@@ -816,9 +817,11 @@ spawn_plan_endpoint() {
   if ! fm_supervision_registry_plan_reservation \
       "$STATE" "$ID" "$SPAWN_GEN" "$backend" "$target" "$detail" "$plan"; then
     rm -f -- "$plan"
+    echo "error: backend endpoint for $ID already exists or is ambiguous; refusing duplicate launch" >&2
     return 1
   fi
   rm -f -- "$plan"
+  SPAWN_RESERVATION_PHASE=planned
 }
 
 spawn_mark_orca_worktree_only() {
@@ -844,6 +847,7 @@ spawn_mark_orca_worktree_only() {
     return 1
   fi
   rm -f -- "$staged"
+  SPAWN_RESERVATION_PHASE=worktree-only
 }
 
 spawn_abort_cleanup() {
@@ -927,7 +931,8 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ]; then
+  if [ "$SPAWN_REGISTRY_RESERVED" = 1 ] && [ -n "$SPAWN_GEN" ] \
+     && [ "$SPAWN_RESERVATION_PHASE" = reserved ]; then
     SPAWN_REGISTRY_RESERVED=0
     if [ "$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)" != "$SPAWN_GEN" ]; then
       fm_supervision_registry_cancel_reservation "$STATE" "$ID" "$SPAWN_GEN" any || true
@@ -2363,7 +2368,12 @@ if [ "$RELAUNCH" -ne 1 ]; then
   {
     echo "window=$SPAWN_PROVISIONAL_WINDOW"
     echo "endpoint_task_id=$ID"
-    echo "worktree=${WT:-$PROJ_ABS}"
+    if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+      echo "endpoint_state=endpoint-only"
+      echo "worktree=-"
+    else
+      echo "worktree=${WT:-$PROJ_ABS}"
+    fi
     echo "project=$PROJ_ABS"
     echo "harness=$HARNESS"
     echo "kind=$KIND"
@@ -2396,19 +2406,28 @@ if [ "$RELAUNCH" -ne 1 ]; then
     fi
   } > "$SPAWN_PROVISIONAL_META"
   SPAWN_RESERVATION_MARKED=1
+  SPAWN_PROVISIONAL_PHASE=created
+  if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+    SPAWN_PROVISIONAL_PHASE=endpoint-only
+  fi
   if ! fm_supervision_registry_mark_reservation \
-      "$STATE" "$ID" "$SPAWN_GEN" created "$BACKEND" \
+      "$STATE" "$ID" "$SPAWN_GEN" "$SPAWN_PROVISIONAL_PHASE" "$BACKEND" \
       "$SPAWN_RESERVATION_TARGET" "$SPAWN_RESERVATION_DETAIL" "$SPAWN_PROVISIONAL_META"; then
     SPAWN_RESERVATION_MARKED=0
   fi
-  if ! spawn_publish_meta_file "$SPAWN_PROVISIONAL_META" "$STATE/$ID.meta"; then
+  if [ "$SPAWN_PROVISIONAL_PHASE" = created ]; then
+    if ! spawn_publish_meta_file "$SPAWN_PROVISIONAL_META" "$STATE/$ID.meta"; then
+      rm -f -- "$SPAWN_PROVISIONAL_META"
+      exit 1
+    fi
+  else
     rm -f -- "$SPAWN_PROVISIONAL_META"
-    exit 1
   fi
   if [ "$SPAWN_RESERVATION_MARKED" -ne 1 ]; then
     echo "error: $ID exact supervision endpoint could not be published" >&2
     exit 1
   fi
+  SPAWN_RESERVATION_PHASE=$SPAWN_PROVISIONAL_PHASE
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \

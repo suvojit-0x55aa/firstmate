@@ -3967,6 +3967,11 @@ test_registry_receipt_recovery_is_owner_addressed() {
   local dir id target key targets='' inventory
   dir=$(fixture owner-addressed-registry-receipts)
   install_endpoint_inventory_tmux "$dir"
+  targets=' fleet:shared-owner'
+  printf '%s\n' 'window=fleet:shared-owner' 'spawn_gen=shared-a-gen' > "$dir/state/shared-a.meta"
+  printf '%s\n' 'window=fleet:shared-owner' 'spawn_gen=shared-b-gen' > "$dir/state/shared-b.meta"
+  write_exact_death_receipt "$dir/state" shared-a fleet:shared-owner tmux shared-a-gen \
+    || fail 'could not publish the shared endpoint receipt'
   for id in $(seq 1 80); do
     target="fleet:retained-$id"
     targets="$targets $target"
@@ -4004,8 +4009,9 @@ SH
       fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
       fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
     ' _ "$ROOT/bin" > "$dir/recovered" || fail 'large surfaced-death registry recovery failed'
-  inventory=$(cat "$dir/recovered")
-  [ -z "$inventory" ] || fail 'surfaced dead history entered active supervision'
+  inventory=$(sed 's/.*\///; s/\.meta$//' "$dir/recovered")
+  [ "$inventory" = shared-b ] \
+    || fail "an owner receipt suppressed a distinct owner on the same endpoint: $inventory"
   [ ! -e "$dir/receipt-tree-scanned" ] || fail 'registry recovery scanned the receipt tree'
   pass 'registry recovery resolves exact and legacy receipts per owner'
 }
@@ -4595,6 +4601,7 @@ test_planned_reservations_converge_after_backend_creation_crashes() {
     . "$1/fm-wake-lib.sh"
     . "$1/fm-backend.sh"
     . "$1/fm-supervision-registry-lib.sh"
+    fm_backend_recover_planned() { printf "missing\t-\t-\t-\t-\t-\t-\t-\t-\n"; }
     fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
     while IFS="|" read -r backend task target detail; do
       staged="$FM_STATE_OVERRIDE/.$task.plan"
@@ -4636,19 +4643,35 @@ EOF
         *) return 1 ;;
       esac
     }
+    fm_backend_agent_state_batch() {
+      while IFS="$(printf "\t")" read -r backend target route home; do
+        printf "%s\t%s\tdead\t%s\t%s\n" "$backend" "$target" "$route" "$home"
+      done
+    }
+    fm_backend_reservation_identity() { printf "match\t/planned/planned-tmux\n"; }
+    fm_backend_retire_reservation() { printf "tmux:%s\n" "$2" >> "$FM_STATE_OVERRIDE/retired-plans"; }
+    fm_backend_kill() { printf "%s:%s\n" "$1" "$2" >> "$FM_STATE_OVERRIDE/retired-plans"; }
     fm_supervision_registry_generation "$FM_STATE_OVERRIDE" >/dev/null
   ' _ "$ROOT/bin" || fail 'planned reservation reconciliation failed'
-  for backend in tmux herdr zellij cmux orca; do
+  for backend in tmux herdr zellij cmux; do
     task="planned-$backend"
-    grep -F "$(printf 'entry\t%s\t%s-gen\tpending' "$task" "$task")" \
+    [ ! -e "$dir/state/$task.meta" ] \
+      || fail "$backend creation recovery published endpoint-only metadata"
+    ! grep -F "$(printf '\t%s\t' "$task")" \
       "$dir/state/.active-supervision-generation" >/dev/null \
-      || fail "$backend creation plan did not publish recovered ownership"
-    [ -f "$dir/state/$task.meta" ] || fail "$backend recovery did not publish metadata"
-    FM_STATE_OVERRIDE="$dir/state" bash -c '
-      . "$1/fm-backend.sh"
-      fm_backend_validate_task_endpoint "$FM_STATE_OVERRIDE/$2.meta" "$2"
-    ' _ "$ROOT/bin" "$task" || fail "$backend planned recovery published invalid metadata"
+      || fail "$backend endpoint-only recovery retained a retired endpoint"
   done
+  grep -F 'tmux:@41' "$dir/state/retired-plans" >/dev/null \
+    || fail 'tmux endpoint-only recovery did not retire its stable endpoint'
+  grep -F 'herdr:default:pane-2' "$dir/state/retired-plans" >/dev/null \
+    && grep -F 'zellij:zellij-main:8' "$dir/state/retired-plans" >/dev/null \
+    && grep -F 'cmux:workspace-3:surface-3' "$dir/state/retired-plans" >/dev/null \
+    || fail 'non-tmux endpoint-only recovery did not retire exact endpoints'
+  grep -F "$(printf 'entry\tplanned-orca\tplanned-orca-gen\tpending')" \
+    "$dir/state/.active-supervision-generation" >/dev/null \
+    || fail 'Orca worktree recovery did not publish lifecycle ownership'
+  [ -f "$dir/state/planned-orca.meta" ] \
+    || fail 'Orca recovery did not publish its real worktree metadata'
   ! grep -F "$(printf '\tplanned-missing\t')" "$dir/state/.active-supervision-generation" >/dev/null \
     || fail 'authoritatively missing creation plan retained ownership'
   grep -F "$(printf 'reservation\tplanned-unknown\tplanned-unknown-gen\t')" \
@@ -4665,6 +4688,34 @@ EOF
   ' _ "$ROOT/bin") || fail 'Orca worktree-only metadata facts were unreadable'
   case "$facts" in absent$'\t'orca$'\t-'$'\t'*) ;; *) fail 'Orca worktree-only facts exposed a fabricated endpoint' ;; esac
   pass 'backend creation plans converge through authoritative discovery'
+}
+
+test_planned_reservation_rejects_preexisting_endpoint() {
+  local dir
+  dir=$(fixture planned-reservation-preexisting)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+    fm_supervision_registry_reserve "$FM_STATE_OVERRIDE" collision collision-gen || exit 1
+    printf "%s\n" "window=fleet:fm-collision" "endpoint_task_id=collision" \
+      "endpoint_state=planned" "worktree=-" "project=/project/collision" \
+      "harness=codex" "kind=ship" "backend=tmux" \
+      "recovery_detail=fleet:fm-collision" "spawn_gen=collision-gen" \
+      > "$FM_STATE_OVERRIDE/.collision.plan" || exit 1
+    fm_backend_recover_planned() {
+      printf "found\tcreated\t@99\tfleet:fm-collision\t/project/collision\t-\t-\t-\t-\n"
+    }
+    if fm_supervision_registry_plan_reservation "$FM_STATE_OVERRIDE" collision collision-gen \
+        tmux fleet:fm-collision fleet:fm-collision "$FM_STATE_OVERRIDE/.collision.plan"; then
+      exit 2
+    fi
+  ' _ "$ROOT/bin" || fail 'pre-existing endpoint plan fixture failed'
+  grep -F "$(printf 'reservation\tcollision\tcollision-gen')" \
+    "$dir/state/.active-supervision-generation" | grep -F "$(printf '\treserved\t-\t-\t-')" >/dev/null \
+    || fail 'pre-existing endpoint was bound into a planned transaction'
+  pass 'planned reservations reject pre-existing predictable endpoints'
 }
 
 test_planned_backend_discovery_uses_live_identity() {
@@ -5202,6 +5253,7 @@ test_registry_reservation_recovers_spawn_crash_windows
 test_remote_recovery_protocol_reports_exact_endpoint
 test_transaction_journals_recover_every_backend
 test_planned_reservations_converge_after_backend_creation_crashes
+test_planned_reservation_rejects_preexisting_endpoint
 test_planned_backend_discovery_uses_live_identity
 test_registered_check_kills_term_ignoring_process_group
 test_registered_check_preserves_grace_for_orphan_descendant
