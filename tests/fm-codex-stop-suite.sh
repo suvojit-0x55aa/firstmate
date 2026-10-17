@@ -3233,9 +3233,11 @@ test_remote_inbox_stays_owned_by_remote_delivery() {
   local dir rec
   dir=$(fixture remote-inbox-isolation)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=remote:inbox' 'kind=secondmate' \
     'remote_host=remote.invalid' 'home=/remote/firstmate' > "$dir/state/mate.meta"
   printf '%s\n' 'window=fleet:dead' 'kind=ship' 'backend=tmux' > "$dir/state/z-dead.meta"
+  register_active_supervision_tasks "$dir" mate z-dead
   rec=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-task-inbox-lib.sh"
     fm_task_inbox_write "$2" mate "respond through the remote delivery path"
@@ -3979,8 +3981,10 @@ test_absorbed_dead_endpoint_emits_new_death_notification() {
   local dir pane_hash
   dir=$(fixture absorbed-dead-endpoint)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   printf '%s\n' 'window=fleet:absorbed-dead' 'kind=ship' 'harness=grok' 'backend=tmux' \
     > "$dir/state/absorbed-dead.meta"
+  register_active_supervision_tasks "$dir" absorbed-dead
   printf '%s\n' 'working: previously absorbed worker' > "$dir/state/absorbed-dead.status"
   prime_status_seen "$dir/state" "$dir/state/absorbed-dead.status"
   pane_hash=$(hash_text 'absorbed dead pane')
@@ -5952,6 +5956,7 @@ EOF
         printf "%s\t%s\tdead\t%s\t%s\n" "$backend" "$target" "$route" "$home"
       done
     }
+    fm_backend_finalize_reservation() { return 0; }
     fm_backend_reservation_identity() { printf "match\t/planned/planned-tmux\n"; }
     fm_backend_retire_reservation() { printf "tmux:%s\n" "$2" >> "$FM_STATE_OVERRIDE/retired-plans"; }
     fm_backend_kill() { printf "%s:%s\n" "$1" "$2" >> "$FM_STATE_OVERRIDE/retired-plans"; }
