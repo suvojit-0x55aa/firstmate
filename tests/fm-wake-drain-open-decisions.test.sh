@@ -233,11 +233,32 @@ test_queued_signal_status_survives_registry_retirement() {
   err="$dir/drain.err"
   probe="$dir/read-probe.tsv"
   : > "$probe"
-  printf 'blocked [key=delivery]: queued signal still needs handling\n' > "$state/retired.status"
-  publish_active_snapshot "$state"
+  printf 'note: already presented before retirement\n' > "$state/retired.status"
+  printf 'working: neighboring task remains active\n' > "$state/neighbor.status"
+  publish_active_snapshot "$state" neighbor retired
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" \
+    "$DRAIN" > "$out" 2> "$err" \
+    || fail "drain failed while priming the pre-retirement cursor"
+  grep -F 'already presented before retirement' "$out" >/dev/null \
+    || fail "the pre-retirement status was not presented"
+
+  # A non-empty active snapshot for a neighbor exercises the manifest-replace
+  # path after retirement. The retired task's offset must survive without its
+  # status log being opened.
+  : > "$probe"
+  publish_active_snapshot "$state" neighbor
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" \
+    "$DRAIN" > "$out" 2> "$err" \
+    || fail "drain failed after lifecycle retirement"
+  if grep -F "$(printf '%s\t' "$state/retired.status")" "$probe" >/dev/null; then
+    fail "retirement caused the dormant status log to be folded"
+  fi
+
+  printf 'blocked [key=delivery]: queued signal still needs handling\n' >> "$state/retired.status"
   append_wake "$state" signal retired.status 'signal: retired.status' \
     || fail "queueing the retired task signal failed"
 
+  : > "$probe"
   FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" \
     "$DRAIN" > "$out" 2> "$err" \
     || fail "drain failed for a queued signal after lifecycle retirement"
@@ -246,6 +267,9 @@ test_queued_signal_status_survives_registry_retirement() {
     || fail "the queued signal row was not presented"
   grep -F 'retired [key=delivery] blocked: queued signal still needs handling' "$out" >/dev/null \
     || fail "lifecycle retirement hid the status attached to a queued signal: $(cat "$out")"
+  if grep -F 'already presented before retirement' "$out" >/dev/null; then
+    fail "the queued signal replayed status that was presented before retirement: $(cat "$out")"
+  fi
   [ "$(wc -l < "$probe" | tr -d '[:space:]')" -eq 1 ] \
     || fail "the queued-signal exception read more than its one status log"
   pass "a queued status signal remains covered after its task leaves the active registry"

@@ -355,14 +355,14 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged
+  local snapshot=${1:-} fully_presented=${2:-} preserve=${3:-false} acknowledged
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
   print_record_divergence_section || return 1
-  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  status_commit_presentation_snapshot "$STATE" "$acknowledged" "$preserve"
 }
 
 # Resolve the status presentation scope from the lifecycle owner without
@@ -390,9 +390,10 @@ status_presentation_task_scope() {  # [<deduped-raw-rows>]
 
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot task_scope
-  local annotation_manifest fully_presented='' rc=0
+  local annotation_manifest fully_presented='' scoped=false rc=0
   fm_lock_acquire_wait "$lock" || return 1
   if task_scope=$(status_presentation_task_scope "$rows"); then
+    scoped=true
     snapshot=$(status_presentation_snapshot "$STATE" "$task_scope") || rc=1
   else
     # A pre-registry home or an unreadable snapshot keeps the old conservative
@@ -406,7 +407,9 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then
+    print_status_sections "$snapshot" "$fully_presented" "$scoped" || rc=1
+  fi
   fm_lock_release "$lock"
   return "$rc"
 }

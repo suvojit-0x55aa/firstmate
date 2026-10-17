@@ -965,8 +965,10 @@ $snapshot
 EOF
 }
 
-status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
+status_commit_presentation_snapshot() {  # <state> <snapshot> [<preserve-unmentioned>]
+  local state=$1 snapshot=$2 preserve=${3:-false} task endpoint ident f cur_ident size tmp
+  local manifest merged
+  manifest="$state/.status-presentation-cursor"
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -986,7 +988,26 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
   done <<EOF
 $snapshot
 EOF
-  mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
+  # A lifecycle-scoped drain must not reread a retired task's whole status log
+  # if an already-queued signal later brings that task back into scope. Keep
+  # valid last-presented offsets for unmentioned tasks without opening their
+  # status files; teardown remains the owner that retires those rows. A corrupt
+  # old manifest is not carried forward, so this commit still repairs it.
+  if [ "$preserve" = true ] && [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+    && awk -F '\t' '
+      NF == 0 { next }
+      NF != 3 || $1 == "" || $2 == "" || $3 !~ /^[0-9]+$/ || seen[$1]++ { exit 1 }
+    ' "$manifest"; then
+    merged="$tmp.merged"
+    if ! awk -F '\t' '
+      NR == FNR { if (NF > 0) seen[$1] = 1; print; next }
+      NF > 0 && !seen[$1]++ { print }
+    ' "$tmp" "$manifest" > "$merged" || ! mv -f "$merged" "$tmp"; then
+      rm -f "$tmp" "$merged"
+      return 1
+    fi
+  fi
+  mv -f "$tmp" "$manifest" || { rm -f "$tmp"; return 1; }
 }
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
