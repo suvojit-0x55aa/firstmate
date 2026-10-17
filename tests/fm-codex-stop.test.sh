@@ -2196,6 +2196,88 @@ SH
       fi
     done
   done
+  for backend in herdr zellij; do
+    dir=$(fixture "bootstrap-$backend-prior-session")
+    mkdir -p "$dir/fakebin"
+    case "$backend" in
+      herdr) target=old-session:pane-live ;;
+      zellij) target=old-session:8 ;;
+    esac
+    printf '%s\n' \
+      "window=$target" "worktree=$dir/worktree" "project=$dir" \
+      'kind=ship' 'harness=codex' "backend=$backend" 'spawn_gen=owner-1' \
+      > "$dir/state/live-owner.meta"
+    if [ "$backend" = herdr ]; then
+      printf '%s\n' 'herdr_session=old-session' 'herdr_workspace_id=w-live' \
+        'herdr_tab_id=tab-live' 'herdr_pane_id=pane-live' \
+        >> "$dir/state/live-owner.meta"
+      cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+session=
+previous=
+for argument in "$@"; do
+  [ "$previous" = --session ] && session=$argument
+  previous=$argument
+done
+case "${1:-}:${2:-}" in
+  session:list) printf '%s\n' '{"sessions":[{"name":"new-session","running":true},{"name":"old-session","running":true}]}' ;;
+  tab:list)
+    printf 'herdr\t%s\n' "$session" >> "$FM_TEST_SESSION_LOG"
+    if [ "$session" = new-session ]; then
+      printf '%s\n' '{"result":{"tabs":[]}}'
+    else
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-live","label":"fm-live-owner","workspace_id":"w-live"}]}}'
+    fi
+    ;;
+  workspace:list) printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-live","label":"firstmate"}]}}' ;;
+  pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-live","tab_id":"tab-live","agent_status":"working"}]}}' ;;
+  *) exit 72 ;;
+esac
+SH
+      chmod 0700 "$dir/fakebin/herdr"
+    else
+      cat > "$dir/fakebin/zellij" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list-sessions ]; then
+  printf '%s\n' new-session old-session
+  exit 0
+fi
+session=
+previous=
+for argument in "$@"; do
+  [ "$previous" = --session ] && session=$argument
+  previous=$argument
+done
+case "$*" in
+  *" action list-tabs --json"*)
+    printf 'zellij\t%s\n' "$session" >> "$FM_TEST_SESSION_LOG"
+    if [ "$session" = new-session ]; then
+      printf '%s\n' '[]'
+    else
+      printf '%s\n' '[{"tab_id":7,"name":"fm-live-owner"}]'
+    fi
+    ;;
+  *" action list-panes --json"*) printf '%s\n' '[{"tab_id":7,"id":8,"is_plugin":false}]' ;;
+  *) exit 72 ;;
+esac
+SH
+      chmod 0700 "$dir/fakebin/zellij"
+    fi
+    inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      HERDR_SESSION=new-session FM_ZELLIJ_SESSION=new-session \
+      FM_STATE_OVERRIDE="$dir/state" FM_TEST_SESSION_LOG="$dir/session-inventory" bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-backend.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+        fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+      ' _ "$ROOT/bin") || fail "$backend prior-session bootstrap failed"
+    [ "$inventory" = "$dir/state/live-owner.meta" ] \
+      || fail "$backend prior-session bootstrap lost its live owner: $inventory"
+    session_calls=$(LC_ALL=C sort -u "$dir/session-inventory")
+    [ "$session_calls" = "$backend"$'\tnew-session\n'"$backend"$'\told-session' ] \
+      || fail "$backend prior-session bootstrap read the wrong sessions: $session_calls"
+  done
   dir=$(fixture bootstrap-historical-running-sessions)
   mkdir -p "$dir/fakebin"
   id=1
@@ -2262,6 +2344,7 @@ case "$*" in
 esac
 SH
   chmod 0700 "$dir/fakebin/herdr" "$dir/fakebin/zellij"
+  set +e
   inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     HERDR_SESSION=current-herdr FM_ZELLIJ_SESSION=current-zellij \
     FM_STATE_OVERRIDE="$dir/state" FM_TEST_SESSION_LOG="$dir/session-inventory" bash -c '
@@ -2270,12 +2353,15 @@ SH
       . "$1/fm-supervision-registry-lib.sh"
       fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
       fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
-    ' _ "$ROOT/bin") || fail 'historical running sessions blocked bounded bootstrap'
-  [ -z "$inventory" ] || fail "historical running sessions entered active supervision: $inventory"
-  session_calls=$(LC_ALL=C sort -u "$dir/session-inventory")
-  [ "$session_calls" = $'herdr\tcurrent-herdr\nzellij\tcurrent-zellij' ] \
-    || fail "historical running sessions multiplied backend inventory: $session_calls"
-  pass 'bootstrap inventory uses configured backend sessions'
+    ' _ "$ROOT/bin")
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail 'oversized running-session inventory published a snapshot'
+  [ ! -e "$dir/state/.active-supervision-generation" ] \
+    || fail 'oversized running-session inventory became authoritative'
+  [ ! -e "$dir/session-inventory" ] \
+    || fail "oversized running-session inventory performed scoped reads: $(cat "$dir/session-inventory")"
+  pass 'bootstrap inventory covers bounded active backend sessions'
 }
 
 test_bounded_bootstrap_rebinds_unique_live_targets() {

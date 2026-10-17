@@ -44,7 +44,7 @@ Moving a Firstmate installation changes its path hash and leaves old titles unma
 
 A pre-home-tag task remains reachable through its recorded metadata only when exactly one live tab has the old unscoped title.
 Multiple old tabs with the same title cause a refusal rather than a guess.
-Bounded list-live validates one global session listing, inventories only the home-configured running session, includes unscoped legacy tabs as candidates, resolves current-home-looking aliases against exact recorded targets, and refuses bootstrap when both task identities remain plausible or the configured-session read is incomplete.
+Bounded list-live validates one global session listing, inventories the home-configured session plus every metadata-referenced running session when that set contains at most eight names, refuses before any session-scoped read when it is larger, includes unscoped legacy tabs as candidates, and rejects ambiguous identities or incomplete reads.
 
 ```text
 backend=zellij

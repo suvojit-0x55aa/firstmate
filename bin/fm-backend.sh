@@ -656,6 +656,22 @@ fm_backend_source() {  # <name>
   esac
 }
 
+fm_backend_bounded_running_scopes() {
+  local requested=$1 running=$2 scope selected= seen=$'\n' count=0
+  while IFS= read -r scope; do
+    [ -n "$scope" ] || continue
+    case "$seen" in *$'\n'"$scope"$'\n'*) continue ;; esac
+    seen="$seen$scope"$'\n'
+    case $'\n'"$running"$'\n' in *$'\n'"$scope"$'\n'*) ;; *) continue ;; esac
+    count=$((count + 1))
+    [ "$count" -le 8 ] || return 1
+    selected="${selected}${selected:+$'\n'}$scope"
+  done <<EOF
+$requested
+EOF
+  printf '%s' "$selected"
+}
+
 fm_backend_list_live() {
   local requested=${1-$'tmux\t-\nherdr\tdefault\nzellij\tdefault\ncmux\t-'}
   local backend requested_backend scope extra scopes live sessions session target label part raw status
@@ -701,6 +717,7 @@ EOF
         done <<EOF
 $sessions
 EOF
+        scopes=$(fm_backend_bounded_running_scopes "$scopes" "$sessions") || return 1
         while IFS= read -r session; do
           [ -n "$session" ] || continue
           case $'\n'"$sessions"$'\n' in *$'\n'"$session"$'\n'*) ;; *) continue ;; esac
@@ -727,6 +744,7 @@ EOF
         done <<EOF
 $sessions
 EOF
+        scopes=$(fm_backend_bounded_running_scopes "$scopes" "$sessions") || return 1
         while IFS= read -r session; do
           [ -n "$session" ] || continue
           case $'\n'"$sessions"$'\n' in *$'\n'"$session"$'\n'*) ;; *) continue ;; esac
