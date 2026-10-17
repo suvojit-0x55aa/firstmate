@@ -843,10 +843,13 @@ def delayed_popen(*args, **kwargs):
 subprocess.Popen = delayed_popen
 PY
   started=$(monotonic_seconds)
+  # A proven live owner conservatively charges its crew-state and worktree
+  # paths. Leave enough transport budget for that first real cycle so the
+  # injected delay lands on the recurring admission probe this case exercises.
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='firstmate:fm-task' \
     FM_TEST_LIVE_TARGETS='firstmate:fm-task' \
     PYTHONPATH="$dir/probe-fault" FM_TEST_RECURRING_PROBE_MARKER="$dir/recurring-probe" \
-    FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=55 FM_ARM_CONFIRM_TIMEOUT=1 \
+    FM_CODEX_STOP_TEST_TRANSPORT_TIMEOUT=80 FM_ARM_CONFIRM_TIMEOUT=1 \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 FM_SIGNAL_GRACE=0 \
     FM_POLL=0.05 TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
