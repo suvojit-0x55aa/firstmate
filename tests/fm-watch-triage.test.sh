@@ -163,7 +163,20 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+reap() {
+  kill -TERM "$1" 2>/dev/null || true
+  wait_for_exit "$1" 20 >/dev/null 2>&1 || true
+}
+
+wait_file_present() {  # <file> [limit-ticks]
+  local file=$1 limit=${2:-100} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -921,6 +934,59 @@ test_nonterminal_stale_not_working_surfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the immediate stale failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "immediate stale wake was not queued"
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
+}
+
+# A watcher can receive TERM just after publishing its cycle beacon, while it
+# is still collecting endpoint state through a command substitution. Exiting
+# directly from that asynchronous trap intermittently corrupted Bash's pending
+# parse on Linux and stranded EXIT cleanup, hanging the whole serial shard.
+test_term_during_inventory_exits_at_safe_boundary() {
+  local dir state fakebin out err capture_file window entered release pid rc=0 sig real_grep
+  dir=$(make_case term-during-inventory); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; err="$dir/watch.err"; capture_file="$dir/pane.txt"
+  entered="$dir/inventory-entered"; release="$dir/inventory-release"
+  window="test:fm-term-inventory"
+  printf 'busy worker\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/term-inventory.meta"
+  printf 'working: collecting state\n' > "$state/term-inventory.status"
+  sig=$(seen_sig "$state/term-inventory.status")
+  printf '%s' "$sig" > "$state/.seen-term-inventory_status"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$state/.pr-check-migration-v1"
+  chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+  real_grep=$(command -v grep)
+  cat > "$fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *.meta)
+      : > "$FM_TEST_INVENTORY_ENTERED"
+      while [ ! -e "$FM_TEST_INVENTORY_RELEASE" ]; do
+        sleep 0.05
+      done
+      break
+      ;;
+  esac
+done
+exec "$FM_TEST_REAL_GREP" "$@"
+SH
+  chmod +x "$fakebin/grep"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=node FM_TEST_INVENTORY_ENTERED="$entered" \
+    FM_TEST_INVENTORY_RELEASE="$release" FM_TEST_REAL_GREP="$real_grep" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=10 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 bash "$WATCH" > "$out" 2> "$err" &
+  pid=$!
+  wait_file_present "$entered" 100 || { reap "$pid"; fail "watcher never entered its inventory read"; }
+  kill -TERM "$pid" 2>/dev/null || { reap "$pid"; fail "could not signal the inventory-reading watcher"; }
+  touch "$release"
+  wait_for_exit "$pid" 100 || rc=$?
+  [ "$rc" -eq 1 ] || fail "inventory-reading watcher did not terminate cleanly after TERM (rc=$rc)"
+  [ ! -e "$state/.watch.lock" ] || fail "terminated inventory-reading watcher retained its singleton lock"
+  [ ! -s "$err" ] || fail "TERM during inventory emitted a trap or cleanup diagnostic: $(cat "$err")"
+  pass "TERM during endpoint inventory exits at a safe cycle boundary and cleans the watcher lock"
 }
 
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
@@ -2850,6 +2916,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_term_during_inventory_exits_at_safe_boundary
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_secondmate_paused_resurfaces_in_normal_mode

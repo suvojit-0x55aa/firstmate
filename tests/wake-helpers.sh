@@ -289,9 +289,27 @@ wait_for_exit() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  return 124
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if ! is_live_non_zombie "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 20 ]; do
+    if ! is_live_non_zombie "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 125
 }
 
 is_live_non_zombie() {
