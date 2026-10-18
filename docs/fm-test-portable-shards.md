@@ -78,7 +78,7 @@ spent 258708 ms reaching an early failure at case 16, proving that the old
 20000 ms fallback was not a usable whole-driver estimate. A later clean prefix
 reached case 24 only when its four-shard lane hit the 20-minute hang tripwire.
 Six focused entry points now source the same `tests/fm-codex-stop-suite.sh`
-driver, preserving every case while bounding each test script independently.
+driver, assigning all 120 cases exactly once while bounding each test script independently.
 The admission entry point carries a 900000 ms balance budget after CI run [39102498606](https://github.com/suvojit-0x55aa/firstmate/actions/runs/39102498606) measured 865113 ms before its late wake-queue assertion failed, four entry points carry 300000 ms budgets, and the shorter signal group carries 240000 ms.
 Refresh them from the next green timing artifacts.
 The current 143-script, six-shard assignment is:
