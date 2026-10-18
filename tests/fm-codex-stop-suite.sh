@@ -1766,10 +1766,19 @@ PY
 }
 
 test_failure_episode_mutable_sources_remain_current_through_scan() {
-  local source dir original_root=$TEST_ROOT now
-  for source in signal inbox pending; do
+  local source dir original_root=$TEST_ROOT now live_targets
+  for source in signal inbox pending endpoint; do
     dir=$(fixture "failure-episode-$source-publication-race")
     install_endpoint_inventory_tmux "$dir"
+    if [ "$source" = endpoint ]; then
+      mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+      cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+[ ! -e "$FM_HOME/endpoint-live" ] || export FM_TEST_LIVE_TARGETS=fleet:task
+exec "${0%/*}/tmux-real" "$@"
+SH
+      chmod 0700 "$dir/fakebin/tmux"
+    fi
     install_controlled_watcher "$dir"
     printf '%s\n' 'window=fleet:task' "worktree=$dir" "project=$dir" \
       'kind=ship' 'harness=codex' 'backend=tmux' "spawn_gen=$source-race-1" \
@@ -1812,11 +1821,13 @@ def delayed_popen(*args, **kwargs):
 
 subprocess.Popen = delayed_popen
 PY
+    live_targets=fleet:task
+    [ "$source" != endpoint ] || live_targets=
     FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
       PYTHONPATH="$dir/mutable-source-fault" \
       FM_TEST_MUTABLE_SOURCE_MARKER="$dir/mutable-source-scan" \
       PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
-      FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
+      FM_TEST_LIVE_TARGETS="$live_targets" FM_CHECK_INTERVAL=3600 \
       FM_TASK_INBOX_GRACE_SECS=3600 FM_PENDING_REPLY_GRACE_SECS=3600 \
       FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
       TEST_ROOT="$dir" run_stop "$dir" 1
@@ -1846,6 +1857,9 @@ PY
               "$FM_STATE_OVERRIDE" "$corr" "$FM_PENDING_REPLY_NOW"
           ' _ "$ROOT/bin" || fail 'could not publish pending work during admission'
         ;;
+      endpoint)
+        touch "$dir/endpoint-live"
+        ;;
     esac
     touch "$dir/mutable-source-scan.release"
     wait_file "$dir/repeat-rc" 350
@@ -1856,6 +1870,98 @@ PY
     finish "$dir"
   done
   pass 'failure suppression revalidates mutable admission sources'
+}
+
+test_failure_episode_wake_queue_remains_current_through_finish() {
+  local dir original_root=$TEST_ROOT count
+  dir=$(fixture failure-episode-wake-queue-finish-race)
+  install_endpoint_inventory_tmux "$dir"
+  install_controlled_watcher "$dir"
+  printf '%s\n' 'window=fleet:task' "worktree=$dir" "project=$dir" \
+    'kind=ship' 'harness=codex' 'backend=tmux' 'spawn_gen=wake-finish-race-1' \
+    > "$dir/state/task.meta"
+  initialize_empty_active_supervision_registry "$dir"
+  register_active_supervision_tasks "$dir" task
+  touch "$dir/state/.last-check"
+  mkdir "$dir/wake-finish-fault"
+  cat > "$dir/wake-finish-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+import time
+
+original_popen = subprocess.Popen
+matching_calls = 0
+
+
+def delayed_popen(*args, **kwargs):
+    global matching_calls
+    command = args[0] if args else kwargs.get('args', [])
+    process = original_popen(*args, **kwargs)
+    home = os.environ.get('FM_HOME', '')
+    marker = os.environ.get('FM_TEST_WAKE_FINISH_MARKER', '')
+    repeat_release = os.path.join(home, 'repeat-paused.release')
+    if (marker and os.path.exists(repeat_release) and
+            isinstance(command, list) and len(command) > 2 and
+            'fm_supervision_registry_snapshot_index' in command[2]):
+        matching_calls += 1
+        if matching_calls == 2:
+            original_communicate = process.communicate
+
+            def delayed_communicate(*communicate_args, **communicate_kwargs):
+                result = original_communicate(*communicate_args, **communicate_kwargs)
+                with open(marker, 'x', encoding='utf-8') as stream:
+                    stream.write('waiting\n')
+                release = marker + '.release'
+                while not os.path.exists(release):
+                    time.sleep(0.02)
+                return result
+
+            process.communicate = delayed_communicate
+    return process
+
+
+subprocess.Popen = delayed_popen
+PY
+  FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
+    PYTHONPATH="$dir/wake-finish-fault" \
+    FM_TEST_WAKE_FINISH_MARKER="$dir/wake-finish-scan" \
+    PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
+    FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
+    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+    TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/repeat-paused" 350
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    fm_wake_append check wake-finish "queued before repeated Stop"
+  ' _ "$ROOT/bin" || fail 'could not force the repeated Stop past early suppression'
+  touch "$dir/repeat-paused.release"
+  count=0
+  for _ in $(seq 1 350); do
+    count=$(wc -l < "$dir/controlled-arm-starts" 2>/dev/null || printf 0)
+    [ "$count" -ge 2 ] && break
+    sleep 0.02
+  done
+  [ "$count" -ge 2 ] || fail 'the repeated Stop did not launch its watcher arm'
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    rm -f -- "$FM_WAKE_QUEUE" "$STATE/.wake-queue.seq" || exit 1
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  ' _ "$ROOT/bin" || fail 'could not restore the baseline queue fixture'
+  wait_file "$dir/wake-finish-scan" 350
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    fm_wake_append check wake-finish "queued during final admission"
+  ' _ "$ROOT/bin" || fail 'could not queue work during final admission'
+  touch "$dir/wake-finish-scan.release"
+  wait_file "$dir/repeat-rc" 350
+  [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] \
+    || fail 'a wake queued during final admission was suppressed'
+  [ "$(wc -l < "$dir/controlled-arm-starts" | tr -d ' ')" = 2 ] \
+    || fail 'the final wake race launched an unexpected watcher arm count'
+  finish "$dir"
+  pass 'failure suppression revalidates the final wake queue identity'
 }
 
 test_stalled_watcher_cannot_complete_quiet_window() {
@@ -7099,6 +7205,7 @@ test_failure_episode_tracks_complete_admission_work
 test_failure_episode_check_index_remains_stable_through_scan
 test_failure_episode_deadline_remains_current_through_scan
 test_failure_episode_mutable_sources_remain_current_through_scan
+test_failure_episode_wake_queue_remains_current_through_finish
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake

@@ -1576,6 +1576,33 @@ fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }
 
+fm_wake_queue_identity() {
+  local seq_file="$STATE/.wake-queue.seq" seq=0 queue_identity status=0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ -L "$seq_file" ] || { [ -e "$seq_file" ] && [ ! -f "$seq_file" ]; }; then
+    status=1
+  elif [ -f "$seq_file" ]; then
+    IFS= read -r seq < "$seq_file" || status=1
+    case "$seq" in ''|*[!0-9]*) status=1 ;; esac
+  fi
+  if [ "$status" -eq 0 ]; then
+    if [ -L "$FM_WAKE_QUEUE" ] || { [ -e "$FM_WAKE_QUEUE" ] && [ ! -f "$FM_WAKE_QUEUE" ]; }; then
+      status=1
+    elif [ ! -e "$FM_WAKE_QUEUE" ]; then
+      queue_identity=missing
+    elif [ "$_FM_UNAME" = Darwin ]; then
+      queue_identity=$(LC_ALL=C stat -f 'file:%d:%i:%z:%m:%c' \
+        "$FM_WAKE_QUEUE" 2>/dev/null) || status=1
+    else
+      queue_identity=$(LC_ALL=C stat -c 'file:%d:%i:%s:%Y:%Z' \
+        "$FM_WAKE_QUEUE" 2>/dev/null) || status=1
+    fi
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  [ "$status" -eq 0 ] || return 1
+  printf 'fm-wake-queue.v1\t%s\t%s\n' "$seq" "$queue_identity"
+}
+
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
   local recovery_marker

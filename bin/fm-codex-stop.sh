@@ -344,6 +344,12 @@ owners_file="$registry_index/owners"
 [ -f "$owners_file" ] && [ ! -L "$owners_file" ] || exit 1
 states=$(awk -F '\t' '!seen[$1 SUBSEP $3 SUBSEP $2]++ { print $1, $2, $3, $4 }' OFS="$(printf '\t')" "$owners_file" \
   | fm_backend_agent_state_batch) || exit 1
+while IFS= read -r endpoint_state; do
+  [ -n "$endpoint_state" ] || continue
+  printf 'endpoint-state\t%s\n' "$endpoint_state"
+done <<EOF
+$states
+EOF
 plan=$({ printf '%s\n' "$states"; printf '__FM_OWNERS__\n'; cat "$owners_file"; } | awk -F '\t' '
   BEGIN { OFS="\t" }
   $0 == "__FM_OWNERS__" { owners=1; next }
@@ -449,6 +455,8 @@ mutable_sources=$(fm_codex_mutable_admission_snapshot \
 after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 [ "$after" = "$generation" ] || exit 1
 [ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$check_revision" ] || exit 1
+wake_queue_identity=$(fm_wake_queue_identity) || exit 1
+printf 'wake-queue\t%s\n' "$wake_queue_identity"
 while IFS="$(printf '\t')" read -r mutable_kind mutable_value; do
   [ -n "$mutable_kind" ] || continue
   printf 'mutable-source\t%s\t%s\n' "$mutable_kind" "$mutable_value"
@@ -473,6 +481,8 @@ EOF
     future_deadlines = set()
     suppression_barriers = set()
     mutable_sources = set()
+    endpoint_states = set()
+    wake_queue_identity = None
     check_revision = None
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
@@ -516,15 +526,22 @@ EOF
             suppression_barriers.add(value)
         elif kind == 'mutable-source':
             mutable_sources.add(value)
+        elif kind == 'endpoint-state':
+            endpoint_states.add(value)
+        elif kind == 'wake-queue':
+            if wake_queue_identity is not None:
+                return None
+            wake_queue_identity = value
         if kind == 'budget-window' and separator and value:
             windows.add(value)
-    if not generation or not check_revision:
+    if not generation or not check_revision or wake_queue_identity is None:
         return None
     return (generation, signal_tasks, len(remote_recoveries), len(windows),
             len(active_owners), len(owner_fanouts), len(registered_checks),
             signal_items, remote_recoveries, pending_recovery_states, inbox_items,
             windows, active_owners, owner_fanouts, registered_checks, future_deadlines,
-            suppression_barriers, check_revision, mutable_sources)
+            suppression_barriers, check_revision, mutable_sources, endpoint_states,
+            wake_queue_identity)
 
 
 def admission_state_value(path):
@@ -555,7 +572,8 @@ def canonical_admission_work_snapshot(work):
      _active_owner_count, _owner_fanout_count, _registered_check_count,
      signal_items, remote_recoveries, pending_recovery_states, inbox_items, windows,
      active_owners, owner_fanouts, registered_checks, future_deadlines,
-     suppression_barriers, check_revision, mutable_sources) = work
+     suppression_barriers, check_revision, mutable_sources, endpoint_states,
+     wake_queue_identity) = work
     check_cursor = admission_state_value('.check-sweep-cursor')
     check_high_water = admission_state_value('.check-sweep-high-water')
     if check_cursor is None or check_high_water is None:
@@ -569,7 +587,7 @@ def canonical_admission_work_snapshot(work):
     except OSError:
         checks_due = True
     value = dict(
-        protocol='fm-codex-admission-work.v6',
+        protocol='fm-codex-admission-work.v7',
         registry_generation=generation,
         signals=sorted(signal_items),
         remote_recoveries=sorted(remote_recoveries),
@@ -585,12 +603,15 @@ def canonical_admission_work_snapshot(work):
         suppression_barriers=sorted(suppression_barriers),
         check_revision=check_revision,
         mutable_sources=sorted(mutable_sources),
+        endpoint_states=sorted(endpoint_states),
+        wake_queue_identity=wake_queue_identity,
     )
     encoded = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
     signature = 'sha256:' + hashlib.sha256(encoded).hexdigest()
     return (signature, min(future_deadlines) if future_deadlines else None,
             frozenset(registered_checks), check_revision, frozenset(mutable_sources),
-            not suppression_barriers, generation)
+            not suppression_barriers, generation, frozenset(endpoint_states),
+            wake_queue_identity)
 
 
 def current_admission_work_snapshot(registry_generation, probe_deadline=None):
@@ -625,6 +646,8 @@ cleanup_registry_index() { find "$registry_index" -depth -delete; }
 trap cleanup_registry_index EXIT
 fm_supervision_registry_snapshot_index \
   "$FM_STATE_OVERRIDE" "$generation" "$registry_index" || exit 1
+owners_file="$registry_index/owners"
+[ -f "$owners_file" ] && [ ! -L "$owners_file" ] || exit 1
 mutable_sources=$(fm_codex_mutable_admission_snapshot \
   "$FM_STATE_OVERRIDE" "$registry_index/inventory") || exit 1
 [ "$(fm_codex_mutable_admission_snapshot \
@@ -632,7 +655,11 @@ mutable_sources=$(fm_codex_mutable_admission_snapshot \
 [ "$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE")" = "$generation" ] || exit 1
 [ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$revision" ] || exit 1
 [ "$(fm_check_index_inventory "$FM_STATE_OVERRIDE")" = "$inventory" ] || exit 1
+endpoint_states=$(awk -F '\t' '!seen[$1 SUBSEP $3 SUBSEP $2]++ { print $1, $2, $3, $4 }' \
+  OFS="$(printf '\t')" "$owners_file" | fm_backend_agent_state_batch) || exit 1
+wake_queue_identity=$(fm_wake_queue_identity) || exit 1
 printf 'revision\t%s\n' "$revision"
+printf 'wake-queue\t%s\n' "$wake_queue_identity"
 while IFS= read -r registered_check; do
   [ -n "$registered_check" ] || continue
   printf 'registered-check\t%s\n' "$registered_check"
@@ -645,12 +672,20 @@ while IFS= read -r mutable_source; do
 done <<EOF
 $mutable_sources
 EOF
+while IFS= read -r endpoint_state; do
+  [ -n "$endpoint_state" ] || continue
+  printf 'endpoint-state\t%s\n' "$endpoint_state"
+done <<EOF
+$endpoint_states
+EOF
 ''', registry_generation, deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
     revision = None
     checks = set()
     mutable_sources = set()
+    endpoint_states = set()
+    wake_queue_identity = None
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
         if not separator or not value:
@@ -663,11 +698,18 @@ EOF
             checks.add(value)
         elif kind == 'mutable-source':
             mutable_sources.add(value)
+        elif kind == 'endpoint-state':
+            endpoint_states.add(value)
+        elif kind == 'wake-queue':
+            if wake_queue_identity is not None:
+                return None
+            wake_queue_identity = value
         else:
             return None
-    if revision is None:
+    if revision is None or wake_queue_identity is None:
         return None
-    return revision, frozenset(checks), frozenset(mutable_sources)
+    return (revision, frozenset(checks), frozenset(mutable_sources),
+            frozenset(endpoint_states), wake_queue_identity)
 
 
 def admission_work_snapshot_current(snapshot, probe_deadline=None):
@@ -676,7 +718,8 @@ def admission_work_snapshot_current(snapshot, probe_deadline=None):
     if snapshot[1] is not None and time.time() >= snapshot[1]:
         return False
     boundary = current_admission_boundary(snapshot[6], probe_deadline)
-    return boundary is not None and boundary == (snapshot[3], snapshot[2], snapshot[4])
+    return boundary is not None and boundary == (
+        snapshot[3], snapshot[2], snapshot[4], snapshot[7], snapshot[8])
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
@@ -695,7 +738,7 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
      _remote_recovery_items, _pending_recovery_states, _inbox_items,
      _budget_window_items, _active_owner_items, _owner_fanout_items,
      _registered_check_items, _future_deadlines, _suppression_barriers,
-     _check_revision, _mutable_sources) = work
+     _check_revision, _mutable_sources, _endpoint_states, _wake_queue_identity) = work
     if check_age >= check_interval:
         due_checks = registered_checks
     if budget_deadline is not None:
