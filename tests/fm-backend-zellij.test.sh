@@ -304,28 +304,28 @@ test_expected_label_refuses_ambiguous_untagged_tab() {
   pass "fm_backend_zellij_tab_matches_label: refuses an untagged legacy label match when 2+ live tabs share it (migration ambiguity guard)"
 }
 
-test_list_live_scopes_to_own_home_tag() {
-  local dir fb out own_title foreign_title other_root
+test_list_live_covers_scoped_and_legacy_titles() {
+  local dir fb out expected own_title foreign_title other_root
   dir="$TMP_ROOT/list-live-scope"; mkdir -p "$dir/responses"
   other_root="$dir/other-root"; mkdir -p "$other_root"
   own_title=$(zellij_expected_scoped_title fm-task1)
   foreign_title=$(zellij_expected_scoped_title fm-task2 "$ROOT" "$other_root")
-  # 1: list-tabs --json -> our own home-scoped tab, a DIFFERENT installation's
-  # home-scoped tab (same prefix shape, different FM_ROOT hash), and an
-  # unrelated non-firstmate tab.
   zellij_multi_tab_response "$dir" 1 \
     3 "$own_title" \
     4 "$foreign_title" \
-    5 "zsh"
-  # 2: list-panes for our own home's task1 tab only
-  zellij_pane_response "$dir" 2 7 3
+    5 "zsh" \
+    6 "fm-legacy"
+  printf '[{"id":7,"tab_id":3,"is_plugin":false},{"id":8,"tab_id":4,"is_plugin":false},{"id":9,"tab_id":6,"is_plugin":false}]\n' \
+    > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
     FM_ZELLIJ_SESSION_LIST="firstmate" \
     bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_list_live firstmate' "$ROOT" )
-  [ "$out" = $'firstmate:7\tfm-task1' ] \
-    || fail "list_live should list only this home's own tagged tab with its plain fm-<id> label, got '$out'"
-  pass "fm_backend_zellij_list_live: scopes to this home's own tag - excludes a different installation's tagged tab and unrelated tabs"
+  expected=$(printf 'firstmate:7\t%s\nfirstmate:8\t%s\nfirstmate:9\tfm-legacy' \
+    "$own_title" "$foreign_title")
+  [ "$out" = "$expected" ] \
+    || fail "list_live should cover scoped and legacy fm- titles, got '$out'"
+  pass "fm_backend_zellij_list_live: preserves exact scoped and legacy titles with exact pane targets"
 }
 
 test_resolve_bare_selector_prefers_scoped_title() {
@@ -848,6 +848,8 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "kind=scout" \
     "decisions_reviewed=1" \
     "decision_keys="
+  printf 'fm-active-supervision.v6\tg1\nentry\tzghost\t-\tactive\n' \
+    > "$state/.active-supervision-generation"
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
@@ -892,6 +894,10 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
     "worktree=$dir/missing-child-worktree" \
     "project=$project" \
     "kind=scout"
+  printf 'fm-active-supervision.v6\tg1\nentry\tsmz\t-\tactive\n' \
+    > "$state/.active-supervision-generation"
+  printf 'fm-active-supervision.v6\tg1\nentry\tchildz\t-\tactive\n' \
+    > "$home/state/.active-supervision-generation"
   child_title=$(zellij_expected_scoped_title fm-childz "$home" "$home")
   zellij_pane_response "$dir" 1 7 4
   zellij_tab_response "$dir" 2 4 "$child_title"
@@ -1307,7 +1313,7 @@ test_scoped_title_uses_secondmate_home_label
 test_scoped_title_changes_with_root_path
 test_expected_label_accepts_unambiguous_untagged_legacy_tab
 test_expected_label_refuses_ambiguous_untagged_tab
-test_list_live_scopes_to_own_home_tag
+test_list_live_covers_scoped_and_legacy_titles
 test_resolve_bare_selector_prefers_scoped_title
 test_resolve_bare_selector_refuses_ambiguous_untagged
 test_resolve_bare_selector_prefers_later_session_scoped_title_over_legacy

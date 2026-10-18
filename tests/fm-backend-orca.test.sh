@@ -483,8 +483,11 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved pathless metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved pathless metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-pathless-cleanup" "$state/$id.meta" "preserved pathless metadata missing Orca worktree id"
+  assert_grep "endpoint_state=worktree-only" "$state/$id.meta" "preserved pathless metadata missing its exact lifecycle state"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved pathless metadata should not invent a terminal handle"
-  pass "fm-spawn.sh --backend orca: preserves metadata when pathless cleanup fails"
+  grep -F "$(printf 'entry\t%s\t' "$id")" "$state/.active-supervision-generation" >/dev/null \
+    || fail "preserved pathless metadata lost pending supervision ownership"
+  pass "fm-spawn.sh --backend orca: preserves metadata and ownership when pathless cleanup fails"
 }
 
 test_spawn_writes_orca_metadata_and_launches_harness() {
@@ -639,12 +642,18 @@ test_spawn_removes_orca_worktree_when_terminal_create_fails() {
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when terminal creation fails"
   assert_absent "$state/$id.meta" "terminal-create abort should not record metadata after successful cleanup"
+  assert_contains "$(cat "$LOG")" "fm-$id--i" \
+    "Orca worktree creation should use a transaction-unique provisional identity"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail'$'\x1f''--title'$'\x1f'"fm-$id"$'\x1f''--json' \
     "Orca spawn should attempt terminal creation before abort cleanup"
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-terminal-fail'$'\x1f''--force'$'\x1f''--json' \
     "Orca spawn should remove the worktree when terminal creation fails"
   assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
     "Orca spawn should not close a terminal when no handle was recorded"
+  if [ -f "$state/.active-supervision-generation" ]; then
+    assert_not_contains "$(cat "$state/.active-supervision-generation")" "${id}" \
+      "successful exact Orca abort cleanup should retire lifecycle ownership"
+  fi
   pass "fm-spawn.sh --backend orca: removes worktree when terminal creation fails"
 }
 
@@ -678,8 +687,11 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   assert_grep "window=fm-$id" "$state/$id.meta" "preserved metadata missing stable window alias"
   assert_grep "backend=orca" "$state/$id.meta" "preserved metadata missing backend=orca"
   assert_grep "orca_worktree_id=wt-cleanup-fail" "$state/$id.meta" "preserved metadata missing Orca worktree id"
+  assert_grep "endpoint_state=worktree-only" "$state/$id.meta" "preserved metadata missing its exact lifecycle state"
   assert_no_grep "terminal=" "$state/$id.meta" "preserved metadata should not invent a terminal handle"
-  pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
+  grep -F "$(printf 'entry\t%s\t' "$id")" "$state/.active-supervision-generation" >/dev/null \
+    || fail "preserved abort metadata lost pending supervision ownership"
+  pass "fm-spawn.sh --backend orca: preserves metadata and ownership when abort cleanup fails"
 }
 
 test_spawn_releases_orca_resources_when_metadata_write_fails() {
@@ -1169,6 +1181,43 @@ test_teardown_refuses_orca_worktree_without_terminal_handle() {
   pass "fm-teardown.sh backend=orca: refuses incomplete worktree-only endpoint metadata before runtime dispatch"
 }
 
+test_teardown_recovers_explicit_orca_worktree_only_state() {
+  local proj wt data state config id out rc neutral
+  id="orcaworktreeonlyz1"
+  proj="$TMP_ROOT/worktree-only-project"
+  wt="$TMP_ROOT/worktree-only-wt"
+  data="$TMP_ROOT/worktree-only-data"
+  state="$TMP_ROOT/worktree-only-state"
+  config="$TMP_ROOT/worktree-only-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "endpoint_state=worktree-only" \
+    "worktree=$wt" "project=$proj" "harness=claude" "kind=scout" \
+    "mode=no-mistakes" "yolo=off" "backend=orca" \
+    "orca_worktree_id=wt-worktree-only" "spawn_gen=worktree-only-gen" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case worktree-only-teardown
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-worktree-only","path":"%s"}}}\n' "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "explicit Orca worktree-only teardown failed: $out"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "worktree-only teardown attempted to close an invented terminal"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-worktree-only'$'\x1f''--force'$'\x1f''--json' \
+    "worktree-only teardown did not remove the retained Orca worktree"
+  assert_absent "$state/$id.meta" "worktree-only teardown retained completed metadata"
+  pass "fm-teardown.sh backend=orca: recovers explicit worktree-only lifecycle state"
+}
+
 test_secondmate_force_teardown_removes_orca_child_via_orca() {
   local home subhome childproj childwt child_id neutral out rc
   home="$TMP_ROOT/orca-child-parent"
@@ -1303,6 +1352,17 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
+if [ -n "${FM_ORCA_FOCUSED_CASES:-}" ]; then
+  for focused_case in $FM_ORCA_FOCUSED_CASES; do
+    case "$focused_case" in
+      test_*) declare -F "$focused_case" >/dev/null || fail "unknown focused case: $focused_case" ;;
+      *) fail "invalid focused case: $focused_case" ;;
+    esac
+    "$focused_case"
+  done
+  exit 0
+fi
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -1351,6 +1411,7 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
+test_teardown_recovers_explicit_orca_worktree_only_state
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child

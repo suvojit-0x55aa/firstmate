@@ -275,6 +275,10 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
+        *session_name*window_name*)
+          printf 'firstmate:%s\n' "$(cat "${FM_TMUX_CALL_LOG:?}.window")"
+          exit 0
+          ;;
         *pane_current_command*)
           case "$mode" in
             missing) printf '%s\n' node; exit 0 ;;
@@ -287,17 +291,47 @@ case "${1:-}" in
     exit 0
     ;;
   list-windows)
+    format=
+    for arg in "$@"; do case "$arg" in '#{'*) format=$arg ;; esac; done
     case "$mode" in
-      missing) printf '%s\n' main; exit 0 ;;
+      missing) name=main; command=zsh ;;
       unreadable) exit 1 ;;
-      *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
+      *)
+        if [ -e "${FM_TMUX_CALL_LOG:?}.killed" ]; then
+          name=main
+          command=zsh
+        else
+          name=fm-sm1
+          command=$mode
+        fi
+        ;;
     esac
+    case "$format" in
+      *session_name*window_name*) printf 'firstmate:%s\t%s\n' "$name" "$name" ;;
+      *pane_tty*pane_current_command*) printf '%s\t/dev/ttys999\t%s\n' "$name" "$command" ;;
+      *) printf '%s\n' "$name" ;;
+    esac
+    exit 0
     ;;
-  new-window|kill-window)
+  new-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
-    [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
-    [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
-    [ "${1:-}" = new-window ] && rm -f "${FM_TMUX_CALL_LOG}.killed"
+    [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && exit 1
+    rm -f "${FM_TMUX_CALL_LOG}.killed"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then shift; printf '%s\n' "$1" > "${FM_TMUX_CALL_LOG}.window"; break; fi
+      shift
+    done
+    printf '@101\n'
+    exit 0
+    ;;
+  rename-window)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    printf '%s\n' "${4:-}" > "${FM_TMUX_CALL_LOG}.window"
+    exit 0
+    ;;
+  kill-window)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    : > "${FM_TMUX_CALL_LOG}.killed"
     exit 0
     ;;
   has-session) exit 0 ;;

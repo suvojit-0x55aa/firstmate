@@ -79,7 +79,7 @@ cmux_surface_id=<surface-uuid>
 ```
 
 The UUID pair is the active endpoint authority within one app run.
-Workspace UUIDs are not stable across an app relaunch, so recovery searches by the scoped title and then resolves the current surface id.
+Workspace UUIDs are not stable across an app relaunch, so bounded-bootstrap recovery takes two count-validated all-window inventories, requires a unique scoped-title match with exactly one unambiguous surface, refuses publication if window, workspace, pane, or selected-surface identity changes, and atomically refreshes the durable endpoint identity before publishing bounded supervision.
 
 ## Current operation and safety
 
@@ -120,7 +120,7 @@ Real tests share the captain's running app rather than creating an isolated cmux
 - There is no native busy or push-event signal.
 - A target can disappear after structural readiness and before the operation.
 - The only-workspace cleanup path leaves a fresh default workspace and cannot close the window.
-- Label lookup and recovery are currently scoped to the current cmux window, so a task moved to a non-current window is a known recovery blind spot.
+- Direct label lookup outside bounded bootstrap remains scoped to the current cmux window; bounded-bootstrap inventory scans every window.
 - Workspace ids do not survive app relaunch and are never recovery authority.
 
 ## Regression entry points

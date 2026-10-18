@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Present durable watcher wake records, optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
-# informational status lines, OPEN DECISIONS, and captain-call record
-# divergence, then assert liveness.
+# informational status lines and OPEN DECISIONS for lifecycle-active tasks plus
+# queued status signals, surface captain-call record divergence, then assert
+# liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -13,6 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-supervision-registry-lib.sh
+. "$SCRIPT_DIR/fm-supervision-registry-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -228,7 +231,7 @@ EOF
 }
 
 # Print the consolidated OPEN DECISIONS section: every still-open
-# needs-decision/blocked, fleet-wide, folded from the durable status logs by
+# needs-decision/blocked in the presentation scope, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
 # scan_open_decisions_incremental wrapper) rather than from the annotations
 # above, so a decision buried under later unrelated appends cannot be silently
@@ -236,9 +239,11 @@ EOF
 # decisions; print_unread_status_section owns their one-shot surface. Runs on
 # every drain - including the empty-queue fast path - because the decision can
 # still be open even when nothing new is queued for
-# its task this turn. The incremental wrapper bounds this scan's cost to bytes
-# appended to each task's status log since the LAST drain, not that log's whole
-# lifetime, while still never dropping an old buried decision (see
+# its task this turn. The presentation scope is the committed active-supervision
+# task set plus status tasks named by this drain's queued signals; retained
+# history outside that lifecycle boundary is not reread. The incremental
+# wrapper bounds each included scan's cost to bytes appended since the LAST
+# drain, not that log's whole lifetime, while still never dropping an old buried decision (see
 # fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
@@ -350,20 +355,51 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged
+  local snapshot=${1:-} fully_presented=${2:-} preserve=${3:-false} acknowledged
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
   print_record_divergence_section || return 1
-  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  status_commit_presentation_snapshot "$STATE" "$acknowledged" "$preserve"
+}
+
+# Resolve the status presentation scope from the lifecycle owner without
+# reconciling endpoints: every task in the committed active-supervision
+# generation is eligible, and any validated status key in the queued rows is
+# added so retirement cannot hide a wake already committed for handling. A
+# missing or malformed registry fails and lets the caller retain the legacy
+# all-status compatibility scan. A valid empty registry succeeds with no task
+# ids and is authoritative.
+status_presentation_task_scope() {  # [<deduped-raw-rows>]
+  local rows=${1:-} active signal_tasks
+  active=$(fm_supervision_registry_active_tasks "$STATE") || return 1
+  signal_tasks=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
+    NF >= 1 {
+      task = $1
+      sub(/\.status$/, "", task)
+      print task
+    }
+  ') || return 1
+  {
+    [ -z "$active" ] || printf '%s\n' "$active"
+    [ -z "$signal_tasks" ] || printf '%s\n' "$signal_tasks"
+  } | awk 'NF && !seen[$0]++'
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot task_scope
+  local annotation_manifest fully_presented='' scoped=false rc=0
   fm_lock_acquire_wait "$lock" || return 1
-  snapshot=$(status_presentation_snapshot "$STATE") || rc=1
+  if task_scope=$(status_presentation_task_scope "$rows"); then
+    scoped=true
+    snapshot=$(status_presentation_snapshot "$STATE" "$task_scope") || rc=1
+  else
+    # A pre-registry home or an unreadable snapshot keeps the old conservative
+    # behavior until lifecycle recovery publishes a valid generation.
+    snapshot=$(status_presentation_snapshot "$STATE") || rc=1
+  fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     fm_wake_print_annotations "$rows" "$snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then
@@ -371,7 +407,9 @@ print_status_presentation() {  # [<deduped-raw-rows>]
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then
+    print_status_sections "$snapshot" "$fully_presented" "$scoped" || rc=1
+  fi
   fm_lock_release "$lock"
   return "$rc"
 }

@@ -65,21 +65,35 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
 The hints came from the `fm-test-timing-portable-serial-*` artifacts of green CI run [33177835155](https://github.com/suvojit-0x55aa/firstmate/actions/runs/33177835155) on 2026-08-28, where the lane ran 130 scripts in 3364754 ms of serial work.
-Every script in the lane on that run has a measured hint, so nothing currently falls back to the default weight.
+Every script in the lane on that run has a measured hint. Seven current additions
+still use the default weight; the expanded Codex Stop suite is budgeted below.
 A script with no hint gets the `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default, a neutral guess near the measured per-script mean rather than a safe overestimate, so an unmeasured script can be weighed well under its real cost.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for a shard to time out.
 
+The expanded Codex Stop driver now carries 120 top-level cases. CI run
+[39063061367](https://github.com/suvojit-0x55aa/firstmate/actions/runs/39063061367)
+spent 258708 ms reaching an early failure at case 16, proving that the old
+20000 ms fallback was not a usable whole-driver estimate. A later clean prefix
+reached case 24 only when its four-shard lane hit the 20-minute hang tripwire.
+Six focused entry points now source the same `tests/fm-codex-stop-suite.sh`
+driver, assigning all 120 cases exactly once while bounding each test script independently.
+The admission entry point carries a 900000 ms balance budget after CI run [39102498606](https://github.com/suvojit-0x55aa/firstmate/actions/runs/39102498606) measured 865113 ms before its late wake-queue assertion failed, four entry points carry 300000 ms budgets, and the shorter signal group carries 240000 ms.
+Refresh them from the next green timing artifacts.
+The current 143-script, six-shard assignment is:
+
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 32 | 841189 ms (~14.0 min) |
-| `portable-serial-2of4` | 33 | 841188 ms (~14.0 min) |
-| `portable-serial-3of4` | 32 | 841188 ms (~14.0 min) |
-| `portable-serial-4of4` | 33 | 841189 ms (~14.0 min) |
-| imbalance | | 1 ms |
+| `portable-serial-1of6` | 17 | 974134 ms (~16.2 min) |
+| `portable-serial-2of6` | 26 | 974124 ms (~16.2 min) |
+| `portable-serial-3of6` | 21 | 974131 ms (~16.2 min) |
+| `portable-serial-4of6` | 26 | 974124 ms (~16.2 min) |
+| `portable-serial-5of6` | 27 | 974118 ms (~16.2 min) |
+| `portable-serial-6of6` | 26 | 974123 ms (~16.2 min) |
+| imbalance | | 16 ms |
 
-The single longest script, `tests/fm-pr-check-security.test.sh` at 269682 ms, is the floor for any shard count.
+The 900000 ms admission budget and the 300000 ms budgets for the other long Codex Stop entry points are assignment floors until the next timing refresh.
 
 Before this refresh, twelve lane scripts had no hint and fell back to the 20000 ms default.
 Their real durations ranged from 17 ms to 62323 ms, and that guesswork, together with hints that had drifted since they were measured, pushed `portable-serial-3of4` to 1110544 ms of real work against 694447 ms on `portable-serial-1of4`.
@@ -115,7 +129,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-4 | job `timeout-minutes: 20` | Each balanced shard is about fourteen minutes of measured script time, leaving roughly 1.4x hang-tripwire margin for job setup and runner-speed spread. Growing the lane past that margin means raising `PORTABLE_SERIAL_SHARDS` and the `ci.yml` matrix together, not widening the cap. |
+| portable serial 1-6 | job `timeout-minutes: 20` | Each balanced shard is budgeted at about 16.2 minutes, leaving roughly 1.2x hang-tripwire margin for job setup and runner-speed spread. Growing the lane past that margin means raising `PORTABLE_SERIAL_SHARDS` and the `ci.yml` matrix together, not widening the cap. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finish around 7 minutes, so the step bound is the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. |
 
 Timeouts are hang tripwires rather than expected healthy durations.

@@ -350,11 +350,13 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window
+  local meta=$1 backend terminal window endpoint_state
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+    endpoint_state=$(fm_meta_get "$meta" endpoint_state)
+    [ "$endpoint_state" != worktree-only ] || return 0
   fi
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] && printf '%s' "$window"
@@ -385,7 +387,7 @@ fm_backend_endpoint_atom_valid() {  # <value>
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
-  local session pane recorded_session workspace tab terminal worktree_id surface
+  local session pane recorded_session workspace tab terminal worktree_id surface endpoint_state_count endpoint_state
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -493,16 +495,36 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
       worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
-      [ -n "$terminal" ] || {
-        echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
-        return 1
-      }
+      endpoint_state_count=$(grep -c '^endpoint_state=' "$meta" 2>/dev/null || true)
+      case "$endpoint_state_count" in
+        0) endpoint_state=complete ;;
+        1) endpoint_state=$(fm_backend_meta_exact_value "$meta" endpoint_state) || endpoint_state= ;;
+        *) endpoint_state= ;;
+      esac
       [ -n "$worktree_id" ] || {
         echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
         return 1
       }
+      case "$endpoint_state" in
+        complete)
+          [ -n "$terminal" ] || {
+            echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
+            return 1
+          }
+          ;;
+        worktree-only)
+          [ -z "$terminal" ] || {
+            echo "REFUSED: worktree-only Orca metadata unexpectedly names a terminal; preserving task state." >&2
+            return 1
+          }
+          ;;
+        *)
+          echo "REFUSED: Orca endpoint metadata for task $id has an invalid endpoint state; preserving task state." >&2
+          return 1
+          ;;
+      esac
       if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
+        || { [ -n "$terminal" ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
         || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
@@ -632,6 +654,125 @@ fm_backend_source() {  # <name>
       fi
       ;;
   esac
+}
+
+fm_backend_bounded_running_scopes() {
+  local requested=$1 running=$2 scope selected='' seen=$'\n' count=0
+  while IFS= read -r scope; do
+    [ -n "$scope" ] || continue
+    case "$seen" in *$'\n'"$scope"$'\n'*) continue ;; esac
+    seen="$seen$scope"$'\n'
+    case $'\n'"$running"$'\n' in *$'\n'"$scope"$'\n'*) ;; *) continue ;; esac
+    count=$((count + 1))
+    [ "$count" -le 8 ] || return 1
+    selected="${selected}${selected:+$'\n'}$scope"
+  done <<EOF
+$requested
+EOF
+  printf '%s' "$selected"
+}
+
+fm_backend_list_live() {
+  local requested=${1-$'tmux\t-\nherdr\tdefault\nzellij\tdefault\ncmux\t-'}
+  local backend requested_backend scope extra scopes live sessions session target label part raw status
+  local identity1 identity2 identity3 identity4 identity5
+  [ -n "$requested" ] || return 0
+  while IFS=$'\t' read -r requested_backend scope extra; do
+    [ -n "$requested_backend" ] && [ -n "$scope" ] && [ -z "$extra" ] || return 1
+    case "$requested_backend:$scope" in
+      tmux:-|cmux:-|herdr:?*|zellij:?*) ;;
+      *) return 1 ;;
+    esac
+    case "$scope" in *[$'\t\r\n']*) return 1 ;; esac
+  done <<EOF
+$requested
+EOF
+  for backend in tmux herdr zellij cmux; do
+    scopes=
+    while IFS=$'\t' read -r requested_backend scope extra; do
+      [ "$requested_backend" = "$backend" ] || continue
+      scopes="${scopes}${scopes:+$'\n'}$scope"
+    done <<EOF
+$requested
+EOF
+    [ -n "$scopes" ] || continue
+    fm_backend_source "$backend" || return 1
+    case "$backend" in
+      tmux)
+        [ "$scopes" = - ] || return 1
+        live=$(fm_backend_tmux_list_live) || return 1
+        ;;
+      herdr)
+        live=
+        raw=$(herdr session list --json 2>/dev/null) || return 1
+        printf '%s' "$raw" | jq -e '
+          (.sessions | type) == "array"
+          and all(.sessions[]; (.running | type) == "boolean" and (.name | type) == "string")
+        ' >/dev/null 2>&1 || return 1
+        sessions=$(printf '%s' "$raw" \
+          | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null) || return 1
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          case "$session" in *[$'\t\r\n']*) return 1 ;; esac
+        done <<EOF
+$sessions
+EOF
+        scopes=$(fm_backend_bounded_running_scopes "$scopes" "$sessions") || return 1
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          case $'\n'"$sessions"$'\n' in *$'\n'"$session"$'\n'*) ;; *) continue ;; esac
+          part=$(fm_backend_herdr_list_live_details "$session") || return 1
+          [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
+        done <<EOF
+$scopes
+EOF
+        ;;
+      zellij)
+        live=
+        raw=$(zellij list-sessions --short --no-formatting 2>&1)
+        status=$?
+        if [ "$status" -ne 0 ]; then
+          case "$raw" in
+            *"No active zellij sessions found"*|*"No active sessions found"*) raw= ;;
+            *) return 1 ;;
+          esac
+        fi
+        sessions=$raw
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          case "$session" in *[$'\t\r']*) return 1 ;; esac
+        done <<EOF
+$sessions
+EOF
+        scopes=$(fm_backend_bounded_running_scopes "$scopes" "$sessions") || return 1
+        while IFS= read -r session; do
+          [ -n "$session" ] || continue
+          case $'\n'"$sessions"$'\n' in *$'\n'"$session"$'\n'*) ;; *) continue ;; esac
+          part=$(fm_backend_zellij_list_live "$session") || return 1
+          [ -z "$part" ] || live="${live}${live:+$'\n'}$part"
+        done <<EOF
+$scopes
+EOF
+        ;;
+      cmux)
+        [ "$scopes" = - ] || return 1
+        live=$(fm_backend_cmux_list_live) || return 1
+        ;;
+    esac
+    while IFS="$(printf '\t')" read -r target label identity1 identity2 identity3 identity4 identity5; do
+      [ -n "$target" ] && [ -n "$label" ] || continue
+      [ -n "$identity1" ] || identity1=-
+      [ -n "$identity2" ] || identity2=-
+      [ -n "$identity3" ] || identity3=-
+      [ -n "$identity4" ] || identity4=-
+      [ -n "$identity5" ] || identity5=-
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$backend" "$target" "$label" "$identity1" "$identity2" "$identity3" \
+        "$identity4" "$identity5" || return 1
+    done <<EOF
+$live
+EOF
+  done
 }
 
 # fm_backend_resolve_selector: resolve a raw fm-send.sh/fm-peek.sh style
@@ -870,6 +1011,54 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+fm_backend_reservation_identity() {
+  local backend=$1
+  shift
+  case "$backend" in
+    tmux)
+      fm_backend_source tmux || { printf 'unverified\t-\n'; return 0; }
+      fm_backend_tmux_reservation_identity "$@"
+      ;;
+    *) printf 'unverified\t-\n' ;;
+  esac
+}
+
+fm_backend_recover_planned() {
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_recover_planned "$@" ;;
+    herdr) fm_backend_herdr_recover_planned "$@" ;;
+    zellij) fm_backend_zellij_recover_planned "$@" ;;
+    cmux) fm_backend_cmux_recover_planned "$@" ;;
+    orca) fm_backend_orca_recover_planned "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_finalize_reservation() {
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_finalize_reservation "$@" ;;
+    herdr) fm_backend_herdr_finalize_reservation "$@" ;;
+    zellij) fm_backend_zellij_finalize_reservation "$@" ;;
+    cmux) fm_backend_cmux_finalize_reservation "$@" ;;
+    *) return 0 ;;
+  esac
+}
+
+fm_backend_retire_reservation() {
+  local backend=$1
+  shift
+  case "$backend" in
+    tmux) fm_backend_source tmux && fm_backend_tmux_retire_reservation "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_agent_state: the single recovery-grade agent/endpoint state
 # contract. It is deliberately richer than fm_backend_target_exists's cheap
 # pane-presence read and prints exactly one of:
@@ -893,6 +1082,104 @@ fm_backend_agent_state() {  # <backend> <target>
     herdr) fm_backend_herdr_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
+}
+
+fm_backend_agent_state_cache_key() {
+  printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'
+}
+
+fm_backend_agent_state_batch() {  # stdin: <backend><tab><target><tab><route><tab><home>[<tab><payload>]
+  local cache_dir backend target route owner_home payload state session scope_key scope_dir snapshot_status
+  local batch_status=0 tmux_cache_failed=0 herdr_cache_failed=0
+  cache_dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-agent-state.XXXXXX") || return 1
+  while IFS="$(printf '\t')" read -r backend target route owner_home payload; do
+    [ -n "$backend" ] && [ -n "$target" ] || continue
+    if [ "$route" = remote ]; then
+      state=unverified
+    else
+      case "$backend" in
+        tmux)
+        if [ "$tmux_cache_failed" -eq 1 ] || ! fm_backend_source tmux; then
+          state=unverified
+        else
+          case "$target" in
+            *:*:*|'':*|*:'') state=unreadable ;;
+            *:*)
+              session=${target%%:*}
+              if ! scope_key=$(fm_backend_agent_state_cache_key "$session"); then
+                state=unreadable
+              else
+                scope_dir="$cache_dir/tmux-$scope_key"
+                if [ ! -e "$scope_dir/status" ] \
+                  && ! fm_backend_tmux_agent_inventory_snapshot "$session" "$scope_dir"; then
+                  tmux_cache_failed=1
+                  state=unreadable
+                else
+                  snapshot_status=$(cat "$scope_dir/status" 2>/dev/null || true)
+                  case "$snapshot_status" in
+                    ok|missing|unreadable)
+                      state=$(fm_backend_tmux_agent_state "$target" "$snapshot_status" "$scope_dir")
+                      ;;
+                    *)
+                      tmux_cache_failed=1
+                      state=unreadable
+                      ;;
+                  esac
+                fi
+              fi
+              ;;
+            *) state=unreadable ;;
+          esac
+        fi
+          ;;
+        herdr)
+        if [ "$herdr_cache_failed" -eq 1 ] || ! fm_backend_source herdr; then
+          state=unverified
+        elif ! fm_backend_herdr_parse_target "$target"; then
+          state=unreadable
+        else
+          session=$FM_BACKEND_HERDR_SESSION
+          if ! scope_key=$(fm_backend_agent_state_cache_key "$session"); then
+            state=unreadable
+          else
+            scope_dir="$cache_dir/herdr-$scope_key"
+            if [ ! -e "$scope_dir/status" ] \
+              && ! fm_backend_herdr_agent_inventory_snapshot "$session" "$scope_dir"; then
+              herdr_cache_failed=1
+              state=unverified
+            else
+              snapshot_status=$(cat "$scope_dir/status" 2>/dev/null || true)
+              case "$snapshot_status" in
+                ok|unverified)
+                  state=$(fm_backend_herdr_agent_state_from_snapshot "$target" "$snapshot_status" "$scope_dir")
+                  ;;
+                *)
+                  herdr_cache_failed=1
+                  state=unverified
+                  ;;
+              esac
+            fi
+          fi
+        fi
+          ;;
+        *) state=unverified ;;
+      esac
+    fi
+    printf '%s\t%s\t%s\t%s\t%s' "$backend" "$target" "$state" "$route" "$owner_home" || {
+      batch_status=1
+      break
+    }
+    [ -z "$payload" ] || printf '\t%s' "$payload" || {
+      batch_status=1
+      break
+    }
+    printf '\n' || {
+      batch_status=1
+      break
+    }
+  done
+  find "$cache_dir" -depth -delete 2>/dev/null || batch_status=1
+  return "$batch_status"
 }
 
 # Backward-compatible three-state view for existing callers. An

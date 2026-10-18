@@ -181,7 +181,27 @@ assert_duplicate_refused() {
 test_codex_turn_end_requires_a_successor_after_each_acknowledged_wake() {
   local home round harness out
   home=$(make_primary_home codex-successor)
-  : > "$home/state/task1.meta"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_recover "$FM_STATE_OVERRIDE"
+  ' _ "$home/bin" || fail 'could not initialize the native successor registry'
+  cat > "$home/state/task1.meta" <<EOF
+window=firstmate:fm-task1
+worktree=$home
+project=$home
+harness=codex
+kind=ship
+spawn_gen=fixture-task1
+EOF
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1/fm-wake-lib.sh"
+    . "$1/fm-backend.sh"
+    . "$1/fm-supervision-registry-lib.sh"
+    fm_supervision_registry_register \
+      "$FM_STATE_OVERRIDE" task1 "$FM_STATE_OVERRIDE/task1.meta"
+  ' _ "$home/bin" || fail 'could not register the native successor fixture task'
   ln -s /bin/bash "$home/codex"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_CODEX_WATCH_CHECKPOINT=30 \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 "$home/codex" -c '
@@ -196,7 +216,7 @@ test_codex_turn_end_requires_a_successor_after_each_acknowledged_wake() {
   for round in 1 2; do
     wait_for_successor_lock "$home"
     assert_duplicate_refused "$home" "$round"
-    printf 'done: synthetic consecutive wake %s\n' "$round" >> "$home/state/demo.status"
+    printf 'done: synthetic consecutive wake %s\n' "$round" >> "$home/state/task1.status"
     for _ in $(seq 1 200); do [ -s "$home/native-$round.rc" ] && break; sleep 0.05; done
     [ -s "$home/native-$round.rc" ] || fail "native Stop $round did not return"
     expect_code 2 "$(cat "$home/native-$round.rc")" "native actionable continuation $round"

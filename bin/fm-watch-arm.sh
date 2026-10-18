@@ -142,7 +142,7 @@ cycle_log_append() {
   local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after size tmp raw i
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
-  beacon_age=$(fm_path_age "$BEAT")
+  beacon_age=$(fm_path_age "$BEAT") || beacon_age=unavailable
   lock_after=$(lock_snapshot)
 
   i=0
@@ -250,7 +250,7 @@ healthy_watcher() {
 
 report_attached() {
   local age
-  age=$(fm_path_age "$BEAT")
+  age=$(fm_path_age "$BEAT") || age=unavailable
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
 }
 
@@ -448,6 +448,10 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
+arm_owner_record=
+cleanup_arm_owner_record() {
+  [ -z "$arm_owner_record" ] || rm -f "$arm_owner_record" "$arm_owner_record.tmp" 2>/dev/null || true
+}
 cleanup_child() {
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
@@ -467,6 +471,7 @@ handle_arm_signal() {
   fi
   cycle_log_append "$rc" "$signal" arm-interrupted none
   cleanup_child
+  cleanup_arm_owner_record
   exit "$rc"
 }
 
@@ -478,17 +483,38 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
+case "${FM_CODEX_CHECK_BATCH_LEASE:-}" in
+  ''|*[!A-Za-z0-9._-]*)
+    unset FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
+    ;;
+  *)
+    FM_WATCH_ARM_OWNER_PID=${BASHPID:-$$}
+    FM_WATCH_ARM_OWNER_IDENTITY=$(fm_pid_identity "$FM_WATCH_ARM_OWNER_PID" 2>/dev/null || true)
+    [ -n "$FM_WATCH_ARM_OWNER_IDENTITY" ] || exit 1
+    export FM_WATCH_ARM_OWNER_PID FM_WATCH_ARM_OWNER_IDENTITY
+    arm_owner_record="$STATE/.codex-arm-owner"
+    ( umask 077; printf 'fm-codex-arm-launch.v1\t%s\t%s\t%s\tpending\n' \
+        "$FM_CODEX_CHECK_BATCH_LEASE" "$FM_WATCH_ARM_OWNER_PID" \
+        "$FM_WATCH_ARM_OWNER_IDENTITY" > "$arm_owner_record.tmp" ) \
+      && mv -f "$arm_owner_record.tmp" "$arm_owner_record" || exit 1
+    ;;
+esac
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
   "$WATCH" >"$child_out" &
 fi
 child=$!
+if [ "${FM_TEST_WATCH_ARM_EXIT_AFTER_FORK:-0}" = 1 ]; then
+  printf '%s\n' "$child" > "$FM_HOME/arm-exit-candidate-pid"
+  exit 1
+fi
 cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
 child_done=0
 
 owned_child_finished() {
   local rc=$1 signal reason_type status
+  cleanup_arm_owner_record
   signal=$(cycle_signal_name "$rc")
   if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
     reason_type=$(watch_output_reason_type "$child_out")
@@ -553,6 +579,7 @@ while :; do
       if ! handling_generation=$(handling_successor_generation); then
         cleanup_child
         wait "$child" 2>/dev/null || true
+        cleanup_arm_owner_record
         cycle_log_append 1 none handling-handoff-failed none
         echo "watcher: FAILED - established successor could not inspect handling state"
         exit 1
@@ -590,6 +617,7 @@ print_watch_output "$child_out"
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
+cleanup_arm_owner_record
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1

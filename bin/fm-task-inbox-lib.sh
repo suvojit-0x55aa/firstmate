@@ -312,15 +312,8 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   printf '%s' "$best"
 }
 
-# The re-ring ladder decision for one task. Prints exactly one of:
-#   quiet                     nothing due (healthy, within grace or spacing,
-#                             or already escalated for the current oldest)
-#   ring <record-path>        one doorbell re-ring is due
-#   escalate <record-path> <count>   attempt budget spent; surface as stale
-# An empty inbox also resets the ladder bookkeeping so the next message starts
-# a fresh ladder.
-fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+_fm_task_inbox_due_state() {  # <state-dir> <task-id>
+  local dir oldest base now grace max ladder rec_base count last mtime
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
@@ -329,8 +322,10 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   fi
   base=${oldest##*/}
   grace=$(fm_task_inbox_grace_secs)
-  if [ "$(fm_path_age "$oldest")" -lt "$grace" ]; then
-    printf 'quiet'
+  now=$(date +%s)
+  mtime=$(fm_path_mtime "$oldest") || mtime=$((now - grace))
+  if [ "$((now - mtime))" -lt "$grace" ]; then
+    printf 'quiet\t%s' "$((mtime + grace))"
     return 0
   fi
   count=0
@@ -356,12 +351,25 @@ EOF
     printf 'escalate %s %s' "$oldest" "$count"
     return 0
   fi
-  now=$(date +%s)
   if [ "$((now - last))" -lt "$grace" ]; then
-    printf 'quiet'
+    printf 'quiet\t%s' "$((last + grace))"
     return 0
   fi
   printf 'ring %s' "$oldest"
+}
+
+# The re-ring ladder decision for one task. Prints exactly one of:
+#   quiet                     nothing due (healthy, within grace or spacing,
+#                             or already escalated for the current oldest)
+#   ring <record-path>        one doorbell re-ring is due
+#   escalate <record-path> <count>   attempt budget spent; surface as stale
+# An empty inbox also resets the ladder bookkeeping so the next message starts
+# a fresh ladder.
+fm_task_inbox_due_action() {  # <state-dir> <task-id>
+  local state tab
+  state=$(_fm_task_inbox_due_state "$1" "$2") || return
+  tab=$(printf '\t')
+  printf '%s' "${state%%"$tab"*}"
 }
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-

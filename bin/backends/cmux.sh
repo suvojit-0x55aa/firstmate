@@ -341,6 +341,47 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
+fm_backend_cmux_recover_planned() {  # <task> <target> <detail>
+  local task=$1 target=$2 detail=$3 spawn_gen=${4:-} label expected list workspaces count workspace surface
+  label="fm-$task"
+  [ -z "$spawn_gen" ] || label="$label--$spawn_gen"
+  [ "$target" = "$label" ] || return 1
+  expected=$(fm_backend_cmux_scoped_title "$target")
+  [ "$detail" = "$expected" ] || return 1
+  list=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e '(.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  workspaces=$(printf '%s' "$list" | jq -r --arg want "$expected" \
+    '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$workspaces" | awk 'NF { n++ } END { print n + 0 }')
+  [ "$count" -le 1 ] || return 1
+  if [ "$count" -eq 0 ]; then
+    printf 'missing\t-\t-\t-\t-\t-\t-\t-\t-\n'
+    return 0
+  fi
+  workspace=$workspaces
+  surface=$(fm_backend_cmux_surface_id_for_workspace "$workspace") || return 1
+  [ -n "$surface" ] || return 1
+  case "$workspace$surface" in *[$'\t\r\n']*) return 1 ;; esac
+  printf 'found\tcreated\t%s:%s\t%s\t-\t%s\t%s\t-\t-\n' \
+    "$workspace" "$surface" "$workspace" "$workspace" "$surface"
+}
+
+fm_backend_cmux_finalize_reservation() {  # <workspace:surface> <task> <spawn>
+  local target=$1 task=$2 spawn_gen=$3 workspace expected final expected_title final_title list live collision
+  workspace=${target%%:*}
+  expected="fm-$task--$spawn_gen"
+  final="fm-$task"
+  expected_title=$(fm_backend_cmux_scoped_title "$expected")
+  final_title=$(fm_backend_cmux_scoped_title "$final")
+  list=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  live=$(printf '%s' "$list" | jq -r --arg id "$workspace" '.workspaces[]? | select(.id == $id) | .title' 2>/dev/null)
+  [ "$live" = "$final_title" ] && return 0
+  [ "$live" = "$expected_title" ] || return 1
+  collision=$(printf '%s' "$list" | jq -r --arg want "$final_title" '.workspaces[]? | select(.title == $want) | .id' 2>/dev/null)
+  [ -z "$collision" ] || return 1
+  fm_backend_cmux_cli rename-workspace --workspace "$workspace" --name "$final_title" >/dev/null 2>&1
+}
+
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
 # refusing an existing live <label> (finding #6: cmux enforces no uniqueness
 # itself). Resolves the fresh workspace's default surface via one list-panes
@@ -632,18 +673,158 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
 # whose title is scoped to this firstmate home, by TITLE - never by trusting a
 # stored uuid, since workspace ids do NOT survive an app relaunch (finding #5).
 # One "<workspace_id>:<surface_id>\t<fm-id>" line per live task workspace.
-# Read-only: an unreachable cmux simply lists nothing.
+# Read-only.
+fm_backend_cmux_windows_inventory() {
+  local wins
+  wins=$(fm_backend_cmux_cli list-windows --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$wins" | jq -e '
+    type == "array"
+    and all(.[]; (.id | type) == "string" and (.id | length) > 0
+      and (.id | test("[\\t\\r\\n]") | not)
+      and (.workspace_count | type) == "number"
+      and .workspace_count >= 0
+      and .workspace_count == (.workspace_count | floor))
+    and ([.[].id] | length) == ([.[].id] | unique | length)
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$wins" | jq -r 'sort_by(.id)[] | [.id, (.workspace_count | tostring)] | @tsv' 2>/dev/null
+}
+
+fm_backend_cmux_workspaces_inventory() {  # <window-id> <expected-count>
+  local wss
+  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids --window "$1" 2>/dev/null) || return 1
+  printf '%s' "$wss" | jq -e --argjson expected "$2" '
+    (.workspaces | type) == "array"
+    and (.workspaces | length) == $expected
+    and all(.workspaces[]; (.id | type) == "string" and (.id | length) > 0
+      and (.id | test("[\\t\\r\\n]") | not)
+      and (.title | type) == "string"
+      and (.title | test("[\\t\\r\\n]") | not))
+    and ([.workspaces[].id] | length) == ([.workspaces[].id] | unique | length)
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$wss" | jq -r '.workspaces | sort_by([.id, .title])[] | [.id, .title] | @tsv' 2>/dev/null
+}
+
+fm_backend_cmux_panes_inventory() {  # <workspace-id>
+  local panes
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$1" --json --id-format uuids 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '
+    (.panes | type) == "array"
+    and (.panes | length) == 1
+    and all(.panes[];
+      . as $pane
+      | type == "object"
+      and ($pane.selected_surface_id == null
+        or (($pane.selected_surface_id | type) == "string"
+          and ($pane.selected_surface_id | length) > 0
+          and ($pane.selected_surface_id | test("[\\t\\r\\n]") | not)))
+      and ($pane.surface_ids == null
+        or (($pane.surface_ids | type) == "array"
+          and all($pane.surface_ids[]; type == "string" and length > 0
+            and (test("[\\t\\r\\n]") | not))
+          and ($pane.surface_ids | length) == ($pane.surface_ids | unique | length)))
+      and ($pane.selected_surface_id == null
+        or $pane.surface_ids == null
+        or ($pane.surface_ids | index($pane.selected_surface_id)) != null))
+    and ([.panes[0].selected_surface_id, ((.panes[0].surface_ids // [])[])]
+      | map(select(. != null)) | unique | length) == 1
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$panes" | jq -c '
+    {
+      target_surface_id: ([.panes[0].selected_surface_id, ((.panes[0].surface_ids // [])[])]
+        | map(select(. != null)) | unique | .[0]),
+      panes: ([.panes[] | {
+        selected_surface_id: (.selected_surface_id // null),
+        surface_ids: ((.surface_ids // []) | sort)
+      }] | sort_by([(.selected_surface_id // ""), (.surface_ids | join("\\u0000"))]))
+    }
+  ' 2>/dev/null
+}
+
 fm_backend_cmux_list_live() {
-  local wss wsid title sfid home prefix plain
+  local windows windows_after wid expected wss wsid title sfid home prefix plain
+  local pane_inventory snapshot snapshot_after live row task_labels task_labels_after seen_label duplicate
   home=$(fm_backend_cmux_home_label)
   prefix="fm-$home-"
-  wss=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 0
-  while IFS=$'\t' read -r wsid title; do
-    [ -n "$wsid" ] || continue
-    plain=${title#"$prefix"}
-    [ -n "$plain" ] || continue
-    sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-    [ -n "$sfid" ] || continue
-    printf '%s:%s\tfm-%s\n' "$wsid" "$sfid" "$plain"
-  done < <(printf '%s' "$wss" | jq -r --arg prefix "$prefix" '.workspaces[]? | select(.title | startswith($prefix)) | "\(.id)\t\(.title)"' 2>/dev/null)
+  snapshot=
+  snapshot_after=
+  live=
+  task_labels=
+  task_labels_after=
+  windows=$(fm_backend_cmux_windows_inventory) || return 1
+  while IFS=$'\t' read -r wid expected; do
+    [ -n "$wid" ] || continue
+    [ -n "$expected" ] || return 1
+    wss=$(fm_backend_cmux_workspaces_inventory "$wid" "$expected") || return 1
+    while IFS=$'\t' read -r wsid title; do
+      [ -n "$wsid" ] || continue
+      row="$wid"$'\t'"$wsid"$'\t'"$title"
+      case "$title" in
+        "$prefix"*) ;;
+        *) snapshot="${snapshot}${row}"$'\n'; continue ;;
+      esac
+      plain=${title#"$prefix"}
+      if [ -z "$plain" ]; then
+        snapshot="${snapshot}${row}"$'\n'
+        continue
+      fi
+      duplicate=
+      while IFS= read -r seen_label; do
+        if [ "$seen_label" = "$plain" ]; then
+          duplicate=1
+          break
+        fi
+      done <<EOF
+$task_labels
+EOF
+      [ -z "$duplicate" ] || return 1
+      task_labels="${task_labels}${plain}"$'\n'
+      pane_inventory=$(fm_backend_cmux_panes_inventory "$wsid") || return 1
+      snapshot="${snapshot}${row}"$'\t'"$pane_inventory"$'\n'
+      sfid=$(printf '%s' "$pane_inventory" | jq -r '.target_surface_id // empty' 2>/dev/null) || return 1
+      [ -n "$sfid" ] || return 1
+      live="${live}${wsid}:${sfid}"$'\t'"fm-${plain}"$'\n'
+    done <<EOF
+$wss
+EOF
+  done <<EOF
+$windows
+EOF
+
+  windows_after=$(fm_backend_cmux_windows_inventory) || return 1
+  [ "$windows_after" = "$windows" ] || return 1
+  while IFS=$'\t' read -r wid expected; do
+    [ -n "$wid" ] || continue
+    [ -n "$expected" ] || return 1
+    wss=$(fm_backend_cmux_workspaces_inventory "$wid" "$expected") || return 1
+    while IFS=$'\t' read -r wsid title; do
+      [ -n "$wsid" ] || continue
+      row="$wid"$'\t'"$wsid"$'\t'"$title"
+      case "$title" in
+        "$prefix"*) plain=${title#"$prefix"} ;;
+        *) plain= ;;
+      esac
+      if [ -n "$plain" ]; then
+        duplicate=
+        while IFS= read -r seen_label; do
+          if [ "$seen_label" = "$plain" ]; then
+            duplicate=1
+            break
+          fi
+        done <<EOF
+$task_labels_after
+EOF
+        [ -z "$duplicate" ] || return 1
+        task_labels_after="${task_labels_after}${plain}"$'\n'
+        pane_inventory=$(fm_backend_cmux_panes_inventory "$wsid") || return 1
+        row="$row"$'\t'"$pane_inventory"
+      fi
+      snapshot_after="${snapshot_after}${row}"$'\n'
+    done <<EOF
+$wss
+EOF
+  done <<EOF
+$windows_after
+EOF
+  [ "$snapshot_after" = "$snapshot" ] || return 1
+  printf '%s' "$live"
 }

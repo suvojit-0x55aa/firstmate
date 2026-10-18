@@ -91,7 +91,7 @@ JOBS_MAX=8
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
-PORTABLE_SERIAL_SHARDS=4
+PORTABLE_SERIAL_SHARDS=6
 
 # Balance hint for a portable-serial script with no measured duration, close to
 # the measured per-script mean so a newly added test neither starves nor
@@ -156,9 +156,13 @@ family_for_basename() {
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
-    fm-wake-queue.test.sh|fm-codex-stop.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
+    fm-wake-queue.test.sh|\
+    fm-codex-stop-admission.test.sh|fm-codex-stop-cycle.test.sh|\
+    fm-codex-stop-inventory.test.sh|fm-codex-stop-checks.test.sh|\
+    fm-codex-stop-signals.test.sh|fm-codex-stop-ownership.test.sh|\
+    fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
-    fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
+    fm-watcher-lock.test.sh|fm-lock-unusable-parent.test.sh|fm-inactive-reconcile.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     fm-afk-inject-herdr-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
@@ -416,6 +420,12 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 18
 tests/fm-claude-stop-autoarm.test.sh 60641
 tests/fm-cmux-claude-composer-live-e2e.test.sh 18
 tests/fm-codex-continuity-live-e2e.test.sh 16
+tests/fm-codex-stop-admission.test.sh 900000
+tests/fm-codex-stop-checks.test.sh 300000
+tests/fm-codex-stop-cycle.test.sh 300000
+tests/fm-codex-stop-inventory.test.sh 300000
+tests/fm-codex-stop-ownership.test.sh 300000
+tests/fm-codex-stop-signals.test.sh 240000
 tests/fm-composer-matrix-live-e2e.test.sh 21
 tests/fm-control-relaunch.test.sh 60445
 tests/fm-control.test.sh 37413
@@ -955,6 +965,9 @@ families_for_changed_path() {
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+      printf '%s\n' watcher-wake-lock
+      ;;
+    tests/fm-codex-stop-suite.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)

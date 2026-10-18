@@ -124,8 +124,116 @@ fm_pending_reply_dir() {  # <state-dir>
   printf '%s/pending-replies' "$state"
 }
 
+fm_pending_reply_corr_valid() {  # <corr_id>
+  [ "${#1}" -eq 16 ] || return 1
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
 fm_pending_reply_path() {  # <state-dir> <corr_id>
+  fm_pending_reply_corr_valid "$2" || return 1
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
+}
+
+# A task-keyed open-record index keeps bounded supervision from walking the
+# historical pending-reply archive.  The records remain the schema owner; index
+# entries contain only the correlation id, with unfinished publications kept
+# as a bounded journal beside the index after the one-time archive rebuild.
+fm_pending_reply_index_root() { printf '%s/.pending-reply-active-v1' "$1"; }
+fm_pending_reply_task_key() { printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n'; }
+fm_pending_reply_index_task_dir() {
+  printf '%s/%s' "$(fm_pending_reply_index_root "$1")" "$(fm_pending_reply_task_key "$2")"
+}
+fm_pending_reply_index_add() {  # <state> <task> <corr>
+  local dir tmp
+  fm_pending_reply_corr_valid "$3" || return 1
+  dir=$(fm_pending_reply_index_task_dir "$1" "$2") || return 1
+  mkdir -p "$dir" || return 1
+  tmp="$dir/.$3.tmp.${BASHPID:-$$}"
+  if ! ( umask 077; printf '%s\n' "$3" > "$tmp" ) \
+    || ! mv -f -- "$tmp" "$dir/$3"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+fm_pending_reply_index_remove() {  # <state> <task> <corr>
+  local dir
+  fm_pending_reply_corr_valid "$3" || return 1
+  dir=$(fm_pending_reply_index_task_dir "$1" "$2") || return 1
+  rm -f -- "$dir/$3"
+  rmdir "$dir" 2>/dev/null || true
+}
+fm_pending_reply_index_prepare() {  # <state> <task> <corr>
+  local root marker tmp
+  fm_pending_reply_corr_valid "$3" || return 1
+  root=$(fm_pending_reply_index_root "$1")
+  [ ! -e "$root" ] || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
+  mkdir -p "$root" || return 1
+  marker="$root/.publish-$3"
+  tmp="$root/.publish-$3.tmp.${BASHPID:-$$}"
+  if ! ( umask 077; printf '%s\n' "$2" > "$tmp" ) \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+fm_pending_reply_index_commit() {  # <state> <task> <corr>
+  fm_pending_reply_index_add "$1" "$2" "$3" || return 1
+  rm -f -- "$(fm_pending_reply_index_root "$1")/.publish-$3"
+}
+fm_pending_reply_index_abort() {  # <state> <corr>
+  fm_pending_reply_corr_valid "$2" || return 1
+  rm -f -- "$(fm_pending_reply_index_root "$1")/.publish-$2"
+}
+fm_pending_reply_index_recover() {  # <state>
+  local state=$1 root dir rec corr task phase tmp protocol marker ready=0
+  root=$(fm_pending_reply_index_root "$state")
+  if [ -f "$root/.ready" ] && [ ! -L "$root/.ready" ]; then
+    IFS= read -r protocol < "$root/.ready" || return 1
+    [ "$protocol" = fm-pending-reply-active.v1 ] || return 1
+    ready=1
+  fi
+  [ ! -e "$root" ] || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
+  mkdir -p "$root" || return 1
+  dir=$(fm_pending_reply_dir "$state")
+  if [ "$ready" -eq 0 ] && [ -d "$dir" ] && [ ! -L "$dir" ]; then
+    for rec in "$dir"/*; do
+      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+      case "${rec##*/}" in .*) continue ;; esac
+      corr=$(fm_pending_reply_get "$rec" corr_id); [ -n "$corr" ] || corr=${rec##*/}
+      fm_pending_reply_corr_valid "$corr" || continue
+      task=$(fm_pending_reply_get "$rec" task_id)
+      phase=$(fm_pending_reply_get "$rec" phase)
+      [ -n "$task" ] && [ "$phase" != resolved ] || continue
+      fm_pending_reply_index_add "$state" "$task" "$corr" || return 1
+    done
+  fi
+  if [ "$ready" -eq 0 ]; then
+    tmp="$root/.ready.tmp.${BASHPID:-$$}"
+    if ! ( umask 077; printf 'fm-pending-reply-active.v1\n' > "$tmp" ) \
+      || ! mv -f -- "$tmp" "$root/.ready"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  fi
+  for marker in "$root"/.publish-*; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    corr=${marker##*/.publish-}
+    case "$corr" in *.tmp.*) continue ;; esac
+    fm_pending_reply_corr_valid "$corr" || return 1
+    IFS= read -r task < "$marker" || return 1
+    [ -n "$task" ] || return 1
+    rec=$(fm_pending_reply_path "$state" "$corr") || return 1
+    [ -e "$rec" ] || continue
+    [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+    [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 1
+    [ "$(fm_pending_reply_get "$rec" task_id)" = "$task" ] || return 1
+    phase=$(fm_pending_reply_get "$rec" phase)
+    if [ "$phase" = resolved ]; then
+      rm -f -- "$marker" || return 1
+      continue
+    fi
+    fm_pending_reply_index_commit "$state" "$task" "$corr" || return 1
+  done
 }
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
@@ -183,7 +291,8 @@ fm_pending_reply_get() {  # <record-path> <key>
 
 fm_pending_reply_corr_reusable() {  # <state-dir> <corr_id> <task_id>
   local state=$1 corr=$2 task_id=$3 rec phase delivered
-  printf '%s' "$corr" | grep -Eq '^[A-Fa-f0-9]{16}$' || return 1
+  corr=$(printf '%s' "$corr" | tr 'A-F' 'a-f')
+  fm_pending_reply_corr_valid "$corr" || return 1
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" task_id)" = "$task_id" ] || return 1
@@ -300,7 +409,19 @@ wrong_home_scan_signature=
 grace_secs=$(fm_pending_reply_grace_secs)
 EOF
   chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$rec" || return 1
+  if ! fm_pending_reply_index_prepare "$state" "$task_id" "$corr"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$rec"; then
+    fm_pending_reply_index_abort "$state" "$corr" || true
+    return 1
+  fi
+  if ! fm_pending_reply_index_commit "$state" "$task_id" "$corr"; then
+    rm -f -- "$rec"
+    fm_pending_reply_index_abort "$state" "$corr" || true
+    return 1
+  fi
   printf '%s' "$corr"
 }
 
@@ -498,14 +619,16 @@ _fm_pending_reply_reset_known_undelivered_locked() {  # <state-dir> <corr_id>
 # Drop an undelivered expectation after a failed send so transport failure does
 # not masquerade as a missed report later.
 fm_pending_reply_discard_undelivered() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec delivered marker
+  local state=$1 corr=$2 rec delivered marker task_id
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 0
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -z "$delivered" ] || return 1
   marker=$(fm_pending_reply_delivery_confirmation_path "$state" "$corr")
+  task_id=$(fm_pending_reply_get "$rec" task_id)
   rm -f "$marker" 2>/dev/null || true
-  rm -f "$rec"
+  rm -f "$rec" || return 1
+  [ -z "$task_id" ] || fm_pending_reply_index_remove "$state" "$task_id" "$corr"
 }
 
 # 0 if a status line is a correlated acknowledgement for <corr_id>.
@@ -597,7 +720,7 @@ fm_pending_reply_try_resolve() {  # <state-dir> <corr_id> [status-file-override]
 
 _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-override]
   local state=$1 corr=$2 status_override=${3-}
-  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now
+  local rec phase delivered marker delivery_entry delivery_state status_file signature previous line via now task_id
   local unconfirmed=0
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -637,6 +760,8 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  [ -z "$task_id" ] || fm_pending_reply_index_remove "$state" "$task_id" "$corr" || return 1
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
@@ -644,7 +769,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
 }
 
 # Observe backend busy/idle evidence for the active turn without reading chat.
-# busy_state must be one of: busy | idle | unknown.
+# busy_state must be one of: busy | idle | unknown | unavailable.
 fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
   local state=$1 corr=$2 busy_state=$3
   local rec phase delivered now seen completed field_seen field_completed
@@ -682,7 +807,7 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
         fi
       fi
       ;;
-    unknown)
+    unknown|unavailable)
       # No independent proof; leave completion unset.
       ;;
     *)
@@ -692,7 +817,7 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
   return 0
 }
 
-fm_pending_reply_fallback_idle_eligible() {  # <record-path>
+_fm_pending_reply_fallback_idle_state() {  # <record-path>
   local rec=$1 phase start seen grace now age
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
@@ -706,13 +831,24 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
       ;;
     *) return 1 ;;
   esac
-  [ "$seen" = 1 ] && return 0
+  if [ "$seen" = 1 ]; then
+    printf 'eligible'
+    return 0
+  fi
   grace=$(fm_pending_reply_get "$rec" grace_secs)
   case "$start" in ''|*[!0-9]*) return 1 ;; esac
   case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
   now=$(fm_pending_reply_now)
   age=$((now - start))
-  [ "$age" -ge "$grace" ]
+  if [ "$age" -ge "$grace" ]; then
+    printf 'eligible'
+  else
+    printf 'waiting\t%s' "$((start + grace))"
+  fi
+}
+
+fm_pending_reply_fallback_idle_eligible() {  # <record-path>
+  [ "$(_fm_pending_reply_fallback_idle_state "$1")" = eligible ]
 }
 
 # fm_pending_reply_backend_observation: one busy/idle observation of a
@@ -750,7 +886,7 @@ fm_pending_reply_backend_observation() {  # <backend> <target> [expected-label] 
 fm_pending_reply_busy_state_from_observation() {  # <record-path> <observation>
   local rec=$1 observation=$2
   case "$observation" in
-    busy|idle|unknown) printf '%s' "$observation" ;;
+    busy|idle|unknown|unavailable) printf '%s' "$observation" ;;
     fallback-idle)
       if fm_pending_reply_fallback_idle_eligible "$rec"; then
         printf 'idle'
@@ -840,16 +976,118 @@ fm_pending_reply_target_is_remote() {  # <state-dir> <task_id>
   [ -n "$(fm_meta_get "$meta" remote_host)" ]
 }
 
+fm_pending_reply_recovery_eligibility_token() {  # <state-dir> <task_id> <turn-completed-epoch>
+  local state=$1 task_id=$2 completed=$3 caught
+  [ -n "$state" ] && [ -n "$task_id" ] || return 2
+  case "$completed" in
+    ''|*[!0-9]*) printf 'waiting-turn'; return 0 ;;
+  esac
+  if ! fm_pending_reply_target_is_remote "$state" "$task_id"; then
+    printf 'actionable'
+    return 0
+  fi
+  caught=$(fm_pending_reply_remote_channel_epoch "$state" "$task_id")
+  case "$caught" in
+    ''|*[!0-9]*) printf 'waiting-channel'; return 0 ;;
+  esac
+  if [ "$caught" -ge "$completed" ]; then
+    printf 'actionable'
+  else
+    printf 'waiting-channel'
+  fi
+}
+
+fm_pending_reply_admission_state() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec phase attempted delivered grace now deadline task_id completed eligibility fallback
+  local outcome seen sender_state
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  now=$(fm_pending_reply_now)
+  case "$phase" in
+    awaiting_report)
+      attempted=$(fm_pending_reply_get "$rec" recovery_attempted_epoch)
+      if [ -n "$attempted" ]; then
+        printf 'awaiting-report:recovery-attempted\tunstable\t-'
+        return 0
+      fi
+      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+      grace=$(fm_pending_reply_get "$rec" grace_secs)
+      case "$delivered:$grace:$now" in
+        *[!0-9:]*|:*|*::*|*:)
+          printf 'awaiting-report:waiting-delivery\tstable\t-'
+          return 0
+          ;;
+      esac
+      deadline=$((delivered + grace))
+      if [ "$now" -lt "$deadline" ]; then
+        printf 'awaiting-report:waiting-grace\tstable\t%s' "$deadline"
+        return 0
+      fi
+      task_id=$(fm_pending_reply_get "$rec" task_id)
+      completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
+      eligibility=$(fm_pending_reply_recovery_eligibility_token \
+        "$state" "$task_id" "$completed") || return 1
+      printf 'awaiting-report:%s\tstable\t-' "$eligibility"
+      ;;
+    recovery_sending)
+      outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
+      case "$outcome" in
+        confirmed|failed|unknown) sender_state="outcome-$outcome" ;;
+        *)
+          if fm_pending_reply_sender_alive "$rec"; then
+            sender_state=sender-alive
+          else
+            sender_state=sender-gone
+          fi
+          ;;
+      esac
+      printf 'recovery-sending:%s\tunstable\t-' "$sender_state"
+      ;;
+    recovery_failed|recovery_unknown)
+      printf '%s:actionable\tunstable\t-' "$phase"
+      ;;
+    delivery_unknown|escalated)
+      printf '%s:actionable\tunstable\t-' "$phase"
+      ;;
+    recovery_sent)
+      task_id=$(fm_pending_reply_get "$rec" task_id)
+      completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
+      if [ -n "$completed" ]; then
+        eligibility=$(fm_pending_reply_recovery_eligibility_token \
+          "$state" "$task_id" "$completed") || return 1
+        printf 'recovery-sent:completed-%s\tstable\t-' "$eligibility"
+        return 0
+      fi
+      seen=$(fm_pending_reply_get "$rec" recovery_turn_seen_busy)
+      if [ "$seen" = 1 ]; then
+        printf 'recovery-sent:waiting-idle\tunstable\t-'
+        return 0
+      fi
+      fallback=$(_fm_pending_reply_fallback_idle_state "$rec") || {
+        printf 'recovery-sent:waiting-delivery\tunstable\t-'
+        return 0
+      }
+      IFS="$(printf '\t')" read -r eligibility deadline <<EOF
+$fallback
+EOF
+      if [ "$eligibility" = eligible ]; then
+        printf 'recovery-sent:fallback-due\tunstable\t-'
+      elif [ -n "$deadline" ]; then
+        printf 'recovery-sent:waiting-grace\tunstable\t%s' "$deadline"
+      else
+        printf 'recovery-sent:waiting-idle\tunstable\t-'
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # 0 when "no correlated report in the parent status log" is admissible evidence
 # that the mate never reported: always for a local target, and for a remote one
 # only once the mirror has been read through its end at or after <since-epoch>.
 fm_pending_reply_missing_report_is_evidence() {  # <state-dir> <task_id> <since-epoch>
-  local state=$1 task_id=$2 since=$3 caught
-  fm_pending_reply_target_is_remote "$state" "$task_id" || return 0
-  case "$since" in ''|*[!0-9]*) return 1 ;; esac
-  caught=$(fm_pending_reply_remote_channel_epoch "$state" "$task_id")
-  [ -n "$caught" ] || return 1
-  [ "$caught" -ge "$since" ]
+  [ "$(fm_pending_reply_recovery_eligibility_token "$1" "$2" "$3")" = actionable ]
 }
 
 # Build the one automatic recovery message for a pending record.
@@ -1219,7 +1457,7 @@ fm_pending_reply_detect_wrong_home() {  # <state-dir> <corr_id> <secondmate-home
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
-# busy_state is busy|idle|unknown for the secondmate endpoint.
+# busy_state is busy|idle|unknown|unavailable for the secondmate endpoint.
 # secondmate_home may be empty when unknown.
 fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-home]
   local state=$1 corr=$2 busy_state=$3 sm_home=${4-}
@@ -1288,20 +1526,75 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
-fm_pending_reply_tick() {  # <state-dir>
+fm_pending_reply_tick() {  # <state-dir> [batch-agent-state-inventory] [active-only]
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
-  local -a observation_tasks=() observation_values=()
+  local batch_inventory=${2-} active_only=${3:-} inventory_backend inventory_target inventory_state inventory_route
+  local _inventory_home inventory_task _inventory_kind _inventory_spawn_gen
+  local observation observation_key observation_route observation_cache_key found
+  local lookup_dir lookup_file observation_file task_key record_list index_dir indexed
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
-  for rec in "$dir"/*; do
+  lookup_dir=$(umask 077; mktemp -d "$state/.pending-agent-plan.XXXXXX") || return 1
+  mkdir "$lookup_dir/tasks" "$lookup_dir/observations" || {
+    find "$lookup_dir" -depth -delete 2>/dev/null || true
+    return 1
+  }
+  if [ -n "$batch_inventory" ]; then
+    while IFS="$(printf '\t')" read -r inventory_backend inventory_target inventory_state \
+      inventory_route _inventory_home inventory_task _inventory_kind _inventory_spawn_gen; do
+      case "$inventory_task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+      task_key=$(fm_backend_agent_state_cache_key "$inventory_task") || continue
+      printf '%s\t%s\t%s\t%s\n' "$inventory_backend" "$inventory_target" \
+        "$inventory_route" "$inventory_state" > "$lookup_dir/tasks/$task_key" || {
+        find "$lookup_dir" -depth -delete 2>/dev/null || true
+        return 1
+      }
+    done <<EOF
+$batch_inventory
+EOF
+  fi
+  record_list="$lookup_dir/records"
+  : > "$record_list" || { find "$lookup_dir" -depth -delete 2>/dev/null || true; return 1; }
+  if [ "$active_only" = active-only ]; then
+    fm_pending_reply_index_recover "$state" || {
+      find "$lookup_dir" -depth -delete 2>/dev/null || true
+      return 1
+    }
+    for lookup_file in "$lookup_dir"/tasks/*; do
+      [ -f "$lookup_file" ] || continue
+      task_key=${lookup_file##*/}
+      index_dir="$(fm_pending_reply_index_root "$state")/$task_key"
+      [ -d "$index_dir" ] && [ ! -L "$index_dir" ] || continue
+      for indexed in "$index_dir"/*; do
+        [ -f "$indexed" ] && [ ! -L "$indexed" ] || continue
+        corr=${indexed##*/}
+        fm_pending_reply_corr_valid "$corr" || continue
+        printf '%s/%s\n' "$dir" "$corr" >> "$record_list" || {
+          find "$lookup_dir" -depth -delete 2>/dev/null || true
+          return 1
+        }
+      done
+    done
+  else
+    for rec in "$dir"/*; do
+      [ -f "$rec" ] || continue
+      case "${rec##*/}" in .*) continue ;; esac
+      printf '%s\n' "$rec" >> "$record_list"
+    done
+  fi
+  while IFS= read -r rec; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in
       .*) continue ;;
     esac
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
+    fm_pending_reply_corr_valid "$corr" || continue
     task_id=$(fm_pending_reply_get "$rec" task_id)
+    if [ "$active_only" = active-only ]; then
+      task_key=$(fm_backend_agent_state_cache_key "$task_id") || continue
+      [ -f "$lookup_dir/tasks/$task_key" ] || continue
+    fi
     phase=$(fm_pending_reply_get "$rec" phase)
     if [ "$phase" = resolved ]; then
       # Cheap no-op unless an escalation for this record is still open; this is
@@ -1368,17 +1661,37 @@ fm_pending_reply_tick() {  # <state-dir>
       fi
       if [ -n "$target" ]; then
         label="fm-$task_id"
+        observation_route=local
+        case "$target" in remote:*) observation_route=remote ;; esac
+        [ -z "$remote_host" ] || observation_route=remote
         observation=
         found=0
-        for ((i = 0; i < ${#observation_tasks[@]}; i++)); do
-          observation_task=${observation_tasks[$i]}
-          [ "$observation_task" = "$task_id" ] || continue
-          observation=${observation_values[$i]}
+        task_key=$(fm_backend_agent_state_cache_key "$task_id") || task_key=
+        lookup_file="$lookup_dir/tasks/$task_key"
+        if [ -f "$lookup_file" ]; then
+          IFS="$(printf '\t')" read -r inventory_backend inventory_target inventory_route inventory_state < "$lookup_file"
+          [ -z "${FM_PENDING_REPLY_PLAN_LOOKUP_LOG:-}" ] \
+            || printf '%s\n' "$task_id" >> "$FM_PENDING_REPLY_PLAN_LOOKUP_LOG"
+          if [ "$inventory_backend" = "$backend" ] \
+            && [ "$inventory_target" = "$target" ] \
+            && [ "$inventory_route" = "$observation_route" ]; then
+            case "$inventory_state" in
+              dead|missing)
+                observation=unavailable
+                found=1
+                ;;
+            esac
+          fi
+        fi
+        observation_key="$backend:$observation_route:$target"
+        observation_cache_key=$(fm_backend_agent_state_cache_key "$observation_key") || observation_cache_key=
+        observation_file="$lookup_dir/observations/$observation_cache_key"
+        if [ "$found" = 0 ] && [ -n "$observation_cache_key" ] && [ -f "$observation_file" ]; then
+          observation=$(cat "$observation_file")
           found=1
-          break
-        done
+        fi
         if [ "$found" = 0 ]; then
-          if [ -n "$remote_host" ]; then
+          if [ "$observation_route" = remote ]; then
             if [ "${FM_PENDING_REPLY_DEFER_REMOTE_OBSERVATION:-0}" = 1 ]; then
               observation=unknown
             else
@@ -1389,14 +1702,16 @@ fm_pending_reply_tick() {  # <state-dir>
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
-          observation_tasks+=("$task_id")
-          observation_values+=("$observation")
         fi
+        [ -z "$observation_cache_key" ] \
+          || printf '%s\n' "$observation" > "$observation_file" \
+          || true
         busy=$(fm_pending_reply_busy_state_from_observation "$rec" "$observation")
       fi
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
-  done
+  done < "$record_list"
+  find "$lookup_dir" -depth -delete 2>/dev/null || return 1
   return 0
 }
 

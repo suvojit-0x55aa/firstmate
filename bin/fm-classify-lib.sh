@@ -767,7 +767,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   printf '%s' "$open"
 }
 
-# Incremental sibling of scan_open_decisions: same fleet-wide directory walk and
+# Incremental sibling of scan_open_decisions: same legacy fleet-wide directory walk and
 # output shape ("<task>\t<key>\t<verb>\t<note>" per open decision), but folds
 # each task's status log through status_open_decisions_incremental instead of
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
@@ -789,8 +789,27 @@ EOF
   return 0
 }
 
-status_presentation_snapshot() {  # <state>
-  local state=$1 f task size ident
+status_presentation_snapshot() {  # <state> [<newline-separated-task-ids>]
+  local state=$1 task_scope=${2-} scoped=false f task size ident
+  [ "$#" -lt 2 ] || scoped=true
+  if [ "$scoped" = true ]; then
+    while IFS= read -r task; do
+      [ -n "$task" ] || continue
+      case "$task" in ''|.*|*/*|*[$'\t\r\n']*) return 1 ;; esac
+      f="$state/$task.status"
+      [ -e "$f" ] || continue
+      [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+      size=$(_fm_status_file_size "$f") || return 1
+      size=${size//[[:space:]]/}
+      ident=$(_fm_open_decisions_file_ident "$f") || return 1
+      case "$size" in ''|*[!0-9]*) return 1 ;; esac
+      [ -n "$ident" ] || return 1
+      printf '%s\t%s\t%s\n' "$task" "$size" "$ident" || return 1
+    done <<EOF
+$task_scope
+EOF
+    return 0
+  fi
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
@@ -946,8 +965,10 @@ $snapshot
 EOF
 }
 
-status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp
+status_commit_presentation_snapshot() {  # <state> <snapshot> [<preserve-unmentioned>]
+  local state=$1 snapshot=$2 preserve=${3:-false} task endpoint ident f cur_ident size tmp
+  local manifest merged
+  manifest="$state/.status-presentation-cursor"
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
@@ -967,7 +988,26 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
   done <<EOF
 $snapshot
 EOF
-  mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
+  # A lifecycle-scoped drain must not reread a retired task's whole status log
+  # if an already-queued signal later brings that task back into scope. Keep
+  # valid last-presented offsets for unmentioned tasks without opening their
+  # status files; teardown remains the owner that retires those rows. A corrupt
+  # old manifest is not carried forward, so this commit still repairs it.
+  if [ "$preserve" = true ] && [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+    && awk -F '\t' '
+      NF == 0 { next }
+      NF != 3 || $1 == "" || $2 == "" || $3 !~ /^[0-9]+$/ || seen[$1]++ { exit 1 }
+    ' "$manifest"; then
+    merged="$tmp.merged"
+    if ! awk -F '\t' '
+      NR == FNR { if (NF > 0) seen[$1] = 1; print; next }
+      NF > 0 && !seen[$1]++ { print }
+    ' "$tmp" "$manifest" > "$merged" || ! mv -f "$merged" "$tmp"; then
+      rm -f "$tmp" "$merged"
+      return 1
+    fi
+  fi
+  mv -f "$tmp" "$manifest" || { rm -f "$tmp"; return 1; }
 }
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>

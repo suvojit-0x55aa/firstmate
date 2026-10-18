@@ -21,16 +21,39 @@ make_spawn_fakebin() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows)
-    [ -z "${FM_FAKE_DUPLICATE_WINDOW:-}" ] || printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
+  display-message)
+    case "$*" in
+      *'#{pane_current_path}'*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+      *'#{session_name}:#{window_name}'*) printf 'firstmate:%s\n' "$(cat "${FM_FAKE_PANE_PATH}.tmux-window")" ;;
+      *) printf 'firstmate\n' ;;
+    esac
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window) exit 0 ;;
+  list-windows)
+    if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
+      case "$*" in
+        *'#{window_id}'*'#{session_name}:#{window_name}'*'#{pane_current_path}'*)
+          printf '@100\tfirstmate:%s\t%s\n' "$FM_FAKE_DUPLICATE_WINDOW" "${FM_FAKE_PANE_PATH:-}"
+          ;;
+        *'#{session_name}:#{window_name}'*'#{window_name}'*)
+          printf 'firstmate:%s\t%s\n' "$FM_FAKE_DUPLICATE_WINDOW" "$FM_FAKE_DUPLICATE_WINDOW"
+          ;;
+        *) printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW" ;;
+      esac
+    fi
+    exit 0
+    ;;
+  new-window)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -n ]; then shift; printf '%s\n' "$1" > "${FM_FAKE_PANE_PATH}.tmux-window"; break; fi
+      shift
+    done
+    printf '@101\n'
+    exit 0
+    ;;
+  rename-window) printf '%s\n' "${4:-}" > "${FM_FAKE_PANE_PATH}.tmux-window"; exit 0 ;;
+  has-session|new-session|kill-window) exit 0 ;;
   send-keys)
     if [ "${FM_FAKE_TRACEPARENT_SEND_FAIL:-0}" = 1 ]; then
       for a in "$@"; do
@@ -199,7 +222,7 @@ run_two_level() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
-    FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$sm" CLAUDECODE=1 TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$smlog" PATH="$smfake:$PATH" \
     "$SPAWN" "$sm_id" "$sm" --secondmate >/dev/null 2>&1 || true
 
@@ -350,22 +373,25 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   # shellcheck disable=SC2100 # Literal task id, not arithmetic.
   id=sm-duplicate
   log="$base/launch.log"
+  mkdir -p "$base"
+  git clone --quiet --shared --no-checkout "$ROOT" "$prim"
+  git -C "$prim" checkout --quiet -B main "$(git -C "$ROOT" rev-parse HEAD)"
+  git -C "$prim" worktree add --quiet --detach "$sm" HEAD
   mkdir -p "$prim/config" "$prim/data/$id" "$prim/state" "$prim/projects"
   : > "$prim/config/trace-context"
   printf 'charter brief\n' > "$prim/data/$id/brief.md"
   touch "$prim/state/.last-watcher-beat"
   start_trace_session "$prim"
-  mkdir -p "$sm/bin" "$sm/data"
-  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  mkdir -p "$sm/data"
   printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
   printf 'charter\n' > "$sm/data/charter.md"
   fake=$(make_spawn_fakebin "$base/fake")
 
   out=$(env -u FM_TRACE_CONTEXT \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" \
+    FM_ROOT_OVERRIDE="$prim" FM_HOME="$prim" \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
     FM_PROJECTS_OVERRIDE="$prim/projects" FM_CONFIG_OVERRIDE="$prim/config" \
-    FM_SPAWN_NO_GUARD=1 CLAUDECODE=1 TMUX="fake,1,0" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$sm" CLAUDECODE=1 TMUX="fake,1,0" \
     FM_FAKE_DUPLICATE_WINDOW="fm-$id" FM_FAKE_LAUNCH_LOG="$log" \
     PATH="$fake:$PATH" "$SPAWN" "$id" "$sm" --secondmate 2>&1)
   status=$?
