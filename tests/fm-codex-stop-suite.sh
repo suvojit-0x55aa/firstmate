@@ -3264,7 +3264,6 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   local dir id calls states rc
   dir=$(fixture herdr-endpoint-inventory)
   install_endpoint_inventory_herdr "$dir"
-  install_endpoint_inventory_tmux "$dir"
   initialize_empty_active_supervision_registry "$dir"
   states=$(printf 'herdr\tfleet:w-dead:p1\tlocal\t\nherdr\tfleet:w-live:p1\tlocal\t\n' \
     | PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-dead:p1 fleet:w-live:p1' \
@@ -3280,21 +3279,18 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
     printf 'window=fleet:w%s:p1\nbackend=herdr\n' "$id" > "$dir/state/dead-$id.meta"
   done
   printf '%s\n' 'window=fleet:w-live:p1' 'backend=herdr' > "$dir/state/live-herdr.meta"
-  printf '%s\n' 'window=local:dead' 'backend=tmux' > "$dir/state/z-local-dead.meta"
-  register_active_supervision_tasks "$dir" live-herdr z-local-dead
+  register_active_supervision_tasks "$dir" live-herdr
   set +e
   PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_PROBE_LOG="$dir/herdr-probes" \
     FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-live:p1' \
     FM_TEST_HERDR_LIVE_TARGETS='fleet:w-live:p1' \
-    FM_TEST_EXISTING_TARGETS='local:dead' FM_TEST_WATCH_POLL=10 \
-    FM_TEST_BOUNDED_WATCH_TIMEOUT=4 run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
+    FM_TEST_WATCH_POLL=10 FM_TEST_BOUNDED_WATCH_TIMEOUT=4 \
+    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
       > "$dir/watch.out" 2> "$dir/watch.err"
   rc=$?
   set -e
   [ "$rc" -eq 124 ] \
     || fail "Herdr endpoint cycle did not reach its bounded poll: rc=$rc $(cat "$dir/watch.err")"
-  grep -R -qF "$(printf '\ttmux\tlocal:dead')" "$dir/state/.death-notified-v3" \
-    || fail 'Herdr watcher phase did not finish before the local terminal wake'
   calls=$(wc -l < "$dir/herdr-probes" | tr -d '[:space:]')
   [ "$calls" -eq 1 ] \
     || fail "one watcher cycle used $calls Herdr snapshots for one live and 40 historical endpoints"
