@@ -1744,7 +1744,7 @@ PY
   FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
     PYTHONPATH="$dir/deadline-scan-fault" \
     FM_TEST_DEADLINE_SCAN_MARKER="$dir/deadline-scan" \
-    PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' FM_TEST_LIVE_TARGETS= \
+    PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' FM_TEST_LIVE_TARGETS='' \
     FM_TASK_INBOX_GRACE_SECS=2 FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 \
     FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 \
     TEST_ROOT="$dir" run_stop "$dir" 1
