@@ -252,7 +252,14 @@ plan=$({ printf '%s\n' "$states"; printf '__FM_OWNERS__\n'; cat "$owners_file"; 
   { print $1, $2, verdict[$1 SUBSEP $3 SUBSEP $2], $3, $4, $5 }
 ') || exit 1
 while IFS="$(printf '\t')" read -r backend target agent_state route record_home task _kind _spawn_gen; do
-  action=$(fm_task_inbox_due_action "$FM_STATE_OVERRIDE" "$task") || action=quiet
+  inbox_state=$(_fm_task_inbox_due_state "$FM_STATE_OVERRIDE" "$task") || inbox_state=quiet
+  IFS="$(printf '\t')" read -r action future_deadline <<EOF
+$inbox_state
+EOF
+  case "$future_deadline" in
+    ''|*[!0-9]*) ;;
+    *) printf 'future-deadline\t%s\n' "$future_deadline" ;;
+  esac
   case "${action%% *}" in
     ring|escalate) printf 'inbox-work\t%s\t%s\n' "$task" "$action" ;;
   esac
@@ -286,6 +293,7 @@ dir=${FM_PENDING_REPLY_DIR_OVERRIDE:-$FM_STATE_OVERRIDE/pending-replies}
 if [ -d "$dir" ]; then
   fm_pending_reply_index_recover "$FM_STATE_OVERRIDE" || exit 1
   now=$(fm_pending_reply_now)
+  wall_now=$(date +%s)
   while IFS= read -r meta; do
     [ -n "$meta" ] || continue
     task_id=${meta##*/}; task_id=${task_id%.meta}
@@ -304,7 +312,11 @@ if [ -d "$dir" ]; then
       case "$delivered:$grace:$now" in
         *[!0-9:]*|:*|*::*|*:) continue ;;
       esac
-      [ "$((now - delivered))" -ge "$grace" ] || continue
+      future_deadline=$((delivered + grace))
+      if [ "$now" -lt "$future_deadline" ]; then
+        printf 'future-deadline\t%s\n' "$((wall_now + future_deadline - now))"
+        continue
+      fi
       completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
       recovery_state=$(fm_pending_reply_recovery_eligibility_token \
         "$FM_STATE_OVERRIDE" "$task_id" "$completed") || exit 1
@@ -337,6 +349,7 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     active_owners = set()
     windows = set()
     registered_checks = set()
+    future_deadlines = set()
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
         if not separator or not value:
@@ -365,6 +378,14 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
             active_owners.add(value)
         elif kind == 'registered-check':
             registered_checks.add(value)
+        elif kind == 'future-deadline':
+            try:
+                future_deadline = int(value)
+            except ValueError:
+                return None
+            if future_deadline < 0:
+                return None
+            future_deadlines.add(future_deadline)
         if kind == 'budget-window' and separator and value:
             windows.add(value)
     if not generation:
@@ -372,7 +393,7 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     return (generation, signal_tasks, len(remote_recoveries), len(windows),
             len(active_owners), len(owner_fanouts), len(registered_checks),
             signal_items, remote_recoveries, pending_recovery_states, inbox_items,
-            windows, active_owners, owner_fanouts, registered_checks)
+            windows, active_owners, owner_fanouts, registered_checks, future_deadlines)
 
 
 def admission_state_value(path):
@@ -396,19 +417,23 @@ def admission_state_value(path):
             os.close(fd)
 
 
-def canonical_admission_work_signature(work):
+def canonical_admission_work_snapshot(work):
     if work is None:
         return None
     (generation, signal_tasks, _remote_recovery_count, _budget_window_count,
      _active_owner_count, _owner_fanout_count, _registered_check_count,
      signal_items, remote_recoveries, pending_recovery_states, inbox_items, windows,
-     active_owners, owner_fanouts, registered_checks) = work
+     active_owners, owner_fanouts, registered_checks, future_deadlines) = work
     check_cursor = admission_state_value('.check-sweep-cursor')
     check_high_water = admission_state_value('.check-sweep-high-water')
     if check_cursor is None or check_high_water is None:
         return None
     try:
-        checks_due = int(time.time()) - int(os.path.getmtime('.last-check')) >= check_interval
+        check_deadline = int(os.path.getmtime('.last-check')) + check_interval
+        checks_due = int(time.time()) >= check_deadline
+        if not checks_due:
+            future_deadlines = set(future_deadlines)
+            future_deadlines.add(check_deadline)
     except OSError:
         checks_due = True
     value = dict(
@@ -427,14 +452,19 @@ def canonical_admission_work_signature(work):
         check_sweep_high_water=check_high_water,
     )
     encoded = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
-    return 'sha256:' + hashlib.sha256(encoded).hexdigest()
+    signature = 'sha256:' + hashlib.sha256(encoded).hexdigest()
+    return signature, min(future_deadlines) if future_deadlines else None
 
 
-def current_admission_work_signature(registry_generation, probe_deadline=None):
+def current_admission_work_snapshot(registry_generation, probe_deadline=None):
     work = admission_cycle_work(probe_deadline)
     if work is None or work[0] != registry_generation:
         return None
-    return canonical_admission_work_signature(work)
+    return canonical_admission_work_snapshot(work)
+
+
+def admission_work_deadline_current(deadline):
+    return deadline is None or time.time() < deadline
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
@@ -452,7 +482,7 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
      active_owners, owner_fanouts, registered_checks, _signal_items,
      _remote_recovery_items, _pending_recovery_states, _inbox_items,
      _budget_window_items, _active_owner_items, _owner_fanout_items,
-     _registered_check_items) = work
+     _registered_check_items, _future_deadlines) = work
     if check_age >= check_interval:
         due_checks = registered_checks
     if budget_deadline is not None:
@@ -866,9 +896,11 @@ def failure_episode_unchanged():
                                current.get('admission_work_signature'))
     if current != expected or queued():
         return False
-    signature = current_admission_work_signature(generation)
-    return (signature == current['admission_work_signature'] and not queued() and
-            read_failure_episode() == current)
+    snapshot = current_admission_work_snapshot(generation)
+    return (snapshot is not None and
+            snapshot[0] == current['admission_work_signature'] and not queued() and
+            read_failure_episode() == current and
+            admission_work_deadline_current(snapshot[1]))
 
 
 def write_failure_episode(value):
@@ -1223,10 +1255,12 @@ def owner(lock):
         if current is None:
             reason = budget_reason
         episode_generation = leased_registry_generation or admission_registry_generation
-        episode_signature = current_admission_work_signature(
+        episode_snapshot = current_admission_work_snapshot(
             episode_generation, generation_deadline) if episode_generation else None
+        episode_signature = episode_snapshot[0] if episode_snapshot is not None else None
         episode = failure_episode(reason, episode_generation, episode_signature)
-        if terminal_cleanup_complete and failure_episode_seen(episode):
+        if (terminal_cleanup_complete and failure_episode_seen(episode) and
+                admission_work_deadline_current(episode_snapshot[1])):
             send(active, dict(rc=0, reason='', token=token))
             terminal_delivered = True
             return False

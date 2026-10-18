@@ -1595,6 +1595,76 @@ test_failure_episode_tracks_complete_admission_work() {
   pass 'failure episodes include checks, inboxes, pending eligibility, and signal versions'
 }
 
+test_failure_episode_deadline_remains_current_through_scan() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture failure-episode-deadline-scan)
+  install_endpoint_inventory_tmux "$dir"
+  install_controlled_watcher "$dir"
+  printf '%s\n' 'window=fleet:task' "worktree=$dir" "project=$dir" \
+    'kind=ship' 'harness=codex' 'backend=tmux' 'spawn_gen=deadline-scan-1' \
+    > "$dir/state/task.meta"
+  initialize_empty_active_supervision_registry "$dir"
+  register_active_supervision_tasks "$dir" task
+  touch "$dir/state/.last-check"
+  mkdir "$dir/deadline-scan-fault"
+  cat > "$dir/deadline-scan-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+import time
+
+original_popen = subprocess.Popen
+
+
+def delayed_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    process = original_popen(*args, **kwargs)
+    home = os.environ.get('FM_HOME', '')
+    marker = os.environ.get('FM_TEST_DEADLINE_SCAN_MARKER', '')
+    release = os.path.join(home, 'repeat-paused.release')
+    if (marker and os.path.exists(release) and not os.path.exists(marker) and
+            isinstance(command, list) and len(command) > 2 and
+            'fm_supervision_registry_snapshot_index' in command[2]):
+        original_communicate = process.communicate
+
+        def delayed_communicate(*communicate_args, **communicate_kwargs):
+            result = original_communicate(*communicate_args, **communicate_kwargs)
+            with open(marker, 'x', encoding='utf-8') as stream:
+                stream.write('waiting\n')
+            time.sleep(3)
+            with open(marker + '.done', 'w', encoding='utf-8') as stream:
+                stream.write('done\n')
+            return result
+
+        process.communicate = delayed_communicate
+    return process
+
+
+subprocess.Popen = delayed_popen
+PY
+  FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
+    PYTHONPATH="$dir/deadline-scan-fault" \
+    FM_TEST_DEADLINE_SCAN_MARKER="$dir/deadline-scan" \
+    PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' FM_TEST_LIVE_TARGETS= \
+    FM_TASK_INBOX_GRACE_SECS=2 FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=1 FM_GUARD_GRACE=1 \
+    TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/repeat-paused" 350
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-task-inbox-lib.sh"
+    fm_task_inbox_write "$FM_STATE_OVERRIDE" task "cross during admission scan" >/dev/null
+  ' _ "$ROOT/bin" || fail 'could not create the future inbox deadline'
+  touch "$dir/repeat-paused.release"
+  wait_file "$dir/repeat-rc" 350
+  [ -s "$dir/deadline-scan.done" ] || fail 'the delayed admission scan did not execute'
+  [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] \
+    || fail 'a deadline crossing during the admission scan was suppressed'
+  [ "$(wc -l < "$dir/controlled-arm-starts" | tr -d ' ')" = 2 ] \
+    || fail 'a deadline crossing during the admission scan launched no new watcher arm'
+  finish "$dir"
+  pass 'failure suppression validates deadlines after the complete admission scan'
+}
+
 test_stalled_watcher_cannot_complete_quiet_window() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture stalled-watcher)
@@ -6789,6 +6859,7 @@ test_persistent_identity_timeout_fails_closed
 test_terminal_error_generation_tristate
 test_current_generation_failure_episode_is_bounded
 test_failure_episode_tracks_complete_admission_work
+test_failure_episode_deadline_remains_current_through_scan
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
