@@ -217,8 +217,103 @@ budget_reason = 'watcher cycle exceeds Codex Stop deadline; inspect live endpoin
 admission_registry_generation = None
 
 
+mutable_admission_snapshot_shell = r'''
+fm_codex_admission_path_signature() {
+  if [ -L "$1" ]; then
+    printf 'symlink'
+  elif [ -f "$1" ]; then
+    if [ "$fm_codex_snapshot_uname" = Darwin ]; then
+      printf 'file:'
+      LC_ALL=C stat -f '%d:%i:%z:%m:%c' "$1" 2>/dev/null || printf 'unreadable'
+    else
+      printf 'file:'
+      LC_ALL=C stat -c '%d:%i:%s:%Y:%Z' "$1" 2>/dev/null || printf 'unreadable'
+    fi
+  elif [ -d "$1" ]; then
+    printf 'directory'
+  elif [ -e "$1" ]; then
+    printf 'other'
+  else
+    printf 'missing'
+  fi
+}
+fm_codex_mutable_admission_snapshot() {
+  fm_codex_snapshot_state=$1
+  fm_codex_snapshot_inventory=$2
+  fm_codex_snapshot_uname=$(uname -s 2>/dev/null) || return 1
+  {
+    while IFS= read -r fm_codex_snapshot_meta; do
+      [ -n "$fm_codex_snapshot_meta" ] || continue
+      fm_codex_snapshot_task=${fm_codex_snapshot_meta##*/}
+      fm_codex_snapshot_task=${fm_codex_snapshot_task%.meta}
+      printf 'task\t%s\n' "$fm_codex_snapshot_task"
+      for fm_codex_snapshot_suffix in status turn-ended; do
+        fm_codex_snapshot_path="$fm_codex_snapshot_state/$fm_codex_snapshot_task.$fm_codex_snapshot_suffix"
+        fm_codex_snapshot_seen=$(fm_wake_signal_seen_path \
+          "$fm_codex_snapshot_state" "$fm_codex_snapshot_path") || return 1
+        printf 'signal\t%s\t%s\t%s\n' "$fm_codex_snapshot_task" \
+          "$fm_codex_snapshot_suffix" \
+          "$(fm_codex_admission_path_signature "$fm_codex_snapshot_path")"
+        printf 'signal-seen\t%s\t%s\t%s\n' "$fm_codex_snapshot_task" \
+          "$fm_codex_snapshot_suffix" \
+          "$(fm_codex_admission_path_signature "$fm_codex_snapshot_seen")"
+      done
+      fm_codex_snapshot_inbox=$(fm_task_inbox_dir \
+        "$fm_codex_snapshot_state" "$fm_codex_snapshot_task") || return 1
+      printf 'inbox\t%s\t%s\n' "$fm_codex_snapshot_task" \
+        "$(fm_codex_admission_path_signature "$fm_codex_snapshot_inbox")"
+      for fm_codex_snapshot_path in "$fm_codex_snapshot_inbox"/*.msg; do
+        [ -e "$fm_codex_snapshot_path" ] || [ -L "$fm_codex_snapshot_path" ] || continue
+        printf 'inbox-message\t%s\t%s\t%s\n' "$fm_codex_snapshot_task" \
+          "${fm_codex_snapshot_path##*/}" \
+          "$(fm_codex_admission_path_signature "$fm_codex_snapshot_path")"
+      done
+      for fm_codex_snapshot_suffix in .ring-state .escalated; do
+        fm_codex_snapshot_path="$fm_codex_snapshot_inbox/$fm_codex_snapshot_suffix"
+        printf 'inbox-state\t%s\t%s\t%s\n' "$fm_codex_snapshot_task" \
+          "$fm_codex_snapshot_suffix" \
+          "$(fm_codex_admission_path_signature "$fm_codex_snapshot_path")"
+      done
+      fm_codex_snapshot_path=$(fm_pending_reply_remote_channel_watermark_path \
+        "$fm_codex_snapshot_state" "$fm_codex_snapshot_task") || return 1
+      printf 'remote-watermark\t%s\t%s\n' "$fm_codex_snapshot_task" \
+        "$(fm_codex_admission_path_signature "$fm_codex_snapshot_path")"
+      fm_codex_snapshot_task_key=$(fm_pending_reply_task_key \
+        "$fm_codex_snapshot_task") || return 1
+      fm_codex_snapshot_index="$(fm_pending_reply_index_root \
+        "$fm_codex_snapshot_state")/$fm_codex_snapshot_task_key"
+      printf 'pending-index\t%s\t%s\n' "$fm_codex_snapshot_task" \
+        "$(fm_codex_admission_path_signature "$fm_codex_snapshot_index")"
+      for fm_codex_snapshot_marker in "$fm_codex_snapshot_index"/*; do
+        [ -e "$fm_codex_snapshot_marker" ] || [ -L "$fm_codex_snapshot_marker" ] || continue
+        fm_codex_snapshot_corr=${fm_codex_snapshot_marker##*/}
+        fm_codex_snapshot_record=$(fm_pending_reply_path \
+          "$fm_codex_snapshot_state" "$fm_codex_snapshot_corr") || return 1
+        printf 'pending-marker\t%s\t%s\t%s\n' "$fm_codex_snapshot_task" \
+          "$fm_codex_snapshot_corr" \
+          "$(fm_codex_admission_path_signature "$fm_codex_snapshot_marker")"
+        printf 'pending-record\t%s\t%s\t%s\n' "$fm_codex_snapshot_task" \
+          "$fm_codex_snapshot_corr" \
+          "$(fm_codex_admission_path_signature "$fm_codex_snapshot_record")"
+      done
+    done < "$fm_codex_snapshot_inventory"
+    fm_codex_snapshot_root=$(fm_pending_reply_index_root \
+      "$fm_codex_snapshot_state") || return 1
+    for fm_codex_snapshot_marker in "$fm_codex_snapshot_root"/.publish-*; do
+      [ -e "$fm_codex_snapshot_marker" ] || [ -L "$fm_codex_snapshot_marker" ] || continue
+      case "$fm_codex_snapshot_marker" in *.tmp.*) continue ;; esac
+      fm_codex_snapshot_corr=${fm_codex_snapshot_marker##*/.publish-}
+      printf 'barrier\tpending-publication:%s\n' "$fm_codex_snapshot_corr"
+      printf 'pending-publication\t%s\t%s\n' "$fm_codex_snapshot_corr" \
+        "$(fm_codex_admission_path_signature "$fm_codex_snapshot_marker")"
+    done
+  } | LC_ALL=C sort
+}
+'''
+
+
 def admission_cycle_work(probe_deadline=None):
-    result = shell(r'''
+    result = shell(mutable_admission_snapshot_shell + r'''
 . "$1/fm-backend.sh" || exit 1
 . "$1/fm-wake-lib.sh" || exit 1
 . "$1/fm-supervision-registry-lib.sh" || exit 1
@@ -347,6 +442,21 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 registered_checks_after=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
 [ "$registered_checks_after" = "$registered_checks" ] || exit 1
 [ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$check_revision" ] || exit 1
+mutable_sources=$(fm_codex_mutable_admission_snapshot \
+  "$FM_STATE_OVERRIDE" "$registry_index/inventory") || exit 1
+[ "$(fm_codex_mutable_admission_snapshot \
+  "$FM_STATE_OVERRIDE" "$registry_index/inventory")" = "$mutable_sources" ] || exit 1
+after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+[ "$after" = "$generation" ] || exit 1
+[ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$check_revision" ] || exit 1
+while IFS="$(printf '\t')" read -r mutable_kind mutable_value; do
+  [ -n "$mutable_kind" ] || continue
+  printf 'mutable-source\t%s\t%s\n' "$mutable_kind" "$mutable_value"
+  [ "$mutable_kind" != barrier ] \
+    || printf 'suppression-barrier\t%s\n' "$mutable_value"
+done <<EOF
+$mutable_sources
+EOF
 ''', timeout=max(8, remote_send_timeout + probe_cleanup_allowance), deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
@@ -362,6 +472,7 @@ registered_checks_after=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit
     registered_checks = set()
     future_deadlines = set()
     suppression_barriers = set()
+    mutable_sources = set()
     check_revision = None
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
@@ -403,6 +514,8 @@ registered_checks_after=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit
             future_deadlines.add(future_deadline)
         elif kind == 'suppression-barrier':
             suppression_barriers.add(value)
+        elif kind == 'mutable-source':
+            mutable_sources.add(value)
         if kind == 'budget-window' and separator and value:
             windows.add(value)
     if not generation or not check_revision:
@@ -411,7 +524,7 @@ registered_checks_after=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit
             len(active_owners), len(owner_fanouts), len(registered_checks),
             signal_items, remote_recoveries, pending_recovery_states, inbox_items,
             windows, active_owners, owner_fanouts, registered_checks, future_deadlines,
-            suppression_barriers, check_revision)
+            suppression_barriers, check_revision, mutable_sources)
 
 
 def admission_state_value(path):
@@ -442,7 +555,7 @@ def canonical_admission_work_snapshot(work):
      _active_owner_count, _owner_fanout_count, _registered_check_count,
      signal_items, remote_recoveries, pending_recovery_states, inbox_items, windows,
      active_owners, owner_fanouts, registered_checks, future_deadlines,
-     suppression_barriers, check_revision) = work
+     suppression_barriers, check_revision, mutable_sources) = work
     check_cursor = admission_state_value('.check-sweep-cursor')
     check_high_water = admission_state_value('.check-sweep-high-water')
     if check_cursor is None or check_high_water is None:
@@ -456,7 +569,7 @@ def canonical_admission_work_snapshot(work):
     except OSError:
         checks_due = True
     value = dict(
-        protocol='fm-codex-admission-work.v5',
+        protocol='fm-codex-admission-work.v6',
         registry_generation=generation,
         signals=sorted(signal_items),
         remote_recoveries=sorted(remote_recoveries),
@@ -471,11 +584,13 @@ def canonical_admission_work_snapshot(work):
         check_sweep_high_water=check_high_water,
         suppression_barriers=sorted(suppression_barriers),
         check_revision=check_revision,
+        mutable_sources=sorted(mutable_sources),
     )
     encoded = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
     signature = 'sha256:' + hashlib.sha256(encoded).hexdigest()
     return (signature, min(future_deadlines) if future_deadlines else None,
-            frozenset(registered_checks), check_revision, not suppression_barriers)
+            frozenset(registered_checks), check_revision, frozenset(mutable_sources),
+            not suppression_barriers, generation)
 
 
 def current_admission_work_snapshot(registry_generation, probe_deadline=None):
@@ -485,31 +600,83 @@ def current_admission_work_snapshot(registry_generation, probe_deadline=None):
     return canonical_admission_work_snapshot(work)
 
 
-def current_registered_checks(probe_deadline=None):
-    result = shell(r'''
+def current_admission_boundary(registry_generation, probe_deadline=None):
+    result = shell(mutable_admission_snapshot_shell + r'''
+. "$1/fm-backend.sh" || exit 1
+. "$1/fm-supervision-registry-lib.sh" || exit 1
+. "$1/fm-pending-reply-lib.sh" || exit 1
+. "$1/fm-task-inbox-lib.sh" || exit 1
 . "$1/fm-pr-lib.sh" || exit 1
+set -o pipefail
+generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+[ "$generation" = "$2" ] || exit 1
 fm_check_index_recover "$FM_STATE_OVERRIDE" || exit 1
 revision=$(fm_check_index_revision "$FM_STATE_OVERRIDE") || exit 1
 inventory=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
 [ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$revision" ] || exit 1
+pending_root=$(fm_pending_reply_index_root "$FM_STATE_OVERRIDE") || exit 1
+pending_dir=$(fm_pending_reply_dir "$FM_STATE_OVERRIDE") || exit 1
+if [ -e "$pending_root" ] || [ -L "$pending_root" ] || [ -d "$pending_dir" ]; then
+  fm_pending_reply_index_recover "$FM_STATE_OVERRIDE" || exit 1
+fi
+registry_index=$(umask 077; mktemp -d "$FM_STATE_OVERRIDE/.active-supervision-boundary.XXXXXX") \
+  || exit 1
+cleanup_registry_index() { find "$registry_index" -depth -delete; }
+trap cleanup_registry_index EXIT
+fm_supervision_registry_snapshot_index \
+  "$FM_STATE_OVERRIDE" "$generation" "$registry_index" || exit 1
+mutable_sources=$(fm_codex_mutable_admission_snapshot \
+  "$FM_STATE_OVERRIDE" "$registry_index/inventory") || exit 1
+[ "$(fm_codex_mutable_admission_snapshot \
+  "$FM_STATE_OVERRIDE" "$registry_index/inventory")" = "$mutable_sources" ] || exit 1
+[ "$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE")" = "$generation" ] || exit 1
+[ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$revision" ] || exit 1
+[ "$(fm_check_index_inventory "$FM_STATE_OVERRIDE")" = "$inventory" ] || exit 1
 printf 'revision\t%s\n' "$revision"
-printf '%s\n' "$inventory"
-''', deadline=probe_deadline)
+while IFS= read -r registered_check; do
+  [ -n "$registered_check" ] || continue
+  printf 'registered-check\t%s\n' "$registered_check"
+done <<EOF
+$inventory
+EOF
+while IFS= read -r mutable_source; do
+  [ -n "$mutable_source" ] || continue
+  printf 'mutable-source\t%s\n' "$mutable_source"
+done <<EOF
+$mutable_sources
+EOF
+''', registry_generation, deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
-    lines = result.stdout.splitlines()
-    if not lines or not lines[0].startswith('revision\t'):
+    revision = None
+    checks = set()
+    mutable_sources = set()
+    for line in result.stdout.splitlines():
+        kind, separator, value = line.partition('\t')
+        if not separator or not value:
+            return None
+        if kind == 'revision':
+            if revision is not None:
+                return None
+            revision = value
+        elif kind == 'registered-check':
+            checks.add(value)
+        elif kind == 'mutable-source':
+            mutable_sources.add(value)
+        else:
+            return None
+    if revision is None:
         return None
-    return lines[0].partition('\t')[2], frozenset(line for line in lines[1:] if line)
+    return revision, frozenset(checks), frozenset(mutable_sources)
 
 
 def admission_work_snapshot_current(snapshot, probe_deadline=None):
-    if snapshot is None or not snapshot[4]:
+    if snapshot is None or not snapshot[5]:
         return False
     if snapshot[1] is not None and time.time() >= snapshot[1]:
         return False
-    checks = current_registered_checks(probe_deadline)
-    return checks is not None and checks == (snapshot[3], snapshot[2])
+    boundary = current_admission_boundary(snapshot[6], probe_deadline)
+    return boundary is not None and boundary == (snapshot[3], snapshot[2], snapshot[4])
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
@@ -528,7 +695,7 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
      _remote_recovery_items, _pending_recovery_states, _inbox_items,
      _budget_window_items, _active_owner_items, _owner_fanout_items,
      _registered_check_items, _future_deadlines, _suppression_barriers,
-     _check_revision) = work
+     _check_revision, _mutable_sources) = work
     if check_age >= check_interval:
         due_checks = registered_checks
     if budget_deadline is not None:

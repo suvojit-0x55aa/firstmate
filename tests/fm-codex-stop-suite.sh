@@ -1765,6 +1765,99 @@ PY
   pass 'failure suppression validates deadlines after the complete admission scan'
 }
 
+test_failure_episode_mutable_sources_remain_current_through_scan() {
+  local source dir original_root=$TEST_ROOT now
+  for source in signal inbox pending; do
+    dir=$(fixture "failure-episode-$source-publication-race")
+    install_endpoint_inventory_tmux "$dir"
+    install_controlled_watcher "$dir"
+    printf '%s\n' 'window=fleet:task' "worktree=$dir" "project=$dir" \
+      'kind=ship' 'harness=codex' 'backend=tmux' "spawn_gen=$source-race-1" \
+      > "$dir/state/task.meta"
+    initialize_empty_active_supervision_registry "$dir"
+    register_active_supervision_tasks "$dir" task
+    touch "$dir/state/.last-check"
+    mkdir "$dir/mutable-source-fault"
+    cat > "$dir/mutable-source-fault/sitecustomize.py" <<'PY'
+import os
+import subprocess
+import time
+
+original_popen = subprocess.Popen
+
+
+def delayed_popen(*args, **kwargs):
+    command = args[0] if args else kwargs.get('args', [])
+    process = original_popen(*args, **kwargs)
+    home = os.environ.get('FM_HOME', '')
+    marker = os.environ.get('FM_TEST_MUTABLE_SOURCE_MARKER', '')
+    repeat_release = os.path.join(home, 'repeat-paused.release')
+    if (marker and os.path.exists(repeat_release) and not os.path.exists(marker) and
+            isinstance(command, list) and len(command) > 2 and
+            'fm_supervision_registry_snapshot_index' in command[2]):
+        original_communicate = process.communicate
+
+        def delayed_communicate(*communicate_args, **communicate_kwargs):
+            result = original_communicate(*communicate_args, **communicate_kwargs)
+            with open(marker, 'x', encoding='utf-8') as stream:
+                stream.write('waiting\n')
+            release = marker + '.release'
+            while not os.path.exists(release):
+                time.sleep(0.02)
+            return result
+
+        process.communicate = delayed_communicate
+    return process
+
+
+subprocess.Popen = delayed_popen
+PY
+    FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
+      PYTHONPATH="$dir/mutable-source-fault" \
+      FM_TEST_MUTABLE_SOURCE_MARKER="$dir/mutable-source-scan" \
+      PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
+      FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
+      FM_TASK_INBOX_GRACE_SECS=3600 FM_PENDING_REPLY_GRACE_SECS=3600 \
+      FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+      TEST_ROOT="$dir" run_stop "$dir" 1
+    TEST_ROOT=$original_root
+    wait_file "$dir/repeat-paused" 350
+    touch "$dir/repeat-paused.release"
+    wait_file "$dir/mutable-source-scan" 350
+    case "$source" in
+      signal)
+        printf '%s\n' 'working: published during admission' >> "$dir/state/task.status"
+        ;;
+      inbox)
+        FM_STATE_OVERRIDE="$dir/state" bash -c '
+          . "$1/fm-task-inbox-lib.sh"
+          fm_task_inbox_write "$FM_STATE_OVERRIDE" task \
+            "published during admission" >/dev/null
+        ' _ "$ROOT/bin" || fail 'could not publish inbox work during admission'
+        ;;
+      pending)
+        now=$(date +%s)
+        FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW="$now" \
+          bash -c '
+            . "$1/fm-pending-reply-lib.sh"
+            corr=$(fm_pending_reply_create \
+              "$FM_HOME" "$FM_STATE_OVERRIDE" task report) || exit 1
+            fm_pending_reply_mark_delivered \
+              "$FM_STATE_OVERRIDE" "$corr" "$FM_PENDING_REPLY_NOW"
+          ' _ "$ROOT/bin" || fail 'could not publish pending work during admission'
+        ;;
+    esac
+    touch "$dir/mutable-source-scan.release"
+    wait_file "$dir/repeat-rc" 350
+    [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] \
+      || fail "$source publication during admission was suppressed"
+    [ "$(wc -l < "$dir/controlled-arm-starts" | tr -d ' ')" = 2 ] \
+      || fail "$source publication during admission launched no new watcher arm"
+    finish "$dir"
+  done
+  pass 'failure suppression revalidates mutable admission sources'
+}
+
 test_stalled_watcher_cannot_complete_quiet_window() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture stalled-watcher)
@@ -3396,6 +3489,50 @@ test_registered_check_index_reconciles_after_ready() {
   [ "$("$inventory")" = recovered-check ] \
     || fail 'reconciled registered check was not executable'
   pass 'registered-check index reconciles runnable artifacts after readiness'
+}
+
+test_registered_check_recovery_revision_is_atomic() {
+  local dir recover_pid inventory
+  dir=$(fixture registered-check-recovery-revision)
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    fm_check_index_recover "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" || fail 'could not initialize registered-check index'
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/x-watch.check.sh"
+  chmod 0700 "$dir/state/x-watch.check.sh"
+  FM_STATE_OVERRIDE="$dir/state" \
+    FM_TEST_CHECK_MARKER="$dir/state/.registered-checks-v1/x-watch" \
+    FM_TEST_CHECK_PAUSE="$dir/check-marker-published" bash -c '
+      mv() {
+        local destination arg
+        command /bin/mv "$@" || return $?
+        for arg in "$@"; do destination=$arg; done
+        if [ "$destination" = "$FM_TEST_CHECK_MARKER" ]; then
+          printf "%s\n" published > "$FM_TEST_CHECK_PAUSE"
+          while [ ! -e "$FM_TEST_CHECK_PAUSE.release" ]; do sleep 0.02; done
+        fi
+      }
+      . "$1/fm-pr-lib.sh"
+      fm_check_index_recover "$FM_STATE_OVERRIDE"
+    ' _ "$ROOT/bin" > "$dir/check-recovery.out" 2>&1 &
+  recover_pid=$!
+  wait_file "$dir/check-marker-published" 100
+  if FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    fm_check_index_revision "$FM_STATE_OVERRIDE" >/dev/null
+  ' _ "$ROOT/bin"; then
+    fail 'check recovery exposed a stable revision before publication completed'
+  fi
+  touch "$dir/check-marker-published.release"
+  wait "$recover_pid" || fail "check recovery failed: $(cat "$dir/check-recovery.out")"
+  inventory=$(FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    fm_check_index_revision "$FM_STATE_OVERRIDE" >/dev/null || exit 1
+    fm_check_index_inventory "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin") || fail 'check recovery did not publish a stable revision'
+  [ "$inventory" = "$dir/state/x-watch.check.sh" ] \
+    || fail 'stable check recovery omitted the published marker'
+  pass 'registered-check recovery brackets publication with revision state'
 }
 
 test_registry_phase_transition_recovers_torn_publication() {
@@ -6961,6 +7098,7 @@ test_current_generation_failure_episode_is_bounded
 test_failure_episode_tracks_complete_admission_work
 test_failure_episode_check_index_remains_stable_through_scan
 test_failure_episode_deadline_remains_current_through_scan
+test_failure_episode_mutable_sources_remain_current_through_scan
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
@@ -6986,6 +7124,7 @@ test_production_shaped_stale_inventory_arms_supervision
 test_empty_active_snapshot_ignores_retained_metadata
 test_active_indexes_discover_new_obligations
 test_registered_check_index_reconciles_after_ready
+test_registered_check_recovery_revision_is_atomic
 test_active_supervision_registry_owns_lifecycle_inventory
 test_registry_receipt_recovery_is_owner_addressed
 test_registry_pending_snapshot_is_immediately_authoritative

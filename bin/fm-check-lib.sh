@@ -5,12 +5,14 @@ FM_CUSTOM_CHECK_SNAPSHOT=
 
 fm_check_index_root() { printf '%s/.registered-checks-v1\n' "$1"; }
 
-fm_check_index_advance_revision() { # <root>
-  local root=$1 revision tmp token
+fm_check_index_advance_revision() { # <root> [stable|mutating]
+  local root=$1 phase=${2:-stable} revision tmp token
+  case "$phase" in stable|mutating) ;; *) return 1 ;; esac
   revision="$root/.revision"
   tmp="$root/.revision.tmp.${BASHPID:-$$}"
   token="$(date +%s).${BASHPID:-$$}.${RANDOM:-0}"
-  if ! ( umask 077; printf 'fm-registered-checks-revision.v1\t%s\n' "$token" > "$tmp" ) \
+  if ! ( umask 077; printf 'fm-registered-checks-revision.v2\t%s\t%s\n' \
+      "$phase" "$token" > "$tmp" ) \
     || ! mv -f -- "$tmp" "$revision"; then
     rm -f -- "$tmp"
     return 1
@@ -18,13 +20,13 @@ fm_check_index_advance_revision() { # <root>
 }
 
 fm_check_index_revision() { # <state>
-  local root revision protocol token extra
+  local root revision protocol phase token extra
   root=$(fm_check_index_root "$1")
   revision="$root/.revision"
   [ -f "$revision" ] && [ ! -L "$revision" ] || return 1
-  IFS="$(printf '\t')" read -r protocol token extra < "$revision" || return 1
-  [ "$protocol" = fm-registered-checks-revision.v1 ] && [ -n "$token" ] \
-    && [ -z "$extra" ] || return 1
+  IFS="$(printf '\t')" read -r protocol phase token extra < "$revision" || return 1
+  [ "$protocol" = fm-registered-checks-revision.v2 ] && [ "$phase" = stable ] \
+    && [ -n "$token" ] && [ -z "$extra" ] || return 1
   case "$token" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   printf '%s\n' "$token"
 }
@@ -40,6 +42,10 @@ fm_check_index_recover() { # <state>
   fi
   [ ! -e "$root" ] || { [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
   mkdir -p "$root" || return 1
+  if ! fm_check_index_revision "$state" >/dev/null 2>&1; then
+    fm_check_index_advance_revision "$root" mutating || return 1
+    changed=1
+  fi
   for check in "$state"/*.check.sh; do
     [ -f "$check" ] && [ ! -L "$check" ] || continue
     id=${check##*/}; id=${id%.check.sh}
@@ -55,26 +61,30 @@ fm_check_index_recover() { # <state>
       IFS= read -r value < "$marker" || value=
     fi
     [ "$value" != "$id.check.sh" ] || continue
+    if [ "$changed" -eq 0 ]; then
+      fm_check_index_advance_revision "$root" mutating || return 1
+      changed=1
+    fi
     tmp="$root/.$id.tmp.${BASHPID:-$$}"
     if ! ( umask 077; printf '%s\n' "$id.check.sh" > "$tmp" ) \
       || ! mv -f -- "$tmp" "$marker"; then
       rm -f -- "$tmp"
       return 1
     fi
-    changed=1
   done
   if [ "$ready_valid" -eq 0 ]; then
+    if [ "$changed" -eq 0 ]; then
+      fm_check_index_advance_revision "$root" mutating || return 1
+      changed=1
+    fi
     tmp="$root/.ready.tmp.${BASHPID:-$$}"
     if ! ( umask 077; printf 'fm-registered-checks.v1\n' > "$tmp" ) \
       || ! mv -f -- "$tmp" "$ready"; then
       rm -f -- "$tmp"
       return 1
     fi
-    changed=1
   fi
-  if [ "$changed" -eq 1 ] || ! fm_check_index_revision "$state" >/dev/null 2>&1; then
-    fm_check_index_advance_revision "$root" || return 1
-  fi
+  [ "$changed" -eq 0 ] || fm_check_index_advance_revision "$root" stable
 }
 
 fm_check_index_register() { # <state> <id>
@@ -84,13 +94,13 @@ fm_check_index_register() { # <state> <id>
   root=$(fm_check_index_root "$state")
   marker="$root/$id"
   tmp="$root/.$id.tmp.${BASHPID:-$$}"
-  fm_check_index_advance_revision "$root" || return 1
+  fm_check_index_advance_revision "$root" mutating || return 1
   if ! ( umask 077; printf '%s\n' "$id.check.sh" > "$tmp" ) \
     || ! mv -f -- "$tmp" "$marker"; then
     rm -f -- "$tmp"
     return 1
   fi
-  fm_check_index_advance_revision "$root"
+  fm_check_index_advance_revision "$root" stable
 }
 
 fm_check_index_remove() { # <state> <id>
@@ -100,9 +110,9 @@ fm_check_index_remove() { # <state> <id>
   root=$(fm_check_index_root "$state")
   marker="$root/$id"
   if [ -e "$marker" ] || [ -L "$marker" ]; then
-    fm_check_index_advance_revision "$root" || return 1
+    fm_check_index_advance_revision "$root" mutating || return 1
     rm -f -- "$marker" || return 1
-    fm_check_index_advance_revision "$root" || return 1
+    fm_check_index_advance_revision "$root" stable || return 1
   fi
 }
 
