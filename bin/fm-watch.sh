@@ -1398,6 +1398,7 @@ run_check_capture() {
     if [ "${FM_CODEX_BOUNDED_WATCH:-0}" = 1 ]; then
       bounded_observer_tick_during_check
     fi
+    [ -z "${FM_WATCH_SIGNAL_PENDING:-}" ] || exit 1
     sleep "${FM_CODEX_OBSERVER_POLL:-0.2}"
   done
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
