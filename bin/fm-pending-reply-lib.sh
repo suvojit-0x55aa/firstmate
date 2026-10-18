@@ -999,6 +999,7 @@ fm_pending_reply_recovery_eligibility_token() {  # <state-dir> <task_id> <turn-c
 
 fm_pending_reply_admission_state() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec phase attempted delivered grace now deadline task_id completed eligibility fallback
+  local outcome seen sender_state
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1007,27 +1008,47 @@ fm_pending_reply_admission_state() {  # <state-dir> <corr_id>
     awaiting_report)
       attempted=$(fm_pending_reply_get "$rec" recovery_attempted_epoch)
       if [ -n "$attempted" ]; then
-        printf 'awaiting-report:recovery-attempted'
+        printf 'awaiting-report:recovery-attempted\tunstable\t-'
         return 0
       fi
       delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
       grace=$(fm_pending_reply_get "$rec" grace_secs)
       case "$delivered:$grace:$now" in
         *[!0-9:]*|:*|*::*|*:)
-          printf 'awaiting-report:waiting-delivery'
+          printf 'awaiting-report:waiting-delivery\tstable\t-'
           return 0
           ;;
       esac
       deadline=$((delivered + grace))
       if [ "$now" -lt "$deadline" ]; then
-        printf 'awaiting-report:waiting-grace\t%s' "$deadline"
+        printf 'awaiting-report:waiting-grace\tstable\t%s' "$deadline"
         return 0
       fi
       task_id=$(fm_pending_reply_get "$rec" task_id)
       completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
       eligibility=$(fm_pending_reply_recovery_eligibility_token \
         "$state" "$task_id" "$completed") || return 1
-      printf 'awaiting-report:%s' "$eligibility"
+      printf 'awaiting-report:%s\tstable\t-' "$eligibility"
+      ;;
+    recovery_sending)
+      outcome=$(fm_pending_reply_get "$rec" recovery_delivery_outcome)
+      case "$outcome" in
+        confirmed|failed|unknown) sender_state="outcome-$outcome" ;;
+        *)
+          if fm_pending_reply_sender_alive "$rec"; then
+            sender_state=sender-alive
+          else
+            sender_state=sender-gone
+          fi
+          ;;
+      esac
+      printf 'recovery-sending:%s\tunstable\t-' "$sender_state"
+      ;;
+    recovery_failed|recovery_unknown)
+      printf '%s:actionable\tunstable\t-' "$phase"
+      ;;
+    delivery_unknown|escalated)
+      printf '%s:actionable\tunstable\t-' "$phase"
       ;;
     recovery_sent)
       task_id=$(fm_pending_reply_get "$rec" task_id)
@@ -1035,22 +1056,27 @@ fm_pending_reply_admission_state() {  # <state-dir> <corr_id>
       if [ -n "$completed" ]; then
         eligibility=$(fm_pending_reply_recovery_eligibility_token \
           "$state" "$task_id" "$completed") || return 1
-        printf 'recovery-sent:completed-%s' "$eligibility"
+        printf 'recovery-sent:completed-%s\tstable\t-' "$eligibility"
+        return 0
+      fi
+      seen=$(fm_pending_reply_get "$rec" recovery_turn_seen_busy)
+      if [ "$seen" = 1 ]; then
+        printf 'recovery-sent:waiting-idle\tunstable\t-'
         return 0
       fi
       fallback=$(_fm_pending_reply_fallback_idle_state "$rec") || {
-        printf 'recovery-sent:waiting-delivery'
+        printf 'recovery-sent:waiting-delivery\tunstable\t-'
         return 0
       }
       IFS="$(printf '\t')" read -r eligibility deadline <<EOF
 $fallback
 EOF
       if [ "$eligibility" = eligible ]; then
-        printf 'recovery-sent:fallback-due'
+        printf 'recovery-sent:fallback-due\tunstable\t-'
       elif [ -n "$deadline" ]; then
-        printf 'recovery-sent:waiting-grace\t%s' "$deadline"
+        printf 'recovery-sent:waiting-grace\tunstable\t%s' "$deadline"
       else
-        printf 'recovery-sent:waiting-idle'
+        printf 'recovery-sent:waiting-idle\tunstable\t-'
       fi
       ;;
     *) return 1 ;;

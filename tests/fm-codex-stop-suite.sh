@@ -1495,7 +1495,8 @@ test_current_generation_failure_episode_is_bounded() {
 
 test_failure_episode_tracks_complete_admission_work() {
   local source dir original_root=$TEST_ROOT now corr record live_targets
-  for source in check inbox dead-inbox pending recovery-pending remote-pending signal; do
+  for source in check inbox dead-inbox pending recovery-pending recovery-sending \
+    recovery-failed recovery-unknown recovery-busy-idle remote-pending signal; do
     dir=$(fixture "failure-episode-new-$source-work")
     install_endpoint_inventory_tmux "$dir"
     install_controlled_watcher "$dir"
@@ -1536,6 +1537,33 @@ test_failure_episode_tracks_complete_admission_work() {
             fm_pending_reply_finish_recovery "$FM_STATE_OVERRIDE" "$corr" confirmed || exit 1
             printf "%s" "$corr"
           ' _ "$ROOT/bin") || fail 'could not create recovery-turn grace work'
+        ;;
+      recovery-sending|recovery-failed|recovery-unknown|recovery-busy-idle)
+        now=$(date +%s)
+        corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+          FM_PENDING_REPLY_NOW="$now" FM_PENDING_REPLY_GRACE_SECS=3600 \
+          FM_TEST_PENDING_PHASE="$source" bash -c '
+            . "$1/fm-pending-reply-lib.sh"
+            corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" task report) || exit 1
+            fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" "$FM_PENDING_REPLY_NOW" || exit 1
+            rec=$(fm_pending_reply_path "$FM_STATE_OVERRIDE" "$corr") || exit 1
+            case "$FM_TEST_PENDING_PHASE" in
+              recovery-sending)
+                fm_pending_reply_set "$rec" recovery_attempted_epoch "$FM_PENDING_REPLY_NOW" || exit 1
+                fm_pending_reply_set "$rec" recovery_sender_pid 999999 || exit 1
+                fm_pending_reply_set "$rec" recovery_sender_identity missing || exit 1
+                fm_pending_reply_set "$rec" phase recovery_sending || exit 1
+                ;;
+              recovery-failed) fm_pending_reply_set "$rec" phase recovery_failed || exit 1 ;;
+              recovery-unknown) fm_pending_reply_set "$rec" phase recovery_unknown || exit 1 ;;
+              recovery-busy-idle)
+                fm_pending_reply_set "$rec" phase recovery_sending || exit 1
+                fm_pending_reply_finish_recovery "$FM_STATE_OVERRIDE" "$corr" confirmed || exit 1
+                fm_pending_reply_set "$rec" recovery_turn_seen_busy 1 || exit 1
+                ;;
+            esac
+            printf "%s" "$corr"
+          ' _ "$ROOT/bin") || fail "could not create $source pending reply work"
         ;;
       remote-pending)
         now=$(date +%s)
@@ -1614,6 +1642,57 @@ test_failure_episode_tracks_complete_admission_work() {
     finish "$dir"
   done
   pass 'failure episodes include checks, inboxes, pending eligibility, and signal versions'
+}
+
+test_failure_episode_check_index_remains_stable_through_scan() {
+  local dir original_root=$TEST_ROOT
+  dir=$(fixture failure-episode-check-index-race)
+  install_endpoint_inventory_tmux "$dir"
+  install_controlled_watcher "$dir"
+  printf '%s\n' 'window=fleet:task' "worktree=$dir" "project=$dir" \
+    'kind=ship' 'harness=codex' 'backend=tmux' 'spawn_gen=check-index-race-1' \
+    > "$dir/state/task.meta"
+  initialize_empty_active_supervision_registry "$dir"
+  register_active_supervision_tasks "$dir" task
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1/fm-pr-lib.sh"
+    fm_check_index_recover "$FM_STATE_OVERRIDE"
+  ' _ "$ROOT/bin" || fail 'could not initialize the check index before the race'
+  mv "$dir/fakebin/tmux" "$dir/fakebin/tmux-real"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ -f "$FM_HOME/register-check-during-inventory" ] \
+  && mv "$FM_HOME/register-check-during-inventory" \
+    "$FM_HOME/register-check-during-inventory.claimed" 2>/dev/null; then
+  "$TEST_ROOT/bin/fm-check-register.sh" scan-due \
+    > "$FM_HOME/register-check-during-inventory.out" 2>&1 || exit 70
+  printf '%s\n' registered > "$FM_HOME/register-check-during-inventory.done"
+fi
+exec "${0%/*}/tmux-real" "$@"
+SH
+  chmod 0700 "$dir/fakebin/tmux"
+  touch "$dir/state/.last-check"
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
+    FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
+    FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
+    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+    TEST_ROOT="$dir" run_stop "$dir" 1
+  TEST_ROOT=$original_root
+  wait_file "$dir/repeat-paused" 350
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/scan-due.check.sh"
+  chmod 0700 "$dir/state/scan-due.check.sh"
+  perl -e 'utime 1, 1, $ARGV[0] or die $!' "$dir/state/.last-check"
+  : > "$dir/register-check-during-inventory"
+  touch "$dir/repeat-paused.release"
+  wait_file "$dir/repeat-rc" 350
+  [ -s "$dir/register-check-during-inventory.done" ] \
+    || fail 'the due check was not registered during the admission scan'
+  [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] \
+    || fail 'a due check registered during admission was suppressed'
+  [ "$(wc -l < "$dir/controlled-arm-starts" | tr -d ' ')" = 2 ] \
+    || fail 'a due check registered during admission launched no new watcher arm'
+  finish "$dir"
+  pass 'failure suppression revalidates the check index after admission'
 }
 
 test_failure_episode_deadline_remains_current_through_scan() {
@@ -6880,6 +6959,7 @@ test_persistent_identity_timeout_fails_closed
 test_terminal_error_generation_tristate
 test_current_generation_failure_episode_is_bounded
 test_failure_episode_tracks_complete_admission_work
+test_failure_episode_check_index_remains_stable_through_scan
 test_failure_episode_deadline_remains_current_through_scan
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window

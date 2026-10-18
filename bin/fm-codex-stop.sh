@@ -229,7 +229,11 @@ set -o pipefail
 fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
 generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 printf 'generation\t%s\n' "$generation"
+fm_check_index_recover "$FM_STATE_OVERRIDE" || exit 1
+check_revision=$(fm_check_index_revision "$FM_STATE_OVERRIDE") || exit 1
 registered_checks=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
+[ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$check_revision" ] || exit 1
+printf 'check-revision\t%s\n' "$check_revision"
 while IFS= read -r registered_check; do
   [ -n "$registered_check" ] || continue
   printf 'registered-check\t%s\n' "$registered_check"
@@ -307,12 +311,18 @@ if [ -d "$dir" ]; then
       [ -f "$rec" ] && [ ! -L "$rec" ] || continue
       pending_state=$(fm_pending_reply_admission_state \
         "$FM_STATE_OVERRIDE" "$corr") || continue
-      IFS="$(printf '\t')" read -r pending_token future_deadline <<EOF
+      IFS="$(printf '\t')" read -r pending_token suppression_state future_deadline <<EOF
 $pending_state
 EOF
       case "$future_deadline" in
-        ''|*[!0-9]*) ;;
+        -) ;;
+        ''|*[!0-9]*) exit 1 ;;
         *) printf 'future-deadline\t%s\n' "$((wall_now + future_deadline - now))" ;;
+      esac
+      case "$suppression_state" in
+        stable) ;;
+        unstable) printf 'suppression-barrier\tpending:%s\n' "$corr" ;;
+        *) exit 1 ;;
       esac
       printf 'pending-recovery-state\t%s\t%s\n' "$corr" "$pending_token"
       case "$pending_token" in
@@ -334,6 +344,9 @@ EOF
 fi
 after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
 [ "$after" = "$generation" ] || exit 1
+registered_checks_after=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
+[ "$registered_checks_after" = "$registered_checks" ] || exit 1
+[ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$check_revision" ] || exit 1
 ''', timeout=max(8, remote_send_timeout + probe_cleanup_allowance), deadline=probe_deadline)
     if result is None or result.returncode != 0:
         return None
@@ -348,12 +361,16 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     windows = set()
     registered_checks = set()
     future_deadlines = set()
+    suppression_barriers = set()
+    check_revision = None
     for line in result.stdout.splitlines():
         kind, separator, value = line.partition('\t')
         if not separator or not value:
             continue
         if kind == 'generation':
             generation = value
+        elif kind == 'check-revision':
+            check_revision = value
         elif kind == 'signal':
             signal_items.add(value)
             signal_name, signal_separator, signal_signature = value.partition('\t')
@@ -384,14 +401,17 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
             if future_deadline < 0:
                 return None
             future_deadlines.add(future_deadline)
+        elif kind == 'suppression-barrier':
+            suppression_barriers.add(value)
         if kind == 'budget-window' and separator and value:
             windows.add(value)
-    if not generation:
+    if not generation or not check_revision:
         return None
     return (generation, signal_tasks, len(remote_recoveries), len(windows),
             len(active_owners), len(owner_fanouts), len(registered_checks),
             signal_items, remote_recoveries, pending_recovery_states, inbox_items,
-            windows, active_owners, owner_fanouts, registered_checks, future_deadlines)
+            windows, active_owners, owner_fanouts, registered_checks, future_deadlines,
+            suppression_barriers, check_revision)
 
 
 def admission_state_value(path):
@@ -421,7 +441,8 @@ def canonical_admission_work_snapshot(work):
     (generation, signal_tasks, _remote_recovery_count, _budget_window_count,
      _active_owner_count, _owner_fanout_count, _registered_check_count,
      signal_items, remote_recoveries, pending_recovery_states, inbox_items, windows,
-     active_owners, owner_fanouts, registered_checks, future_deadlines) = work
+     active_owners, owner_fanouts, registered_checks, future_deadlines,
+     suppression_barriers, check_revision) = work
     check_cursor = admission_state_value('.check-sweep-cursor')
     check_high_water = admission_state_value('.check-sweep-high-water')
     if check_cursor is None or check_high_water is None:
@@ -435,7 +456,7 @@ def canonical_admission_work_snapshot(work):
     except OSError:
         checks_due = True
     value = dict(
-        protocol='fm-codex-admission-work.v4',
+        protocol='fm-codex-admission-work.v5',
         registry_generation=generation,
         signals=sorted(signal_items),
         remote_recoveries=sorted(remote_recoveries),
@@ -448,10 +469,13 @@ def canonical_admission_work_snapshot(work):
         due_checks=sorted(registered_checks) if checks_due else [],
         check_sweep_cursor=check_cursor,
         check_sweep_high_water=check_high_water,
+        suppression_barriers=sorted(suppression_barriers),
+        check_revision=check_revision,
     )
     encoded = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
     signature = 'sha256:' + hashlib.sha256(encoded).hexdigest()
-    return signature, min(future_deadlines) if future_deadlines else None
+    return (signature, min(future_deadlines) if future_deadlines else None,
+            frozenset(registered_checks), check_revision, not suppression_barriers)
 
 
 def current_admission_work_snapshot(registry_generation, probe_deadline=None):
@@ -461,8 +485,31 @@ def current_admission_work_snapshot(registry_generation, probe_deadline=None):
     return canonical_admission_work_snapshot(work)
 
 
-def admission_work_deadline_current(deadline):
-    return deadline is None or time.time() < deadline
+def current_registered_checks(probe_deadline=None):
+    result = shell(r'''
+. "$1/fm-pr-lib.sh" || exit 1
+fm_check_index_recover "$FM_STATE_OVERRIDE" || exit 1
+revision=$(fm_check_index_revision "$FM_STATE_OVERRIDE") || exit 1
+inventory=$(fm_check_index_inventory "$FM_STATE_OVERRIDE") || exit 1
+[ "$(fm_check_index_revision "$FM_STATE_OVERRIDE")" = "$revision" ] || exit 1
+printf 'revision\t%s\n' "$revision"
+printf '%s\n' "$inventory"
+''', deadline=probe_deadline)
+    if result is None or result.returncode != 0:
+        return None
+    lines = result.stdout.splitlines()
+    if not lines or not lines[0].startswith('revision\t'):
+        return None
+    return lines[0].partition('\t')[2], frozenset(line for line in lines[1:] if line)
+
+
+def admission_work_snapshot_current(snapshot, probe_deadline=None):
+    if snapshot is None or not snapshot[4]:
+        return False
+    if snapshot[1] is not None and time.time() >= snapshot[1]:
+        return False
+    checks = current_registered_checks(probe_deadline)
+    return checks is not None and checks == (snapshot[3], snapshot[2])
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
@@ -480,7 +527,8 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
      active_owners, owner_fanouts, registered_checks, _signal_items,
      _remote_recovery_items, _pending_recovery_states, _inbox_items,
      _budget_window_items, _active_owner_items, _owner_fanout_items,
-     _registered_check_items, _future_deadlines) = work
+     _registered_check_items, _future_deadlines, _suppression_barriers,
+     _check_revision) = work
     if check_age >= check_interval:
         due_checks = registered_checks
     if budget_deadline is not None:
@@ -898,7 +946,7 @@ def failure_episode_unchanged():
     return (snapshot is not None and
             snapshot[0] == current['admission_work_signature'] and not queued() and
             read_failure_episode() == current and
-            admission_work_deadline_current(snapshot[1]))
+            admission_work_snapshot_current(snapshot))
 
 
 def write_failure_episode(value):
@@ -1258,7 +1306,7 @@ def owner(lock):
         episode_signature = episode_snapshot[0] if episode_snapshot is not None else None
         episode = failure_episode(reason, episode_generation, episode_signature)
         if (terminal_cleanup_complete and failure_episode_seen(episode) and
-                admission_work_deadline_current(episode_snapshot[1])):
+                admission_work_snapshot_current(episode_snapshot, generation_deadline)):
             send(active, dict(rc=0, reason='', token=token))
             terminal_delivered = True
             return False
