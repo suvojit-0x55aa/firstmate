@@ -1,0 +1,32 @@
+Analysis of sampling bash (pid 9728) every 1 millisecond
+Process:         bash [9728]
+Path:            /bin/bash
+Load Address:    0x102e6c000
+Identifier:      bash
+Version:         ???
+Code Type:       ARM64
+Parent Process:  bash [9045]
+Target Type:     live task
+
+Date/Time:       2026-10-18 09:42:27.384 +0530
+Launch Time:     2026-10-18 09:41:46.158 +0530
+OS Version:      macOS 26.2 (25C56)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         96K
+Physical footprint (peak):  96K
+Idle exit:                  untracked
+----
+
+Call graph:
+    802 Thread_2186287113: Main Thread   DispatchQueue_<multiple>
+      802 _dyld_start  (in dyld) + 0  [0x10310c9c0]
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _dyld_start  (in dyld)        802
+
+Binary images description not available
+
