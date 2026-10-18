@@ -10,8 +10,9 @@
 # Due checks are split into a durable per-cycle batch sized to the remaining
 # deadline, without reducing any individual check's timeout.
 # Between Stops it holds an identity-checked handling lease for at most 300s.
-# A committed failure episode blocks once; an unchanged follow-up retires the
-# owner without launching another watcher or extending the handling lease.
+# A committed failure episode blocks once; only a stable, complete admission-
+# work revalidation lets an unchanged follow-up retire the owner without
+# launching another watcher or extending the handling lease.
 # Closing an unanswered hook connection cancels its owned watcher process group;
 # an independently attached watcher is outside that group and is never killed.
 # No lock PID is trusted for exclusion or stale takeover: flock releases on death.

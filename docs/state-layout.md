@@ -103,7 +103,7 @@ state/               runtime records and signals; gitignored
   .codex-stop.owner-lock  stable kernel-flock inode for the sole Codex Stop continuation owner; never remove or replace
   .codex-stop.json .codex-stop.sock  transient live-owner lease record and private local transport socket; existence alone is not health evidence, and the owner normally removes both on stand-down; never touch
   .codex-stop-error  latest recorded Codex Stop owner exception diagnostic; not health evidence, safe to delete
-  .codex-stop-failure-episode.json  bounded Codex Stop refusal episode keyed by the current failure signature; fm-codex-stop.sh replaces it on a new episode and clears it after successful arming
+  .codex-stop-failure-episode.json  bounded Codex Stop refusal episode keyed by the revalidated complete admission-work signature; fm-codex-stop.sh replaces it on a new episode and clears it after successful arming
   .codex-arm-owner  transient bounded Codex arm-launch ownership handoff; the arm or Stop owner removes it after publication, cancellation, or cleanup; never touch
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
   .hash-* .count-* .stale-* .stale-since-* .death-notified-v3/ .death-generation-v3/ .death-notified-* .death-generation-* .paused-* .wedge-escalations-* .writing-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch

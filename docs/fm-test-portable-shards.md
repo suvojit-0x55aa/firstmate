@@ -72,7 +72,7 @@ Hints only affect balance: the coverage guard keeps the partition complete and d
 Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for a shard to time out.
 
-The expanded Codex Stop driver now carries 113 top-level cases. CI run
+The expanded Codex Stop driver now carries 120 top-level cases. CI run
 [39063061367](https://github.com/suvojit-0x55aa/firstmate/actions/runs/39063061367)
 spent 258708 ms reaching an early failure at case 16, proving that the old
 20000 ms fallback was not a usable whole-driver estimate. A later clean prefix

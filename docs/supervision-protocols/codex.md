@@ -21,6 +21,7 @@ Retained metadata for a worker whose verified backend reports `dead` or `missing
 An exact-dead worker is suppressed only by its collision-free owner-identity notification receipt for the durable spawn incarnation; exact liveness or a verified busy verdict retires that receipt and ambiguous stale hashes so a later death surfaces once.
 Due checks retain their individual timeout and run through a durable batch sized to the remaining cycle budget, so a large registered set completes over multiple watcher cycles instead of being admitted as one unbounded sweep.
 Attaching to an existing watcher requires an exact current capability match for the check batch and timeout, cadence, classification and write timeouts, remote-send and inactive-reconcile budgets, admission guard, and deferred remote-observation mode.
+After one exhausted admission or watcher failure, a follow-up Stop returns success without re-arming only when the complete admission-work snapshot is stable and unchanged; newly due work, changed endpoint liveness, a queued wake, or any mutable source that cannot be revalidated prevents suppression.
 The Stop-owned watcher defers remote pending-reply endpoint observation so that observation's network latency cannot consume the fixed Stop deadline; durable local reply evidence and the ordinary non-Codex observation path remain unchanged.
 The adapter never acknowledges queued work and stands down on interruption, away mode, session replacement or no remaining need.
 Claude retains its separate `asyncRewake` path.
