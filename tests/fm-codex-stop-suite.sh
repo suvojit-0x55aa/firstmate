@@ -3261,7 +3261,7 @@ test_remote_inbox_stays_owned_by_remote_delivery() {
 }
 
 test_herdr_endpoints_use_one_snapshot_per_cycle() {
-  local dir id calls states rc
+  local dir id calls states cycle_states
   dir=$(fixture herdr-endpoint-inventory)
   install_endpoint_inventory_herdr "$dir"
   initialize_empty_active_supervision_registry "$dir"
@@ -3280,20 +3280,30 @@ test_herdr_endpoints_use_one_snapshot_per_cycle() {
   done
   printf '%s\n' 'window=fleet:w-live:p1' 'backend=herdr' > "$dir/state/live-herdr.meta"
   register_active_supervision_tasks "$dir" live-herdr
-  set +e
-  PATH="$dir/fakebin:$PATH" FM_TEST_HERDR_PROBE_LOG="$dir/herdr-probes" \
+  cycle_states=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CODEX_BOUNDED_WATCH=1 FM_TEST_HERDR_PROBE_LOG="$dir/herdr-probes" \
     FM_TEST_HERDR_EXISTING_TARGETS='fleet:w-live:p1' \
     FM_TEST_HERDR_LIVE_TARGETS='fleet:w-live:p1' \
-    FM_TEST_WATCH_POLL=10 FM_TEST_BOUNDED_WATCH_TIMEOUT=4 \
-    run_bounded_watcher_cycle "$dir" "$dir/fakebin" \
-      > "$dir/watch.out" 2> "$dir/watch.err"
-  rc=$?
-  set -e
-  [ "$rc" -eq 124 ] \
-    || fail "Herdr endpoint cycle did not reach its bounded poll: rc=$rc $(cat "$dir/watch.err")"
+    bash -c '
+      . "$1/fm-watch.sh"
+      generation=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
+      FM_CODEX_REGISTRY_INDEX=$(umask 077; mktemp -d "$FM_STATE_OVERRIDE/.test-active-index.XXXXXX") \
+        || exit 1
+      fm_supervision_registry_snapshot_index \
+        "$FM_STATE_OVERRIDE" "$generation" "$FM_CODEX_REGISTRY_INDEX" || exit 1
+      recorded_window_inventory_with_agent_state
+      rc=$?
+      find "$FM_CODEX_REGISTRY_INDEX" -depth -delete 2>/dev/null || rc=1
+      exit "$rc"
+    ' _ "$ROOT/bin") || fail 'Herdr watcher cycle inventory failed'
+  [ "$(printf '%s\n' "$cycle_states" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 ] \
+    || fail "watcher cycle admitted historical Herdr owners: $cycle_states"
+  [ "$(printf '%s\n' "$cycle_states" | awk -F '\t' '{ print $1 "\t" $2 "\t" $3 "\t" $6 }')" \
+      = $'herdr\tfleet:w-live:p1\talive\tlive-herdr' ] \
+    || fail "watcher cycle did not classify the sole live Herdr owner: $cycle_states"
   calls=$(wc -l < "$dir/herdr-probes" | tr -d '[:space:]')
   [ "$calls" -eq 1 ] \
-    || fail "one watcher cycle used $calls Herdr snapshots for one live and 40 historical endpoints"
+    || fail "one watcher cycle inventory used $calls Herdr snapshots for one live and 40 historical endpoints"
   [ "$(awk -F '\t' '$2 == "pane" && $3 == "list" { count++ } END { print count + 0 }' "$dir/herdr-probes")" = "$calls" ] \
     || fail 'Herdr batch classification issued a non-inventory endpoint probe'
   pass 'Herdr histories stay cold while live owners use bounded bulk snapshots'
