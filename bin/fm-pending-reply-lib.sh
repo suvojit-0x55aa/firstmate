@@ -817,7 +817,7 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
   return 0
 }
 
-fm_pending_reply_fallback_idle_eligible() {  # <record-path>
+_fm_pending_reply_fallback_idle_state() {  # <record-path>
   local rec=$1 phase start seen grace now age
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
@@ -831,13 +831,24 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
       ;;
     *) return 1 ;;
   esac
-  [ "$seen" = 1 ] && return 0
+  if [ "$seen" = 1 ]; then
+    printf 'eligible'
+    return 0
+  fi
   grace=$(fm_pending_reply_get "$rec" grace_secs)
   case "$start" in ''|*[!0-9]*) return 1 ;; esac
   case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
   now=$(fm_pending_reply_now)
   age=$((now - start))
-  [ "$age" -ge "$grace" ]
+  if [ "$age" -ge "$grace" ]; then
+    printf 'eligible'
+  else
+    printf 'waiting\t%s' "$((start + grace))"
+  fi
+}
+
+fm_pending_reply_fallback_idle_eligible() {  # <record-path>
+  [ "$(_fm_pending_reply_fallback_idle_state "$1")" = eligible ]
 }
 
 # fm_pending_reply_backend_observation: one busy/idle observation of a
@@ -984,6 +995,66 @@ fm_pending_reply_recovery_eligibility_token() {  # <state-dir> <task_id> <turn-c
   else
     printf 'waiting-channel'
   fi
+}
+
+fm_pending_reply_admission_state() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec phase attempted delivered grace now deadline task_id completed eligibility fallback
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  now=$(fm_pending_reply_now)
+  case "$phase" in
+    awaiting_report)
+      attempted=$(fm_pending_reply_get "$rec" recovery_attempted_epoch)
+      if [ -n "$attempted" ]; then
+        printf 'awaiting-report:recovery-attempted'
+        return 0
+      fi
+      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+      grace=$(fm_pending_reply_get "$rec" grace_secs)
+      case "$delivered:$grace:$now" in
+        *[!0-9:]*|:*|*::*|*:)
+          printf 'awaiting-report:waiting-delivery'
+          return 0
+          ;;
+      esac
+      deadline=$((delivered + grace))
+      if [ "$now" -lt "$deadline" ]; then
+        printf 'awaiting-report:waiting-grace\t%s' "$deadline"
+        return 0
+      fi
+      task_id=$(fm_pending_reply_get "$rec" task_id)
+      completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
+      eligibility=$(fm_pending_reply_recovery_eligibility_token \
+        "$state" "$task_id" "$completed") || return 1
+      printf 'awaiting-report:%s' "$eligibility"
+      ;;
+    recovery_sent)
+      task_id=$(fm_pending_reply_get "$rec" task_id)
+      completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
+      if [ -n "$completed" ]; then
+        eligibility=$(fm_pending_reply_recovery_eligibility_token \
+          "$state" "$task_id" "$completed") || return 1
+        printf 'recovery-sent:completed-%s' "$eligibility"
+        return 0
+      fi
+      fallback=$(_fm_pending_reply_fallback_idle_state "$rec") || {
+        printf 'recovery-sent:waiting-delivery'
+        return 0
+      }
+      IFS="$(printf '\t')" read -r eligibility deadline <<EOF
+$fallback
+EOF
+      if [ "$eligibility" = eligible ]; then
+        printf 'recovery-sent:fallback-due'
+      elif [ -n "$deadline" ]; then
+        printf 'recovery-sent:waiting-grace\t%s' "$deadline"
+      else
+        printf 'recovery-sent:waiting-idle'
+      fi
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # 0 when "no correlated report in the parent status log" is admissible evidence

@@ -305,23 +305,21 @@ if [ -d "$dir" ]; then
       corr=${indexed##*/}
       rec="$dir/$corr"
       [ -f "$rec" ] && [ ! -L "$rec" ] || continue
-      [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || continue
-      [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || continue
-      delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
-      grace=$(fm_pending_reply_get "$rec" grace_secs)
-      case "$delivered:$grace:$now" in
-        *[!0-9:]*|:*|*::*|*:) continue ;;
+      pending_state=$(fm_pending_reply_admission_state \
+        "$FM_STATE_OVERRIDE" "$corr") || continue
+      IFS="$(printf '\t')" read -r pending_token future_deadline <<EOF
+$pending_state
+EOF
+      case "$future_deadline" in
+        ''|*[!0-9]*) ;;
+        *) printf 'future-deadline\t%s\n' "$((wall_now + future_deadline - now))" ;;
       esac
-      future_deadline=$((delivered + grace))
-      if [ "$now" -lt "$future_deadline" ]; then
-        printf 'future-deadline\t%s\n' "$((wall_now + future_deadline - now))"
-        continue
-      fi
-      completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
-      recovery_state=$(fm_pending_reply_recovery_eligibility_token \
-        "$FM_STATE_OVERRIDE" "$task_id" "$completed") || exit 1
-      case "$recovery_state" in actionable|waiting-turn|waiting-channel) ;; *) exit 1 ;; esac
-      printf 'pending-recovery-state\t%s\t%s\n' "$corr" "$recovery_state"
+      printf 'pending-recovery-state\t%s\t%s\n' "$corr" "$pending_token"
+      case "$pending_token" in
+        awaiting-report:actionable|awaiting-report:waiting-turn|awaiting-report:waiting-channel) ;;
+        *) continue ;;
+      esac
+      recovery_state=${pending_token#awaiting-report:}
       if fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id"; then
         [ "$recovery_state" = actionable ] || continue
         printf 'owner-fanout\tpending:%s\n' "$corr"
@@ -437,7 +435,7 @@ def canonical_admission_work_snapshot(work):
     except OSError:
         checks_due = True
     value = dict(
-        protocol='fm-codex-admission-work.v3',
+        protocol='fm-codex-admission-work.v4',
         registry_generation=generation,
         signals=sorted(signal_items),
         remote_recoveries=sorted(remote_recoveries),

@@ -1495,7 +1495,7 @@ test_current_generation_failure_episode_is_bounded() {
 
 test_failure_episode_tracks_complete_admission_work() {
   local source dir original_root=$TEST_ROOT now corr record live_targets
-  for source in check inbox dead-inbox pending remote-pending signal; do
+  for source in check inbox dead-inbox pending recovery-pending remote-pending signal; do
     dir=$(fixture "failure-episode-new-$source-work")
     install_endpoint_inventory_tmux "$dir"
     install_controlled_watcher "$dir"
@@ -1523,6 +1523,19 @@ test_failure_episode_tracks_complete_admission_work() {
             fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" "$FM_PENDING_REPLY_NOW" || exit 1
             printf "%s" "$corr"
           ' _ "$ROOT/bin") || fail 'could not create initially fresh pending reply work'
+        ;;
+      recovery-pending)
+        now=$(date +%s)
+        corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+          FM_PENDING_REPLY_NOW="$now" FM_PENDING_REPLY_GRACE_SECS=3600 bash -c '
+            . "$1/fm-pending-reply-lib.sh"
+            corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" task report) || exit 1
+            fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" "$((FM_PENDING_REPLY_NOW - 7200))" || exit 1
+            rec=$(fm_pending_reply_path "$FM_STATE_OVERRIDE" "$corr") || exit 1
+            fm_pending_reply_set "$rec" phase recovery_sending || exit 1
+            fm_pending_reply_finish_recovery "$FM_STATE_OVERRIDE" "$corr" confirmed || exit 1
+            printf "%s" "$corr"
+          ' _ "$ROOT/bin") || fail 'could not create recovery-turn grace work'
         ;;
       remote-pending)
         now=$(date +%s)
@@ -1572,6 +1585,14 @@ test_failure_episode_tracks_complete_admission_work() {
             rec=$(fm_pending_reply_path "$FM_STATE_OVERRIDE" "$FM_TEST_CORR") || exit 1
             fm_pending_reply_set "$rec" delivered_epoch "$FM_TEST_DELIVERED"
           ' _ "$ROOT/bin" || fail 'could not cross the pending reply deadline'
+        ;;
+      recovery-pending)
+        FM_STATE_OVERRIDE="$dir/state" FM_TEST_CORR="$corr" \
+          FM_TEST_SENT="$((now - 7200))" bash -c '
+            . "$1/fm-pending-reply-lib.sh"
+            rec=$(fm_pending_reply_path "$FM_STATE_OVERRIDE" "$FM_TEST_CORR") || exit 1
+            fm_pending_reply_set "$rec" recovery_sent_epoch "$FM_TEST_SENT"
+          ' _ "$ROOT/bin" || fail 'could not cross the recovery-turn grace deadline'
         ;;
       remote-pending)
         FM_STATE_OVERRIDE="$dir/state" FM_TEST_NOW="$now" bash -c '
