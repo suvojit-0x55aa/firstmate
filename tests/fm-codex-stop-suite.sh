@@ -1941,24 +1941,20 @@ PY
     TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
   wait_file "$dir/repeat-paused" 350
-  FM_STATE_OVERRIDE="$dir/state" bash -c '
-    . "$1/fm-wake-lib.sh"
-    fm_wake_append check wake-finish "queued before repeated Stop"
-  ' _ "$ROOT/bin" || fail 'could not force the repeated Stop past early suppression'
+  cp "$dir/state/.codex-stop-failure-episode.json" "$dir/first-failure-episode" \
+    || fail 'could not preserve the committed failure episode'
+  printf '%s\n' '{}' > "$dir/state/.codex-stop-failure-episode.json"
   touch "$dir/repeat-paused.release"
   count=0
   for _ in $(seq 1 350); do
     count=$(wc -l < "$dir/controlled-arm-starts" 2>/dev/null || printf 0)
     [ "$count" -ge 2 ] && break
-    sleep 0.02
+    sleep 0.1
   done
   [ "$count" -ge 2 ] || fail 'the repeated Stop did not launch its watcher arm'
-  FM_STATE_OVERRIDE="$dir/state" bash -c '
-    . "$1/fm-wake-lib.sh"
-    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
-    rm -f -- "$FM_WAKE_QUEUE" "$STATE/.wake-queue.seq" || exit 1
-    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-  ' _ "$ROOT/bin" || fail 'could not restore the baseline queue fixture'
+  mv -f "$dir/first-failure-episode" \
+    "$dir/state/.codex-stop-failure-episode.json" \
+    || fail 'could not restore the committed failure episode'
   wait_file "$dir/wake-finish-scan" 350
   FM_STATE_OVERRIDE="$dir/state" bash -c '
     . "$1/fm-wake-lib.sh"

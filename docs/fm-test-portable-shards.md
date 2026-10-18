@@ -79,22 +79,21 @@ spent 258708 ms reaching an early failure at case 16, proving that the old
 reached case 24 only when its four-shard lane hit the 20-minute hang tripwire.
 Six focused entry points now source the same `tests/fm-codex-stop-suite.sh`
 driver, preserving every case while bounding each test script independently.
-Five entry points carry 300000 ms balance budgets and the shorter signal group
-carries 240000 ms; refresh them from the next green timing artifacts. The
-current 143-script, six-shard assignment is:
+The admission entry point carries a 900000 ms balance budget after CI run [39102498606](https://github.com/suvojit-0x55aa/firstmate/actions/runs/39102498606) measured 865113 ms before its late wake-queue assertion failed, four entry points carry 300000 ms budgets, and the shorter signal group carries 240000 ms.
+Refresh them from the next green timing artifacts.
+The current 143-script, six-shard assignment is:
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of6` | 24 | 874131 ms (~14.6 min) |
-| `portable-serial-2of6` | 25 | 874131 ms (~14.6 min) |
-| `portable-serial-3of6` | 24 | 874124 ms (~14.6 min) |
-| `portable-serial-4of6` | 24 | 874116 ms (~14.6 min) |
-| `portable-serial-5of6` | 23 | 874129 ms (~14.6 min) |
-| `portable-serial-6of6` | 23 | 874123 ms (~14.6 min) |
-| imbalance | | 15 ms |
+| `portable-serial-1of6` | 17 | 974134 ms (~16.2 min) |
+| `portable-serial-2of6` | 26 | 974124 ms (~16.2 min) |
+| `portable-serial-3of6` | 21 | 974131 ms (~16.2 min) |
+| `portable-serial-4of6` | 26 | 974124 ms (~16.2 min) |
+| `portable-serial-5of6` | 27 | 974118 ms (~16.2 min) |
+| `portable-serial-6of6` | 26 | 974123 ms (~16.2 min) |
+| imbalance | | 16 ms |
 
-The 300000 ms Codex Stop entry-point budgets are now the assignment floor for
-any shard count until the next timing refresh.
+The 900000 ms admission budget and the 300000 ms budgets for the other long Codex Stop entry points are assignment floors until the next timing refresh.
 
 Before this refresh, twelve lane scripts had no hint and fell back to the 20000 ms default.
 Their real durations ranged from 17 ms to 62323 ms, and that guesswork, together with hints that had drifted since they were measured, pushed `portable-serial-3of4` to 1110544 ms of real work against 694447 ms on `portable-serial-1of4`.
@@ -130,7 +129,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-6 | job `timeout-minutes: 20` | Each balanced shard is budgeted at about 14.6 minutes, leaving roughly 1.4x hang-tripwire margin for job setup and runner-speed spread. Growing the lane past that margin means raising `PORTABLE_SERIAL_SHARDS` and the `ci.yml` matrix together, not widening the cap. |
+| portable serial 1-6 | job `timeout-minutes: 20` | Each balanced shard is budgeted at about 16.2 minutes, leaving roughly 1.2x hang-tripwire margin for job setup and runner-speed spread. Growing the lane past that margin means raising `PORTABLE_SERIAL_SHARDS` and the `ci.yml` matrix together, not widening the cap. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finish around 7 minutes, so the step bound is the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. |
 
 Timeouts are hang tripwires rather than expected healthy durations.

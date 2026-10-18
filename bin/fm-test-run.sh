@@ -420,7 +420,7 @@ tests/fm-claude-stop-autoarm-live-e2e.test.sh 18
 tests/fm-claude-stop-autoarm.test.sh 60641
 tests/fm-cmux-claude-composer-live-e2e.test.sh 18
 tests/fm-codex-continuity-live-e2e.test.sh 16
-tests/fm-codex-stop-admission.test.sh 300000
+tests/fm-codex-stop-admission.test.sh 900000
 tests/fm-codex-stop-checks.test.sh 300000
 tests/fm-codex-stop-cycle.test.sh 300000
 tests/fm-codex-stop-inventory.test.sh 300000
