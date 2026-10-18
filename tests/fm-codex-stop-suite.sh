@@ -1588,8 +1588,10 @@ test_failure_episode_tracks_complete_admission_work() {
     PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
       FM_TEST_LIVE_TARGETS="$live_targets" FM_CHECK_INTERVAL=3600 \
       FM_TASK_INBOX_GRACE_SECS=3600 FM_PENDING_REPLY_GRACE_SECS=3600 \
+      FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 \
+      FM_SEND_REMOTE_BUDGET=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
       FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
-      FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+      FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 FM_GUARD_GRACE=1 \
       TEST_ROOT="$dir" run_stop "$dir" 1
     TEST_ROOT=$original_root
     wait_file "$dir/repeat-paused" 350
@@ -1674,8 +1676,10 @@ SH
   touch "$dir/state/.last-check"
   PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
     FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
+    FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 \
+    FM_SEND_REMOTE_BUDGET=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
     FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
-    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 FM_GUARD_GRACE=1 \
     TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
   wait_file "$dir/repeat-paused" 350
@@ -1829,7 +1833,9 @@ PY
       PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
       FM_TEST_LIVE_TARGETS="$live_targets" FM_CHECK_INTERVAL=3600 \
       FM_TASK_INBOX_GRACE_SECS=3600 FM_PENDING_REPLY_GRACE_SECS=3600 \
-      FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+      FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 \
+      FM_SEND_REMOTE_BUDGET=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+      FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 FM_GUARD_GRACE=1 \
       TEST_ROOT="$dir" run_stop "$dir" 1
     TEST_ROOT=$original_root
     wait_file "$dir/repeat-paused" 350
@@ -1927,7 +1933,9 @@ PY
     FM_TEST_WAKE_FINISH_MARKER="$dir/wake-finish-scan" \
     PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
     FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
-    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+    FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 \
+    FM_SEND_REMOTE_BUDGET=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 FM_GUARD_GRACE=1 \
     TEST_ROOT="$dir" run_stop "$dir" 1
   TEST_ROOT=$original_root
   wait_file "$dir/repeat-paused" 350
@@ -2187,12 +2195,16 @@ test_retired_status_history_does_not_consume_cycle_budget() {
   local dir original_root=$TEST_ROOT id
   dir=$(fixture retired-status-history)
   install_controlled_watcher "$dir"
-  printf '%s\n' 'window=fm-active:1.1' > "$dir/state/task.meta"
+  install_endpoint_inventory_tmux "$dir"
+  : > "$dir/state/task.meta"
   for id in $(seq 1 15); do
     printf '%s\n' 'done: retained history' > "$dir/state/retired-$id.status"
     prime_status_seen "$dir/state" "$dir/state/retired-$id.status"
   done
-  FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=300 TEST_ROOT="$dir" run_stop "$dir" 180
+  PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='firstmate:fm-task' \
+    FM_TEST_LIVE_TARGETS='firstmate:fm-task' \
+    FM_POLL=15 FM_SIGNAL_GRACE=30 FM_GUARD_GRACE=300 \
+    TEST_ROOT="$dir" run_stop "$dir" 180
   TEST_ROOT=$original_root
   wait_file "$dir/controlled-watcher-ready"
   append_wake "$dir/state" check release 'check: release retained-history fixture'
