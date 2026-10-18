@@ -3356,6 +3356,7 @@ test_many_dead_endpoints_take_cheap_watcher_path() {
   local dir id existing='' key pane_hash inventory_calls tmux_probes process_probes capture_probes backend_probes
   dir=$(fixture retained-dead-endpoints)
   install_endpoint_inventory_tmux "$dir"
+  initialize_empty_active_supervision_registry "$dir"
   cat > "$dir/slow-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$1" >> "$FM_HOME/crew-state-calls"
@@ -3389,6 +3390,7 @@ SH
   printf '%s\n' 'working: waiting quietly for routed work' > "$dir/state/missing-reply.status"
   prime_status_seen "$dir/state" "$dir/state/missing-reply.status"
   existing="$existing fleet:uncertain-reply"
+  register_active_supervision_tasks "$dir" dead-25 missing-reply uncertain-reply
   FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_PENDING_REPLY_NOW=1000 bash -c '
     . "$1/fm-pending-reply-lib.sh"
     for id in $(seq 1 25); do
