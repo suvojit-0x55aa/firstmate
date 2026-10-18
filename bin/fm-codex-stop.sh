@@ -78,6 +78,7 @@ import sys
 
 try:
     import fcntl
+    import hashlib
     import json
     import math
     import os
@@ -315,6 +316,7 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
         return None
     generation = None
     signal_tasks = set()
+    signal_items = set()
     remote_recoveries = set()
     owner_fanouts = set()
     active_owners = set()
@@ -327,6 +329,7 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
         if kind == 'generation':
             generation = value
         elif kind == 'signal':
+            signal_items.add(value)
             if value.endswith('.status'):
                 value = value[:-len('.status')]
             elif value.endswith('.turn-ended'):
@@ -345,7 +348,69 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     if not generation:
         return None
     return (generation, signal_tasks, len(remote_recoveries), len(windows),
-            len(active_owners), len(owner_fanouts), len(registered_checks))
+            len(active_owners), len(owner_fanouts), len(registered_checks),
+            signal_items, remote_recoveries, windows, active_owners, owner_fanouts,
+            registered_checks)
+
+
+def admission_state_value(path):
+    fd = None
+    try:
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        fd = os.open(path, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 255:
+            return None
+        value = os.read(fd, 256).decode('ascii').rstrip('\n')
+        if '\n' in value or '\r' in value:
+            return None
+        return value
+    except FileNotFoundError:
+        return ''
+    except (OSError, UnicodeError):
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def canonical_admission_work_signature(work):
+    if work is None:
+        return None
+    (generation, signal_tasks, _remote_recovery_count, _budget_window_count,
+     _active_owner_count, _owner_fanout_count, _registered_check_count,
+     signal_items, remote_recoveries, windows, active_owners, owner_fanouts,
+     registered_checks) = work
+    check_cursor = admission_state_value('.check-sweep-cursor')
+    check_high_water = admission_state_value('.check-sweep-high-water')
+    if check_cursor is None or check_high_water is None:
+        return None
+    try:
+        checks_due = int(time.time()) - int(os.path.getmtime('.last-check')) >= check_interval
+    except OSError:
+        checks_due = True
+    value = dict(
+        protocol='fm-codex-admission-work.v1',
+        registry_generation=generation,
+        signals=sorted(signal_items),
+        remote_recoveries=sorted(remote_recoveries),
+        budget_windows=sorted(windows),
+        active_owners=sorted(active_owners),
+        owner_fanouts=sorted(owner_fanouts),
+        registered_checks=sorted(registered_checks),
+        due_checks=sorted(registered_checks) if checks_due else [],
+        check_sweep_cursor=check_cursor,
+        check_sweep_high_water=check_high_water,
+    )
+    encoded = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return 'sha256:' + hashlib.sha256(encoded).hexdigest()
+
+
+def current_admission_work_signature(registry_generation, probe_deadline=None):
+    work = admission_cycle_work(probe_deadline)
+    if work is None or work[0] != registry_generation:
+        return None
+    return canonical_admission_work_signature(work)
 
 
 def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=None,
@@ -360,7 +425,9 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
     if work is None:
         return cycle_limit + 1, check_limit or 1, 0
     (admission_registry_generation, signal_tasks, remote_recoveries, budget_windows,
-     active_owners, owner_fanouts, registered_checks) = work
+     active_owners, owner_fanouts, registered_checks, _signal_items,
+     _remote_recovery_items, _budget_window_items, _active_owner_items,
+     _owner_fanout_items, _registered_check_items) = work
     if check_age >= check_interval:
         due_checks = registered_checks
     if budget_deadline is not None:
@@ -733,15 +800,16 @@ def normalized_failure_reason(reason):
     return ' '.join(reason.split()).lower()
 
 
-def failure_episode(reason, registry_generation):
+def failure_episode(reason, registry_generation, admission_work_signature):
     normalized = normalized_failure_reason(reason)
-    if (not registry_generation or
+    if (not registry_generation or not admission_work_signature or
             (normalized != normalized_failure_reason(budget_reason) and
              not normalized.startswith('watcher failed;'))):
         return None
     return dict(protocol='fm-codex-stop-failure.v1', session_id=session_id,
                 session_pid=session_pid, session_identity=session_identity,
-                registry_generation=registry_generation, reason=normalized)
+                registry_generation=registry_generation, reason=normalized,
+                admission_work_signature=admission_work_signature)
 
 
 def read_failure_episode():
@@ -768,30 +836,13 @@ def failure_episode_unchanged():
     current = read_failure_episode()
     if not isinstance(current, dict):
         return False
-    expected = failure_episode(current.get('reason', ''), current.get('registry_generation'))
+    generation = current.get('registry_generation')
+    expected = failure_episode(current.get('reason', ''), generation,
+                               current.get('admission_work_signature'))
     if current != expected or queued():
         return False
-    generation = current['registry_generation']
-    result = shell(r'''
-. "$1/fm-backend.sh" || exit 1
-. "$1/fm-supervision-registry-lib.sh" || exit 1
-before=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
-[ "$before" = "$2" ] || exit 2
-active=$(fm_supervision_registry_active_tasks "$FM_STATE_OVERRIDE") || exit 1
-while IFS= read -r task; do
-  [ -n "$task" ] || continue
-  for suffix in status turn-ended; do
-    file="$FM_STATE_OVERRIDE/$task.$suffix"
-    [ -f "$file" ] && [ ! -L "$file" ] || continue
-    fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file" || exit 3
-  done
-done <<EOF
-$active
-EOF
-after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
-[ "$after" = "$before" ] || exit 2
-''', generation)
-    return (result is not None and result.returncode == 0 and not queued() and
+    signature = current_admission_work_signature(generation)
+    return (signature == current['admission_work_signature'] and not queued() and
             read_failure_episode() == current)
 
 
@@ -1146,8 +1197,10 @@ def owner(lock):
             return False
         if current is None:
             reason = budget_reason
-        episode = failure_episode(
-            reason, leased_registry_generation or admission_registry_generation)
+        episode_generation = leased_registry_generation or admission_registry_generation
+        episode_signature = current_admission_work_signature(
+            episode_generation, generation_deadline) if episode_generation else None
+        episode = failure_episode(reason, episode_generation, episode_signature)
         if terminal_cleanup_complete and failure_episode_seen(episode):
             send(active, dict(rc=0, reason='', token=token))
             terminal_delivered = True

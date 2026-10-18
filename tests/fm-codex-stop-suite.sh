@@ -1493,6 +1493,77 @@ test_current_generation_failure_episode_is_bounded() {
   pass 'current-generation Stop failures surface once per unchanged episode'
 }
 
+test_failure_episode_tracks_complete_admission_work() {
+  local source dir original_root=$TEST_ROOT now corr record
+  for source in check inbox pending; do
+    dir=$(fixture "failure-episode-new-$source-work")
+    install_endpoint_inventory_tmux "$dir"
+    install_controlled_watcher "$dir"
+    printf '%s\n' 'window=fleet:task' "worktree=$dir" "project=$dir" \
+      'kind=ship' 'harness=codex' 'backend=tmux' "spawn_gen=$source-1" \
+      > "$dir/state/task.meta"
+    initialize_empty_active_supervision_registry "$dir"
+    register_active_supervision_tasks "$dir" task
+    touch "$dir/state/.last-check"
+    case "$source" in
+      inbox)
+        FM_STATE_OVERRIDE="$dir/state" bash -c '
+          . "$1/fm-task-inbox-lib.sh"
+          fm_task_inbox_write "$FM_STATE_OVERRIDE" task "crossing inbox deadline" >/dev/null
+        ' _ "$ROOT/bin" || fail 'could not create initially fresh inbox work'
+        ;;
+      pending)
+        now=$(date +%s)
+        corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+          FM_PENDING_REPLY_NOW="$now" FM_PENDING_REPLY_GRACE_SECS=3600 bash -c '
+            . "$1/fm-pending-reply-lib.sh"
+            corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" task report) || exit 1
+            fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" "$FM_PENDING_REPLY_NOW" || exit 1
+            printf "%s" "$corr"
+          ' _ "$ROOT/bin") || fail 'could not create initially fresh pending reply work'
+        ;;
+    esac
+    PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
+      FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
+      FM_TASK_INBOX_GRACE_SECS=3600 FM_PENDING_REPLY_GRACE_SECS=3600 \
+      FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
+      FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
+      TEST_ROOT="$dir" run_stop "$dir" 1
+    TEST_ROOT=$original_root
+    wait_file "$dir/repeat-paused" 350
+    case "$source" in
+      check)
+        printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$dir/state/new-due.check.sh"
+        chmod 0700 "$dir/state/new-due.check.sh"
+        FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" new-due >/dev/null \
+          || fail 'could not register newly due check work'
+        perl -e 'utime 1, 1, $ARGV[0] or die $!' "$dir/state/.last-check"
+        ;;
+      inbox)
+        record=$(find "$dir/state/task.inbox" -maxdepth 1 -name '*.msg' -type f -print)
+        [ -n "$record" ] || fail 'fresh inbox work disappeared before its deadline'
+        perl -e 'utime 1, 1, $ARGV[0] or die $!' "$record"
+        ;;
+      pending)
+        FM_STATE_OVERRIDE="$dir/state" FM_TEST_CORR="$corr" \
+          FM_TEST_DELIVERED="$((now - 7200))" bash -c '
+            . "$1/fm-pending-reply-lib.sh"
+            rec=$(fm_pending_reply_path "$FM_STATE_OVERRIDE" "$FM_TEST_CORR") || exit 1
+            fm_pending_reply_set "$rec" delivered_epoch "$FM_TEST_DELIVERED"
+          ' _ "$ROOT/bin" || fail 'could not cross the pending reply deadline'
+        ;;
+    esac
+    touch "$dir/repeat-paused.release"
+    wait_file "$dir/repeat-rc" 350
+    [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] \
+      || fail "$source work crossing due was suppressed by the prior failure episode"
+    [ "$(wc -l < "$dir/controlled-arm-starts" | tr -d ' ')" = 2 ] \
+      || fail "$source work crossing due did not launch a new watcher arm"
+    finish "$dir"
+  done
+  pass 'failure episodes include due checks, inboxes, and pending replies'
+}
+
 test_stalled_watcher_cannot_complete_quiet_window() {
   local dir original_root=$TEST_ROOT
   dir=$(fixture stalled-watcher)
@@ -1982,6 +2053,58 @@ SH
   pass 'Herdr session-wide snapshots are complete or rejected'
 }
 
+test_herdr_exact_binding_rejects_same_tab_extra_pane() {
+  local mode dir inventory rc
+  for mode in unique extra; do
+    dir=$(fixture "herdr-exact-same-tab-$mode")
+    mkdir -p "$dir/fakebin"
+    printf '%s\n' \
+      'window=fmtest:pane-recorded' "worktree=$dir/worktree" "project=$dir" \
+      'kind=ship' 'harness=codex' 'backend=herdr' 'herdr_session=fmtest' \
+      'herdr_workspace_id=w-live' 'herdr_tab_id=tab-live' \
+      'herdr_pane_id=pane-recorded' 'spawn_gen=owner-1' \
+      > "$dir/state/live-owner.meta"
+    cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in
+  session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
+  workspace:list) printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w-live","label":"firstmate"}]}}' ;;
+  tab:list) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-live","label":"fm-live-owner","workspace_id":"w-live"}]}}' ;;
+  pane:list)
+    if [ "$FM_TEST_HERDR_EXACT_MODE" = extra ]; then
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-recorded","tab_id":"tab-live","agent_status":"working"},{"pane_id":"pane-extra","tab_id":"tab-live","agent_status":"working"}]}}'
+    else
+      printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-recorded","tab_id":"tab-live","agent_status":"working"}]}}'
+    fi
+    ;;
+  *) exit 72 ;;
+esac
+SH
+    chmod 0700 "$dir/fakebin/herdr"
+    set +e
+    inventory=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+      HERDR_SESSION=fmtest FM_STATE_OVERRIDE="$dir/state" FM_TEST_HERDR_EXACT_MODE="$mode" \
+      bash -c '
+        . "$1/fm-wake-lib.sh"
+        . "$1/fm-backend.sh"
+        . "$1/fm-supervision-registry-lib.sh"
+        fm_supervision_registry_recover "$FM_STATE_OVERRIDE" || exit 1
+        fm_supervision_registry_inventory "$FM_STATE_OVERRIDE"
+      ' _ "$ROOT/bin")
+    rc=$?
+    set -e
+    if [ "$mode" = unique ]; then
+      [ "$rc" -eq 0 ] && [ "$inventory" = "$dir/state/live-owner.meta" ] \
+        || fail 'unique exact Herdr binding did not bootstrap'
+    else
+      [ "$rc" -ne 0 ] || fail 'same-tab extra Herdr pane published an ambiguous owner'
+      [ ! -e "$dir/state/.active-supervision-generation" ] \
+        || fail 'same-tab extra Herdr pane left an authoritative snapshot'
+    fi
+  done
+  pass 'Herdr exact bindings reject an additional same-tab task pane'
+}
+
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts() {
   local backend dir inventory
   for backend in herdr zellij; do
@@ -2007,7 +2130,7 @@ case "${1:-}:${2:-}" in
   session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
   workspace:list) printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"launcher","label":"captain"},{"workspace_id":"presentation","label":"└ herdr-presentation · p:abcdefghijklmnopqrstuv"}]}}' ;;
   tab:list) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-launcher","label":"fm-herdr-launcher","workspace_id":"launcher"},{"tab_id":"tab-presentation","label":"fm-herdr-presentation","workspace_id":"presentation"}]}}' ;;
-  pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-shell","tab_id":"tab-launcher","agent_status":"unknown"},{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher","agent_status":"working"},{"pane_id":"pane-presentation","tab_id":"tab-presentation","agent_status":"working"}]}}' ;;
+  pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher","agent_status":"working"},{"pane_id":"pane-presentation","tab_id":"tab-presentation","agent_status":"working"}]}}' ;;
   *) exit 72 ;;
 esac
 SH
@@ -6620,6 +6743,7 @@ test_registry_retirement_preserves_conclusive_generation_change
 test_persistent_identity_timeout_fails_closed
 test_terminal_error_generation_tristate
 test_current_generation_failure_episode_is_bounded
+test_failure_episode_tracks_complete_admission_work
 test_stalled_watcher_cannot_complete_quiet_window
 test_late_stopped_watcher_cannot_complete_quiet_window
 test_complete_watcher_cycle_can_deliver_actionable_wake
@@ -6634,6 +6758,7 @@ test_large_stale_endpoint_inventory_does_not_consume_cycle_budget
 test_no_snapshot_bootstrap_discovers_live_ordinary_owners
 test_no_snapshot_bootstrap_refuses_uncertain_backend_inventories
 test_herdr_bulk_snapshot_bootstrap_is_conservative
+test_herdr_exact_binding_rejects_same_tab_extra_pane
 test_no_snapshot_bootstrap_covers_legacy_backend_layouts
 test_herdr_bootstrap_uses_bounded_bulk_inventory
 test_bootstrap_inventory_uses_configured_backend_sessions

@@ -17,6 +17,7 @@ test_registry_retirement_preserves_conclusive_generation_change
 test_persistent_identity_timeout_fails_closed
 test_terminal_error_generation_tristate
 test_current_generation_failure_episode_is_bounded
+test_failure_episode_tracks_complete_admission_work
 '
 export FM_CODEX_STOP_FOCUSED_CASES
 # shellcheck source=tests/fm-codex-stop-suite.sh

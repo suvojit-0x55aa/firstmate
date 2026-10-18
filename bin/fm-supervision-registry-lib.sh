@@ -1195,12 +1195,8 @@ fm_supervision_registry_bounded_migration_candidate() {
           ;;
       esac
     done < "$record"
-    # A legacy task tab can retain its launcher shell beside the worker.
-    # Accept the recorded pane only when every same-label candidate belongs to
-    # that exact recorded session/workspace/tab. A matching pane id beside a
-    # foreign duplicate tab remains ambiguous and fails closed.
     if [ "$backend" = herdr ] && [ "$herdr_exact" -eq 1 ] \
-      && [ "$herdr_owned" -eq "$herdr_total" ]; then
+      && [ "$herdr_owned" -eq 1 ] && [ "$herdr_total" -eq 1 ]; then
       FM_SUPERVISION_MIGRATION_IDENTITY1=$exact_identity1
       FM_SUPERVISION_MIGRATION_IDENTITY2=$exact_identity2
       FM_SUPERVISION_MIGRATION_IDENTITY3=$exact_identity3
