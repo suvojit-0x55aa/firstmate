@@ -280,6 +280,27 @@ test_await_binds_the_triggering_commit_after_the_publish_window() {
   pass "awaiter still closes the publish-order window for the triggering commit"
 }
 
+test_await_tolerates_a_transient_pre_push_head_snapshot() {
+  local output rc body
+  setup_await_case await-head-lag
+  pr_snapshot "$CASE_DIR/old.json" "$OLD_SHA" "$OLD_SHA"
+  pr_snapshot "$CASE_DIR/fresh.json" "$NEW_SHA" "$NEW_SHA"
+  printf '%s\n%s\n' "$CASE_DIR/old.json" "$CASE_DIR/fresh.json" > "$FM_FAKE_GH_RESPONSES"
+  rc=0
+  output=$(run_await --head "$NEW_SHA" --timeout-seconds 30 --interval-seconds 1) || rc=$?
+  expect_code 0 "$rc" "awaiter failed while the live PR head caught up with the triggering commit"
+  assert_contains "$output" "attestation binds to PR head $NEW_SHA" \
+    "awaiter treated a transient pre-push PR snapshot as a permanently superseded run"
+  expect_code 2 "$(gh_calls)" "awaiter did not repoll after the live PR briefly reported the pre-push head"
+  [ "$(output_value "$CASE_OUTPUT" head-sha)" = "$NEW_SHA" ] ||
+    fail "awaiter did not keep the triggering commit as the head the gate judges"
+  body=$(output_value "$CASE_OUTPUT" body)
+  rc=0
+  output=$(run_verifier "$body" "$(output_value "$CASE_OUTPUT" head-sha)") || rc=$?
+  expect_code 0 "$rc" "shared action rejected the converged live PR body"
+  pass "awaiter tolerates a transient pre-push head snapshot"
+}
+
 # A check result is recorded against the commit its run was triggered for, and
 # GitHub keeps that result cached for the SHA. Reporting the live head instead
 # would let a branch that moves during the wait - a force-push back onto an
@@ -292,11 +313,10 @@ test_await_never_certifies_a_commit_the_attestation_does_not_name() {
   pr_snapshot "$CASE_DIR/other.json" "$OLD_SHA" "$OLD_SHA"
   printf '%s\n' "$CASE_DIR/other.json" > "$FM_FAKE_GH_RESPONSES"
   rc=0
-  output=$(run_await --head "$NEW_SHA" --timeout-seconds 30 --interval-seconds 1) || rc=$?
+  output=$(run_await --head "$NEW_SHA" --timeout-seconds 1 --interval-seconds 1) || rc=$?
   expect_code 0 "$rc" "awaiter failed instead of handing the moved-head facts to the gate"
   assert_contains "$output" "PR head moved to $OLD_SHA" \
     "awaiter did not report that the branch moved off the triggering commit"
-  expect_code 1 "$(gh_calls)" "awaiter kept polling after the branch had moved on"
   [ "$(output_value "$CASE_OUTPUT" head-sha)" = "$NEW_SHA" ] ||
     fail "awaiter emitted the live head instead of the commit this run judges"
   body=$(output_value "$CASE_OUTPUT" body)
@@ -330,5 +350,6 @@ test_await_reports_a_body_already_bound_to_the_head
 test_await_waits_for_a_body_signed_after_the_push
 test_await_still_lets_the_gate_reject_a_never_signed_body
 test_await_binds_the_triggering_commit_after_the_publish_window
+test_await_tolerates_a_transient_pre_push_head_snapshot
 test_await_never_certifies_a_commit_the_attestation_does_not_name
 test_await_falls_back_when_the_pull_request_is_unreadable

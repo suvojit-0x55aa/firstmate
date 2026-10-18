@@ -234,27 +234,24 @@ started=$(date +%s)
 deadline=$((started + TIMEOUT))
 have_facts=0
 bound=0
-superseded=0
 
+# A live PR read can briefly lag the synchronize event and still report the
+# pre-push head. Keep polling in that case: judged_head remains fixed to HEAD,
+# so waiting cannot certify the wrong commit, and a real move still fails when
+# the verifier compares the final body with that triggering commit.
 while :; do
   if gh api "repos/$REPO/pulls/$PR" > "$WORK/snapshot.json" 2>"$WORK/snapshot.err"; then
     if python3 "$PARSER" "$WORK/snapshot.json" "$FACTS"; then
       have_facts=1
-      head_sha=$(read_fact head_sha)
       attested=$(read_fact attested)
       target=$(judged_head)
       if [ -n "$target" ] && [ "$attested" = "$target" ]; then
         bound=1
-      elif [ -n "$HEAD" ] && [ -n "$head_sha" ] && [ "$head_sha" != "$HEAD" ]; then
-        # The branch moved on. Whatever the pipeline signs next names the new
-        # head, never this run's commit, so more waiting cannot bind it; the
-        # run triggered for the new head is the one that can go green.
-        superseded=1
       fi
     fi
   fi
 
-  [ "$bound" -eq 0 ] && [ "$superseded" -eq 0 ] || break
+  [ "$bound" -eq 0 ] || break
   now=$(date +%s)
   [ "$now" -lt "$deadline" ] || break
   remaining=$((deadline - now))
@@ -281,8 +278,9 @@ fi
 
 attested=$(read_fact attested)
 [ -n "$attested" ] || attested='(none)'
-if [ "$superseded" -eq 1 ]; then
-  note "PR head moved to $(read_fact head_sha) after ${waited}s; the gate will judge the live body against the commit this run was triggered for, ${HEAD}"
+head_sha=$(read_fact head_sha)
+if [ -n "$HEAD" ] && [ -n "$head_sha" ] && [ "$head_sha" != "$HEAD" ]; then
+  note "PR head moved to ${head_sha} after ${waited}s; the gate will judge the live body against the commit this run was triggered for, ${HEAD}"
   exit 0
 fi
 note "attestation still names ${attested} after ${waited}s; the gate will judge the live body against head $(judged_head)"
