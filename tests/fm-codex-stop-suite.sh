@@ -3327,7 +3327,11 @@ exit 1
 SH
   chmod +x "$dir/fakebin/tmux"
   printf '%s\n' 'window=fleet:hanging-probe' 'backend=tmux' > "$dir/state/hanging.meta"
-  PATH="$dir/fakebin:$PATH" FM_SIGNAL_GRACE=0 run_stop "$dir" 4
+  # This fixture has no remote owner. Keep its admission helper focused on the
+  # hanging local inventory instead of inheriting the production 30-second
+  # remote-recovery allowance (which deliberately lengthens the shared probe).
+  PATH="$dir/fakebin:$PATH" FM_SIGNAL_GRACE=0 FM_SEND_REMOTE_BUDGET=1 \
+    run_stop "$dir" 4
   wait_file "$dir/rc" 250
   [ "$(cat "$dir/rc")" = 2 ] || fail 'timed-out admission probe escaped Stop supervision'
   assert_contains "$(cat "$dir/out")" 'watcher cycle exceeds Codex Stop deadline' \
