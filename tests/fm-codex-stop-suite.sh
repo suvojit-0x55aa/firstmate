@@ -1494,8 +1494,8 @@ test_current_generation_failure_episode_is_bounded() {
 }
 
 test_failure_episode_tracks_complete_admission_work() {
-  local source dir original_root=$TEST_ROOT now corr record
-  for source in check inbox pending; do
+  local source dir original_root=$TEST_ROOT now corr record live_targets
+  for source in check inbox dead-inbox pending signal; do
     dir=$(fixture "failure-episode-new-$source-work")
     install_endpoint_inventory_tmux "$dir"
     install_controlled_watcher "$dir"
@@ -1506,7 +1506,7 @@ test_failure_episode_tracks_complete_admission_work() {
     register_active_supervision_tasks "$dir" task
     touch "$dir/state/.last-check"
     case "$source" in
-      inbox)
+      inbox|dead-inbox)
         FM_STATE_OVERRIDE="$dir/state" bash -c '
           . "$1/fm-task-inbox-lib.sh"
           fm_task_inbox_write "$FM_STATE_OVERRIDE" task "crossing inbox deadline" >/dev/null
@@ -1522,9 +1522,14 @@ test_failure_episode_tracks_complete_admission_work() {
             printf "%s" "$corr"
           ' _ "$ROOT/bin") || fail 'could not create initially fresh pending reply work'
         ;;
+      signal)
+        printf '%s\n' 'working: first unseen version' > "$dir/state/task.status"
+        ;;
     esac
+    live_targets=fleet:task
+    [ "$source" != dead-inbox ] || live_targets=
     PATH="$dir/fakebin:$PATH" FM_TEST_EXISTING_TARGETS='fleet:task' \
-      FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
+      FM_TEST_LIVE_TARGETS="$live_targets" FM_CHECK_INTERVAL=3600 \
       FM_TASK_INBOX_GRACE_SECS=3600 FM_PENDING_REPLY_GRACE_SECS=3600 \
       FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
       FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 \
@@ -1539,7 +1544,7 @@ test_failure_episode_tracks_complete_admission_work() {
           || fail 'could not register newly due check work'
         perl -e 'utime 1, 1, $ARGV[0] or die $!' "$dir/state/.last-check"
         ;;
-      inbox)
+      inbox|dead-inbox)
         record=$(find "$dir/state/task.inbox" -maxdepth 1 -name '*.msg' -type f -print)
         [ -n "$record" ] || fail 'fresh inbox work disappeared before its deadline'
         perl -e 'utime 1, 1, $ARGV[0] or die $!' "$record"
@@ -1552,6 +1557,9 @@ test_failure_episode_tracks_complete_admission_work() {
             fm_pending_reply_set "$rec" delivered_epoch "$FM_TEST_DELIVERED"
           ' _ "$ROOT/bin" || fail 'could not cross the pending reply deadline'
         ;;
+      signal)
+        printf '%s\n' 'working: second unseen version' >> "$dir/state/task.status"
+        ;;
     esac
     touch "$dir/repeat-paused.release"
     wait_file "$dir/repeat-rc" 350
@@ -1561,7 +1569,7 @@ test_failure_episode_tracks_complete_admission_work() {
       || fail "$source work crossing due did not launch a new watcher arm"
     finish "$dir"
   done
-  pass 'failure episodes include due checks, inboxes, and pending replies'
+  pass 'failure episodes include due checks, all inbox owners, pending replies, and signal versions'
 }
 
 test_stalled_watcher_cannot_complete_quiet_window() {
@@ -2077,6 +2085,12 @@ case "${1:-}:${2:-}" in
       printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-recorded","tab_id":"tab-live","agent_status":"working"}]}}'
     fi
     ;;
+  pane:get)
+    printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+    ;;
+  agent:get)
+    printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}'
+    ;;
   *) exit 72 ;;
 esac
 SH
@@ -2130,7 +2144,15 @@ case "${1:-}:${2:-}" in
   session:list) printf '%s\n' '{"sessions":[{"name":"fmtest","running":true}]}' ;;
   workspace:list) printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"launcher","label":"captain"},{"workspace_id":"presentation","label":"└ herdr-presentation · p:abcdefghijklmnopqrstuv"}]}}' ;;
   tab:list) printf '%s\n' '{"result":{"tabs":[{"tab_id":"tab-launcher","label":"fm-herdr-launcher","workspace_id":"launcher"},{"tab_id":"tab-presentation","label":"fm-herdr-presentation","workspace_id":"presentation"}]}}' ;;
-  pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher","agent_status":"working"},{"pane_id":"pane-presentation","tab_id":"tab-presentation","agent_status":"working"}]}}' ;;
+  pane:list) printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-launcher-shell","tab_id":"tab-launcher","agent_status":"unknown"},{"pane_id":"pane-launcher-worker","tab_id":"tab-launcher","agent_status":"working"},{"pane_id":"pane-presentation","tab_id":"tab-presentation","agent_status":"working"}]}}' ;;
+  pane:get) printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  agent:get)
+    if [ "${3:-}" = pane-launcher-shell ]; then
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    else
+      printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}'
+    fi
+    ;;
   *) exit 72 ;;
 esac
 SH

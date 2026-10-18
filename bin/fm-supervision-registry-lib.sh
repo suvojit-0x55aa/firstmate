@@ -1133,11 +1133,20 @@ fm_supervision_registry_herdr_remap_owned() {
   [ "$recorded_workspace" = "$workspace" ] && [ "$recorded_tab" = "$tab" ]
 }
 
+fm_supervision_registry_herdr_target_is_nonworker() {
+  local target=$1 state
+  fm_backend_source herdr || return 1
+  fm_backend_herdr_parse_target "$target" || return 1
+  state=$(fm_backend_herdr_pane_agent_state \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 1
+  case "$state" in dead|no-agent) return 0 ;; *) return 1 ;; esac
+}
+
 fm_supervision_registry_bounded_migration_candidate() {
   local state=$1 task=$2 backend=$3 target=$4 home=$5 worktree=$6 owner_kind=$7 live_index=$8
   local record live_backend live_target live_identity1 live_identity2 live_identity3
   local resolved='' resolved_identity1=- resolved_identity2=- resolved_identity3=- count=0
-  local herdr_total=0 herdr_owned=0 herdr_exact=0
+  local herdr_exact=0 herdr_plausible=0
   local exact_identity1=- exact_identity2=- exact_identity3=-
   FM_SUPERVISION_MIGRATION_TARGET=$target
   FM_SUPERVISION_MIGRATION_IDENTITY1=-
@@ -1168,10 +1177,8 @@ fm_supervision_registry_bounded_migration_candidate() {
           count=$((count + 1))
           ;;
         herdr)
-          herdr_total=$((herdr_total + 1))
           if fm_supervision_registry_herdr_remap_owned \
             "$state" "$task" "$live_target" "$live_identity1" "$live_identity2"; then
-            herdr_owned=$((herdr_owned + 1))
             if [ "$live_target" = "$target" ]; then
               herdr_exact=1
               exact_identity1=$live_identity1
@@ -1195,12 +1202,21 @@ fm_supervision_registry_bounded_migration_candidate() {
           ;;
       esac
     done < "$record"
-    if [ "$backend" = herdr ] && [ "$herdr_exact" -eq 1 ] \
-      && [ "$herdr_owned" -eq 1 ] && [ "$herdr_total" -eq 1 ]; then
-      FM_SUPERVISION_MIGRATION_IDENTITY1=$exact_identity1
-      FM_SUPERVISION_MIGRATION_IDENTITY2=$exact_identity2
-      FM_SUPERVISION_MIGRATION_IDENTITY3=$exact_identity3
-      return 0
+    if [ "$backend" = herdr ] && [ "$herdr_exact" -eq 1 ]; then
+      while IFS="$(printf '\t')" read -r live_backend live_target _; do
+        [ "$live_backend" = herdr ] || continue
+        if [ "$live_target" != "$target" ] \
+          && fm_supervision_registry_herdr_target_is_nonworker "$live_target"; then
+          continue
+        fi
+        herdr_plausible=$((herdr_plausible + 1))
+      done < "$record"
+      if [ "$herdr_plausible" -eq 1 ]; then
+        FM_SUPERVISION_MIGRATION_IDENTITY1=$exact_identity1
+        FM_SUPERVISION_MIGRATION_IDENTITY2=$exact_identity2
+        FM_SUPERVISION_MIGRATION_IDENTITY3=$exact_identity3
+        return 0
+      fi
     fi
     case "$backend:$count" in
       cmux:1)

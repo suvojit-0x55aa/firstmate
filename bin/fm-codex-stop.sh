@@ -252,12 +252,15 @@ plan=$({ printf '%s\n' "$states"; printf '__FM_OWNERS__\n'; cat "$owners_file"; 
   { print $1, $2, verdict[$1 SUBSEP $3 SUBSEP $2], $3, $4, $5 }
 ') || exit 1
 while IFS="$(printf '\t')" read -r backend target agent_state route record_home task _kind _spawn_gen; do
+  action=$(fm_task_inbox_due_action "$FM_STATE_OVERRIDE" "$task") || action=quiet
+  case "${action%% *}" in
+    ring|escalate) printf 'inbox-work\t%s\t%s\n' "$task" "$action" ;;
+  esac
   case "$agent_state" in
     dead|missing) ;;
     *)
       printf 'budget-window\t%s\t%s\t%s\n' "$backend" "$route" "$target"
       printf 'active-owner\t%s\n' "$task"
-      action=$(fm_task_inbox_due_action "$FM_STATE_OVERRIDE" "$task") || action=quiet
       case "${action%% *}" in ring|escalate) printf 'owner-fanout\tinbox:%s\n' "$task" ;; esac
       ;;
   esac
@@ -271,7 +274,9 @@ while IFS= read -r meta; do
     file="$FM_STATE_OVERRIDE/$task.$suffix"
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     if ! fm_wake_signal_seen_current "$FM_STATE_OVERRIDE" "$file"; then
-      printf 'signal\t%s\n' "$task.$suffix"
+      sig=$(fm_wake_signal_sig "$file") || exit 1
+      [ -n "$sig" ] || exit 1
+      printf 'signal\t%s\t%s\n' "$task.$suffix" "$sig"
     fi
   done
 done <<EOF
@@ -318,6 +323,7 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     signal_tasks = set()
     signal_items = set()
     remote_recoveries = set()
+    inbox_items = set()
     owner_fanouts = set()
     active_owners = set()
     windows = set()
@@ -330,13 +336,18 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
             generation = value
         elif kind == 'signal':
             signal_items.add(value)
-            if value.endswith('.status'):
-                value = value[:-len('.status')]
-            elif value.endswith('.turn-ended'):
-                value = value[:-len('.turn-ended')]
-            signal_tasks.add(value)
+            signal_name, signal_separator, signal_signature = value.partition('\t')
+            if not signal_separator or not signal_signature:
+                return None
+            if signal_name.endswith('.status'):
+                signal_name = signal_name[:-len('.status')]
+            elif signal_name.endswith('.turn-ended'):
+                signal_name = signal_name[:-len('.turn-ended')]
+            signal_tasks.add(signal_name)
         elif kind == 'remote-recovery':
             remote_recoveries.add(value)
+        elif kind == 'inbox-work':
+            inbox_items.add(value)
         elif kind == 'owner-fanout':
             owner_fanouts.add(value)
         elif kind == 'active-owner':
@@ -349,8 +360,8 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
         return None
     return (generation, signal_tasks, len(remote_recoveries), len(windows),
             len(active_owners), len(owner_fanouts), len(registered_checks),
-            signal_items, remote_recoveries, windows, active_owners, owner_fanouts,
-            registered_checks)
+            signal_items, remote_recoveries, inbox_items, windows, active_owners,
+            owner_fanouts, registered_checks)
 
 
 def admission_state_value(path):
@@ -379,8 +390,8 @@ def canonical_admission_work_signature(work):
         return None
     (generation, signal_tasks, _remote_recovery_count, _budget_window_count,
      _active_owner_count, _owner_fanout_count, _registered_check_count,
-     signal_items, remote_recoveries, windows, active_owners, owner_fanouts,
-     registered_checks) = work
+     signal_items, remote_recoveries, inbox_items, windows, active_owners,
+     owner_fanouts, registered_checks) = work
     check_cursor = admission_state_value('.check-sweep-cursor')
     check_high_water = admission_state_value('.check-sweep-high-water')
     if check_cursor is None or check_high_water is None:
@@ -390,10 +401,11 @@ def canonical_admission_work_signature(work):
     except OSError:
         checks_due = True
     value = dict(
-        protocol='fm-codex-admission-work.v1',
+        protocol='fm-codex-admission-work.v2',
         registry_generation=generation,
         signals=sorted(signal_items),
         remote_recoveries=sorted(remote_recoveries),
+        inbox_work=sorted(inbox_items),
         budget_windows=sorted(windows),
         active_owners=sorted(active_owners),
         owner_fanouts=sorted(owner_fanouts),
@@ -426,8 +438,8 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
         return cycle_limit + 1, check_limit or 1, 0
     (admission_registry_generation, signal_tasks, remote_recoveries, budget_windows,
      active_owners, owner_fanouts, registered_checks, _signal_items,
-     _remote_recovery_items, _budget_window_items, _active_owner_items,
-     _owner_fanout_items, _registered_check_items) = work
+     _remote_recovery_items, _inbox_items, _budget_window_items,
+     _active_owner_items, _owner_fanout_items, _registered_check_items) = work
     if check_age >= check_interval:
         due_checks = registered_checks
     if budget_deadline is not None:
