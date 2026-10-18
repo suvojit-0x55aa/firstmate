@@ -965,16 +965,32 @@ fm_pending_reply_target_is_remote() {  # <state-dir> <task_id>
   [ -n "$(fm_meta_get "$meta" remote_host)" ]
 }
 
+fm_pending_reply_recovery_eligibility_token() {  # <state-dir> <task_id> <turn-completed-epoch>
+  local state=$1 task_id=$2 completed=$3 caught
+  [ -n "$state" ] && [ -n "$task_id" ] || return 2
+  case "$completed" in
+    ''|*[!0-9]*) printf 'waiting-turn'; return 0 ;;
+  esac
+  if ! fm_pending_reply_target_is_remote "$state" "$task_id"; then
+    printf 'actionable'
+    return 0
+  fi
+  caught=$(fm_pending_reply_remote_channel_epoch "$state" "$task_id")
+  case "$caught" in
+    ''|*[!0-9]*) printf 'waiting-channel'; return 0 ;;
+  esac
+  if [ "$caught" -ge "$completed" ]; then
+    printf 'actionable'
+  else
+    printf 'waiting-channel'
+  fi
+}
+
 # 0 when "no correlated report in the parent status log" is admissible evidence
 # that the mate never reported: always for a local target, and for a remote one
 # only once the mirror has been read through its end at or after <since-epoch>.
 fm_pending_reply_missing_report_is_evidence() {  # <state-dir> <task_id> <since-epoch>
-  local state=$1 task_id=$2 since=$3 caught
-  fm_pending_reply_target_is_remote "$state" "$task_id" || return 0
-  case "$since" in ''|*[!0-9]*) return 1 ;; esac
-  caught=$(fm_pending_reply_remote_channel_epoch "$state" "$task_id")
-  [ -n "$caught" ] || return 1
-  [ "$caught" -ge "$since" ]
+  [ "$(fm_pending_reply_recovery_eligibility_token "$1" "$2" "$3")" = actionable ]
 }
 
 # Build the one automatic recovery message for a pending record.

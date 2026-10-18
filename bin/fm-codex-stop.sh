@@ -305,9 +305,17 @@ if [ -d "$dir" ]; then
         *[!0-9:]*|:*|*::*|*:) continue ;;
       esac
       [ "$((now - delivered))" -ge "$grace" ] || continue
-      printf 'owner-fanout\tpending:%s\n' "$corr"
+      completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
+      recovery_state=$(fm_pending_reply_recovery_eligibility_token \
+        "$FM_STATE_OVERRIDE" "$task_id" "$completed") || exit 1
+      case "$recovery_state" in actionable|waiting-turn|waiting-channel) ;; *) exit 1 ;; esac
+      printf 'pending-recovery-state\t%s\t%s\n' "$corr" "$recovery_state"
       if fm_pending_reply_target_is_remote "$FM_STATE_OVERRIDE" "$task_id"; then
+        [ "$recovery_state" = actionable ] || continue
+        printf 'owner-fanout\tpending:%s\n' "$corr"
         printf 'remote-recovery\t%s\n' "$corr"
+      else
+        printf 'owner-fanout\tpending:%s\n' "$corr"
       fi
     done
   done <<EOF
@@ -323,6 +331,7 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
     signal_tasks = set()
     signal_items = set()
     remote_recoveries = set()
+    pending_recovery_states = set()
     inbox_items = set()
     owner_fanouts = set()
     active_owners = set()
@@ -346,6 +355,8 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
             signal_tasks.add(signal_name)
         elif kind == 'remote-recovery':
             remote_recoveries.add(value)
+        elif kind == 'pending-recovery-state':
+            pending_recovery_states.add(value)
         elif kind == 'inbox-work':
             inbox_items.add(value)
         elif kind == 'owner-fanout':
@@ -360,8 +371,8 @@ after=$(fm_supervision_registry_generation "$FM_STATE_OVERRIDE") || exit 1
         return None
     return (generation, signal_tasks, len(remote_recoveries), len(windows),
             len(active_owners), len(owner_fanouts), len(registered_checks),
-            signal_items, remote_recoveries, inbox_items, windows, active_owners,
-            owner_fanouts, registered_checks)
+            signal_items, remote_recoveries, pending_recovery_states, inbox_items,
+            windows, active_owners, owner_fanouts, registered_checks)
 
 
 def admission_state_value(path):
@@ -390,8 +401,8 @@ def canonical_admission_work_signature(work):
         return None
     (generation, signal_tasks, _remote_recovery_count, _budget_window_count,
      _active_owner_count, _owner_fanout_count, _registered_check_count,
-     signal_items, remote_recoveries, inbox_items, windows, active_owners,
-     owner_fanouts, registered_checks) = work
+     signal_items, remote_recoveries, pending_recovery_states, inbox_items, windows,
+     active_owners, owner_fanouts, registered_checks) = work
     check_cursor = admission_state_value('.check-sweep-cursor')
     check_high_water = admission_state_value('.check-sweep-high-water')
     if check_cursor is None or check_high_water is None:
@@ -401,10 +412,11 @@ def canonical_admission_work_signature(work):
     except OSError:
         checks_due = True
     value = dict(
-        protocol='fm-codex-admission-work.v2',
+        protocol='fm-codex-admission-work.v3',
         registry_generation=generation,
         signals=sorted(signal_items),
         remote_recoveries=sorted(remote_recoveries),
+        pending_recovery_states=sorted(pending_recovery_states),
         inbox_work=sorted(inbox_items),
         budget_windows=sorted(windows),
         active_owners=sorted(active_owners),
@@ -438,8 +450,9 @@ def watcher_cycle_timeout(check_limit=None, cycle_budget=None, budget_deadline=N
         return cycle_limit + 1, check_limit or 1, 0
     (admission_registry_generation, signal_tasks, remote_recoveries, budget_windows,
      active_owners, owner_fanouts, registered_checks, _signal_items,
-     _remote_recovery_items, _inbox_items, _budget_window_items,
-     _active_owner_items, _owner_fanout_items, _registered_check_items) = work
+     _remote_recovery_items, _pending_recovery_states, _inbox_items,
+     _budget_window_items, _active_owner_items, _owner_fanout_items,
+     _registered_check_items) = work
     if check_age >= check_interval:
         due_checks = registered_checks
     if budget_deadline is not None:

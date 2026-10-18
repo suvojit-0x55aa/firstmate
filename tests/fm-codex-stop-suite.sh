@@ -1495,13 +1495,15 @@ test_current_generation_failure_episode_is_bounded() {
 
 test_failure_episode_tracks_complete_admission_work() {
   local source dir original_root=$TEST_ROOT now corr record live_targets
-  for source in check inbox dead-inbox pending signal; do
+  for source in check inbox dead-inbox pending remote-pending signal; do
     dir=$(fixture "failure-episode-new-$source-work")
     install_endpoint_inventory_tmux "$dir"
     install_controlled_watcher "$dir"
     printf '%s\n' 'window=fleet:task' "worktree=$dir" "project=$dir" \
       'kind=ship' 'harness=codex' 'backend=tmux' "spawn_gen=$source-1" \
       > "$dir/state/task.meta"
+    [ "$source" != remote-pending ] \
+      || printf '%s\n' 'remote_host=fixture.invalid' >> "$dir/state/task.meta"
     initialize_empty_active_supervision_registry "$dir"
     register_active_supervision_tasks "$dir" task
     touch "$dir/state/.last-check"
@@ -1521,6 +1523,20 @@ test_failure_episode_tracks_complete_admission_work() {
             fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" "$FM_PENDING_REPLY_NOW" || exit 1
             printf "%s" "$corr"
           ' _ "$ROOT/bin") || fail 'could not create initially fresh pending reply work'
+        ;;
+      remote-pending)
+        now=$(date +%s)
+        corr=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+          FM_PENDING_REPLY_NOW="$now" FM_PENDING_REPLY_GRACE_SECS=3600 bash -c '
+            . "$1/fm-pending-reply-lib.sh"
+            corr=$(fm_pending_reply_create "$FM_HOME" "$FM_STATE_OVERRIDE" task report) || exit 1
+            fm_pending_reply_mark_delivered "$FM_STATE_OVERRIDE" "$corr" "$((FM_PENDING_REPLY_NOW - 7200))" || exit 1
+            rec=$(fm_pending_reply_path "$FM_STATE_OVERRIDE" "$corr") || exit 1
+            completed=$((FM_PENDING_REPLY_NOW - 3600))
+            fm_pending_reply_set "$rec" request_turn_completed_epoch "$completed" || exit 1
+            fm_pending_reply_note_remote_channel_caught_up "$FM_STATE_OVERRIDE" task "$((completed - 1))" || exit 1
+            printf "%s" "$corr"
+          ' _ "$ROOT/bin") || fail 'could not create watermark-gated remote recovery work'
         ;;
       signal)
         printf '%s\n' 'working: first unseen version' > "$dir/state/task.status"
@@ -1557,6 +1573,13 @@ test_failure_episode_tracks_complete_admission_work() {
             fm_pending_reply_set "$rec" delivered_epoch "$FM_TEST_DELIVERED"
           ' _ "$ROOT/bin" || fail 'could not cross the pending reply deadline'
         ;;
+      remote-pending)
+        FM_STATE_OVERRIDE="$dir/state" FM_TEST_NOW="$now" bash -c '
+          . "$1/fm-pending-reply-lib.sh"
+          fm_pending_reply_note_remote_channel_caught_up \
+            "$FM_STATE_OVERRIDE" task "$FM_TEST_NOW"
+        ' _ "$ROOT/bin" || fail 'could not advance the remote reply watermark'
+        ;;
       signal)
         printf '%s\n' 'working: second unseen version' >> "$dir/state/task.status"
         ;;
@@ -1564,12 +1587,12 @@ test_failure_episode_tracks_complete_admission_work() {
     touch "$dir/repeat-paused.release"
     wait_file "$dir/repeat-rc" 350
     [ "$(cat "$dir/rc")" = 2 ] && [ "$(cat "$dir/repeat-rc")" = 2 ] \
-      || fail "$source work crossing due was suppressed by the prior failure episode"
+      || fail "$source work becoming actionable was suppressed by the prior failure episode"
     [ "$(wc -l < "$dir/controlled-arm-starts" | tr -d ' ')" = 2 ] \
-      || fail "$source work crossing due did not launch a new watcher arm"
+      || fail "$source work becoming actionable did not launch a new watcher arm"
     finish "$dir"
   done
-  pass 'failure episodes include due checks, all inbox owners, pending replies, and signal versions'
+  pass 'failure episodes include checks, inboxes, pending eligibility, and signal versions'
 }
 
 test_stalled_watcher_cannot_complete_quiet_window() {
