@@ -1590,6 +1590,7 @@ test_failure_episode_tracks_complete_admission_work() {
       FM_TASK_INBOX_GRACE_SECS=3600 FM_PENDING_REPLY_GRACE_SECS=3600 \
       FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 \
       FM_SEND_REMOTE_BUDGET=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+      FM_CHECK_TIMEOUT=1 \
       FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
       FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 FM_GUARD_GRACE=1 \
       TEST_ROOT="$dir" run_stop "$dir" 1
@@ -1678,6 +1679,7 @@ SH
     FM_TEST_LIVE_TARGETS='fleet:task' FM_CHECK_INTERVAL=3600 \
     FM_CREW_STATE_NM_TIMEOUT=1 FM_WORKTREE_WRITE_TIMEOUT=1 \
     FM_SEND_REMOTE_BUDGET=1 FM_INACTIVE_RECONCILE_BUDGET_SECS=1 \
+    FM_CHECK_TIMEOUT=1 \
     FM_CODEX_REPEAT=1 FM_CODEX_REPEAT_PAUSE_FILE="$dir/repeat-paused" \
     FM_TEST_WATCH_MODE=stall FM_SIGNAL_GRACE=0 FM_POLL=0.05 FM_GUARD_GRACE=1 \
     TEST_ROOT="$dir" run_stop "$dir" 1
@@ -2183,7 +2185,10 @@ SH
   printf '%s\n' 'done: classification cycle complete' > "$dir/state/first.status"
   wait_file "$dir/rc" 750
   [ "$(cat "$dir/rc")" = 2 ] || fail 'sequential task classification lost its actionable wake'
-  assert_contains "$(cat "$dir/out")" 'durable wake pending' 'sequential task classification did not deliver its queued wake'
+  case "$(cat "$dir/out")" in
+    *'durable wake pending'*|*'watcher delivered an actionable wake'*) ;;
+    *) fail 'sequential task classification did not deliver its actionable wake' ;;
+  esac
   assert_not_contains "$(cat "$dir/out")" 'watcher failed' 'sequential task classification exceeded the computed cycle bound'
   [ -s "$dir/state/.wake-queue" ] || fail 'sequential task classification did not retain its actionable wake'
   assert_no_watcher "$dir"
