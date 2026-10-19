@@ -12,8 +12,9 @@ test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "codex heading missing"
-  assert_contains "$out" "Mode: Codex native Stop continuation." "codex snippet missing"
-  assert_contains "$out" "bin/fm-codex-stop.sh" "codex native Stop owner missing"
+  assert_contains "$out" "Mode: Codex automatic hook integration suspended." "codex suspension mode missing"
+  assert_contains "$out" "automatic session startup, both PreToolUse guards, and Stop continuation are temporarily suspended" "codex suspended surfaces missing"
+  assert_contains "$out" "inactive Stop adapter contract" "codex retained adapter boundary missing"
   assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
   pass "renderer prints exactly the selected harness block"
@@ -37,7 +38,7 @@ test_conditional_stanzas() {
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
-  assert_contains "$out" 'Mode: Codex native Stop continuation.' "codex snippet missing"
+  assert_contains "$out" 'Mode: Codex automatic hook integration suspended.' "codex suspension mode missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
 }
@@ -47,7 +48,8 @@ test_repair_lines() {
   home="$TMP_ROOT/repair-home"
   mkdir -p "$home/state" "$home/config"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
-  assert_contains "$out" "bin/fm-codex-stop.sh" "codex repair line did not identify native Stop owner"
+  assert_contains "$out" "temporarily suspended" "codex repair line did not report suspended integration"
+  assert_contains "$out" "no native Stop repair path is active" "codex repair line claimed an active native repair path"
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
@@ -60,7 +62,7 @@ test_repair_lines() {
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
   assert_contains "$out" "source '$home/config/x-mode.env' first" "x-mode repair line did not source the effective cadence config"
-  assert_contains "$out" "bin/fm-codex-stop.sh" "x-mode codex repair line lost native Stop owner"
+  assert_contains "$out" "temporarily suspended" "x-mode codex repair line did not report suspended integration"
 
   out=$(FM_HOME="$home" "$RENDER" --harness opencode --read-only 1 --repair-line)
   assert_contains "$out" "session holding the fleet lock" "read-only repair line missing"
@@ -110,12 +112,13 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 
   out=$("$RENDER" --harness codex)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "native Codex Stop adapter" "codex ordinary-wake line lost native ownership"
-  assert_contains "$ordinary" "then end the turn" "codex ordinary-wake line lost turn completion"
+  assert_contains "$ordinary" "project-hook continuation is temporarily suspended" "codex ordinary-wake line did not report suspended continuation"
+  assert_contains "$ordinary" "without assuming the next Stop renews watcher coverage" "codex ordinary-wake line still assumes native renewal"
+  assert_not_contains "$ordinary" "owns watcher continuity" "codex ordinary-wake line still claims native ownership"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "codex ordinary-wake line incorrectly uses a background arm"
   out=$("$RENDER" --harness codex --repair-line)
-  assert_contains "$out" "Stop owns watcher renewal" "codex recovery line lost Stop renewal"
-  assert_contains "$out" "bin/fm-codex-stop.sh" "codex recovery line lost the adapter path"
+  assert_contains "$out" "temporarily suspended" "codex recovery line did not report suspended continuation"
+  assert_not_contains "$out" "Stop owns watcher renewal" "codex recovery line still claims Stop renewal"
 
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }

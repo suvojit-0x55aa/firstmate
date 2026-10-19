@@ -137,7 +137,7 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
-      printf '%s%s\n' "$prefix" 'native Codex Stop owns watcher renewal through bin/fm-codex-stop.sh; inspect its registration and startup before ending the turn.'
+      printf '%s%s\n' "$prefix" 'automatic Codex project-hook startup, PreToolUse guards, and Stop continuation are temporarily suspended pending the replacement runtime; no native Stop repair path is active.'
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
@@ -163,7 +163,7 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
-      printf '%s\n' '- Ordinary wake: the native Codex Stop adapter owns watcher continuity; drain, handle and acknowledge the wake, then end the turn without arming another cycle.'
+      printf '%s\n' '- Ordinary wake: automatic Codex project-hook continuation is temporarily suspended pending the replacement runtime; drain, handle and acknowledge the wake without assuming the next Stop renews watcher coverage.'
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'
