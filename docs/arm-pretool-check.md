@@ -9,7 +9,7 @@ The tracked harness adapters forward command text without classifying it.
 ## Purpose and boundary
 
 A direct manual watcher arm or compatibility checkpoint must run through an observable harness call.
-Codex primary supervision itself uses the native Stop continuation owned by [`supervision-protocols/codex.md`](supervision-protocols/codex.md), not a model-issued checkpoint.
+Codex's tracked PreToolUse transport and native Stop continuation are temporarily suspended pending the replacement runtime.
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
 
@@ -158,7 +158,7 @@ Prose may improve without changing adapter behavior.
 
 | Harness | Exact command field | Adapter behavior on checker exit 2 |
 | --- | --- | --- |
-| Codex | `.tool_input.command` | The `.codex/hooks.json` command forwards the complete stdin payload and Codex blocks on exit 2. |
+| Codex | Suspended | `.codex/hooks.json` registers no PreToolUse command pending the replacement runtime. |
 | Claude | `.tool_input.command` | `.claude/settings.json` forwards stdin with `--claude`, leaving stdout empty and returning the stderr deny object. |
 | Grok | `.toolInput.command` | `.grok/hooks/fm-primary-pretool-check.json` forwards stdin and Grok consumes the stdout `decision=deny` object. |
 | OpenCode | `output.args.command` | `.opencode/plugins/fm-primary-pretool-check.js` passes one `--command` argument and throws only for exit 2. |
