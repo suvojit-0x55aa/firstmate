@@ -9,6 +9,7 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 ## Native session-start delivery
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.
+Codex automatic project integration is currently suspended; the Codex rows preserve dated transport evidence, and the live guard now installs an isolated test-owned SessionStart registration without changing `.codex/hooks.json`.
 
 Codex command shape:
 
@@ -106,7 +107,7 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 This is live coverage only for Pi compaction.
 The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
 Pi compaction is the only supported stale-cache refresh pair.
-Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
+The dormant Codex exec transport exposes only startup and context-preserving resume through an isolated fixture registration; tracked automatic startup remains suspended, and Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
 ### Detached session-open workers survive the hook
 
@@ -147,7 +148,7 @@ SECONDMATE_SYNC: secondmate ios: skipped: remote inheritance failed on remote-ma
 
 The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued `check: startup-network` wake once the worker finished.
 
-Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for each installed Claude, Codex exec, and Pi adapter and is the command that refreshes their record.
+Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for each installed Claude and Pi adapter plus the dormant Codex exec transport through an isolated fixture registration.
 Cursor's separate primary live guard covers its source-free session-open transport but does not claim this detached-worker measurement.
 A harness that did reap the worker degrades loudly rather than silently: the leftover record reads as an abandoned run needing a rerun, and the next session start re-derives every finding, because these sweeps are idempotent detectors.
 
@@ -163,7 +164,7 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
 
-`tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes the Claude, Codex exec, and Pi table above; run it after upgrading any of those harnesses.
+`tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes the Claude and Pi integrations plus the dormant Codex exec transport through an isolated fixture registration; run it after upgrading any of those harnesses.
 It reports an absent adapter explicitly, asserts Pi compaction rather than noting it, and refuses to pass when none of those three adapters was installed.
 Cursor's refresh command is `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh`, recorded under [Cursor primary park](#cursor-primary-park-2026-08-13).
 
@@ -414,6 +415,7 @@ fm-claude-stop-autoarm: ok
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-07-24 and Codex's native Stop continuation revalidated on 2026-10-14, all against isolated project and home state.
+Codex automatic project integration is currently suspended; its Stop command below preserves dated adapter evidence, and the current live guard exercises that dormant adapter only through a test-owned fixture registration.
 No credential material was copied into a fixture.
 
 ```text
@@ -427,7 +429,7 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh` | Native Stop delivered a next turn after a full quiet checkpoint and a post-turn event, then Escape cancelled its owned watcher. |
+| Codex | `FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh` | An isolated fixture registration exercised the dormant native Stop adapter: it delivered a next turn after a full quiet checkpoint and a post-turn event, then Escape cancelled its owned watcher. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
@@ -435,8 +437,8 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 ### Codex native Stop continuation
 
 Verified on 2026-10-14 with `codex-cli 0.162.1`, macOS Bash `3.2.57(1)-release`, and Python `3.14.7`.
-The opt-in guard uses the named-session Herdr lab helper, installs its teardown trap before provisioning, and checks the default-fleet tripwire after teardown.
-It preserves the tracked Stop command and timeout while substituting isolated session initialization.
+At that time, the opt-in guard used the named-session Herdr lab helper, installed its teardown trap before provisioning, checked the default-fleet tripwire after teardown, and preserved the tracked Stop command and timeout while substituting isolated session initialization.
+The current guard preserves the same command and timeout as explicit test-owned fixture data because the tracked registration is suspended.
 
 ```sh
 HERDR_LAB_HELPER='/Users/shin/Documents/Project/firstmate/bin/fm-herdr-lab.sh' FM_CODEX_STOP_LIVE=1 bash tests/fm-codex-stop-live.test.sh
@@ -464,7 +466,7 @@ The two `handled` entries come from real model tool calls following native Stop 
 The guard checks the watcher's process identity after Escape and refuses an extra continuation or a resurrected watcher.
 Portable ownership and cancellation coverage lives in `tests/fm-codex-stop-suite.sh`, run through six focused `tests/fm-codex-stop-*.test.sh` entry points; generated instruction and dispatch contracts are exercised by `tests/fm-supervision-instructions.test.sh` and `tests/fm-turnend-guard.test.sh`.
 `tests/fm-watch-checkpoint.test.sh` retains the foreground helper controls and exercises two native actionable successors with ordinary drain/ack and duplicate-owner refusal.
-The current continuation procedure is owned by [`../supervision-protocols/codex.md`](../supervision-protocols/codex.md).
+The retained inactive adapter contract and current suspension state are owned by [`../supervision-protocols/codex.md`](../supervision-protocols/codex.md).
 
 On 2026-10-17, macOS Bash `3.2.57(1)-release` and Python `3.14.7` passed the portable admission regression against the shared backend agent-state dispatcher.
 The motivating primary-home inventory was measured read-only: 92 distinct recorded targets classified as 3 budgeted workers, 79 existing endpoints with no agent, and 10 absent endpoints; the combined existence and agent-state scan completed in 2.529 seconds.

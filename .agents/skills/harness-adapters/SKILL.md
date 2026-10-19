@@ -59,8 +59,9 @@ Use that value for interrupt, exit, resume, and skill-invocation facts.
 
 ## Primary turn-end guard
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have empirically validated hook paths for the "no turn ends blind" guard.
-`claude` and `codex` block directly through Stop hooks that preserve exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
+The primary integrations for `claude`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have active hook paths for the "no turn ends blind" guard.
+`claude` blocks directly through a Stop hook that preserves exit status 2 and stderr from `bin/fm-turnend-guard.sh`.
+Codex's previously verified project-hook path is temporarily suspended pending the replacement runtime, while its inactive adapter implementation remains tracked.
 `opencode`, `pi`, and `pi-signed` expose passive lifecycle callbacks and force one bounded follow-up when the shared predicate blocks.
 Grok selects native blocking or its pre-native bounded resume fallback from the exact running Stop payload; [`docs/turnend-guard.md`](../../../docs/turnend-guard.md) owns that contract.
 Kimi is outside the primary turn-end guard scope, while `docs/turnend-guard.md` owns its separate guarded global hook for crew wake signals.
@@ -75,8 +76,9 @@ When changing any primary turn-end hook, validate the real harness behavior in a
 
 ## Primary pre-arm (PreToolUse) seatbelt
 
-The primary integrations for `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` also have wired PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
-`claude` and `codex` block directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
+The primary integrations for `claude`, `opencode`, `pi`, `pi-signed`, `grok`, and `cursor` have active PreToolUse-equivalent hooks that deny a watcher-arm anti-pattern (shell `&`, truncating pipe, bundling, broad `pkill -f fm-watch`) before it runs.
+Codex's tracked PreToolUse registrations are temporarily suspended pending the replacement runtime.
+`claude` blocks directly through PreToolUse hooks; `grok` blocks the same way but requires every `$VAR` reference in its hook `command` string to carry an inline `:-default` or it fails to launch the hook entirely.
 `opencode`, `pi`, and `pi-signed` block by throwing from `tool.execute.before` / returning `{block: true}` from `tool_call`.
 The exact hook files, commands, output-shaping quirks (Claude Code only honors the deny when stdout is empty), and validation transcripts are owned by `docs/arm-pretool-check.md`.
 When changing any watcher-arm PreToolUse hook, validate the real harness behavior in a scratch project before trusting it, then update that doc.
@@ -103,7 +105,7 @@ Before inspecting or changing session-open behavior, read `docs/sessionstart-nud
 At session start, `bin/fm-session-start.sh` prints exactly one watcher supervision block for the detected primary harness.
 Do not substitute another harness's wait shape when resuming supervision.
 Claude's Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns tokenless re-arm around `bin/fm-watch-arm.sh`, and Grok uses tracked background-notify cycles around `bin/fm-watch-arm.sh`.
-Codex uses the native Stop continuation procedure in [`docs/supervision-protocols/codex.md`](../../../docs/supervision-protocols/codex.md).
+Codex's tracked native Stop continuation is temporarily suspended pending the replacement runtime; [`docs/supervision-protocols/codex.md`](../../../docs/supervision-protocols/codex.md) owns the suspension state and retained adapter contract.
 OpenCode uses `.opencode/plugins/fm-primary-watch-arm.js`, which coordinates with the turn-end guard plugin and wakes the TUI with `client.session.promptAsync`.
 Pi and pi-signed use the tracked `.pi/extensions/fm-primary-turnend-guard.ts` plus the tracked `.pi/extensions/fm-primary-pi-watch.ts`, both project-local extensions the Pi engine auto-discovers once trusted.
 When changing any primary watcher adapter, update `docs/supervision-protocols/`, `docs/turnend-guard.md` if a shared idle or turn-end hook changed, and the relevant concise fact below.
@@ -248,14 +250,14 @@ Raising the luminance threshold is not a fix because muse's real `⟩` sits at a
 `fm_composer_strip_shimmer` in `bin/fm-composer-lib.sh` owns the structural rule that blanks these cells on every styled capture before classification; plain captures cannot see the styling and defer as `unknown`.
 Regression coverage is `tests/fm-composer-lib.test.sh` (`test_matrix_codex_idle_shimmer_is_empty`, `test_matrix_codex_shimmer_keeps_typed_text_pending`, `test_matrix_codex_shimmer_merged_dots_bounded`, `test_matrix_muse_glyph_untouched_by_shimmer_rule`).
 
-**Primary-session guard fact (root selection verified 2026-07-08, codex-cli 0.142.1; native continuation verified 2026-10-14, codex-cli 0.162.1).**
-The firstmate PRIMARY's own `.codex/hooks.json` registers a Stop hook that pipes Codex's Stop payload to `bin/fm-turnend-guard.sh --codex`.
-Codex Stop hooks block on exit 2 and expose `stop_hook_active`; the Codex guard delegates every applicable Stop to `bin/fm-codex-stop.sh`.
-Codex's Stop payload includes `cwd`, but the tracked primary hook does not use it to choose the guard executable.
-Verified on 2026-07-08: Codex runs the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
-The tracked hook anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
-The [Codex protocol](../../../docs/supervision-protocols/codex.md) owns native watcher continuation and cancellation.
-[Supervision verification](../../../docs/verification/supervision.md#codex-native-stop-continuation) records the current CLI proof and exact refresh command.
+**Primary-session guard fact (historical root selection verified 2026-07-08, codex-cli 0.142.1; historical native continuation verified 2026-10-14, codex-cli 0.162.1).**
+The firstmate PRIMARY's `.codex/hooks.json` currently registers no hooks, so automatic project-hook startup, PreToolUse guards, and Stop continuation are temporarily suspended pending the replacement runtime.
+The retained inactive Stop adapter blocks on exit 2, exposes `stop_hook_active`, and delegates every applicable Stop to `bin/fm-codex-stop.sh` when exercised through a fixture registration.
+Codex's Stop payload includes `cwd`, but the inactive adapter does not use it to choose the guard executable.
+Verified on 2026-07-08: Codex ran the Stop hook command with process PWD set to the hook-loaded project root, and no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable was set.
+The inactive adapter anchors to `pwd -P`, verifies that root is firstmate-shaped and hook-bearing, and then invokes `bin/fm-turnend-guard.sh` with the original payload.
+The [Codex protocol](../../../docs/supervision-protocols/codex.md) owns the suspension state and retained adapter contract.
+[Supervision verification](../../../docs/verification/supervision.md#codex-native-stop-continuation) preserves the dated CLI proof and exact refresh command.
 
 ## opencode (VERIFIED 2026-06-11, v1.15.7-1.17.6; 1.18.4 busy-queue re-verified 2026-07-20)
 

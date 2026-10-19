@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Opt-in live guard for the Claude, Codex exec, and Pi RUN-tier session-open adapters.
+# Opt-in live guard for the Claude and Pi RUN-tier session-open adapters plus
+# the dormant Codex exec SessionStart transport.
 # Cursor's source-free RUN-tier transport is covered with its stop-hook park by
 # tests/fm-cursor-primary-live-e2e.test.sh.
+# Codex automatic project integration remains suspended; its cases install an
+# isolated fixture registration for the dormant SessionStart transport.
 #
 # Three facts in this area come from the vendor, not from Firstmate, so a stub
 # can only confirm the assumption already written into the stub:
@@ -50,8 +53,30 @@ fail() {
 }
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
+note "Codex automatic project-hook integration is suspended; Codex cases exercise the dormant SessionStart transport through an isolated fixture registration"
 
 command -v tmux >/dev/null 2>&1 || fail "tmux not found; the context-reset checks drive real interactive harnesses"
+
+write_codex_sessionstart_fixture() {
+  local target=$1
+  cat > "$target" <<'JSON'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'payload=$(cat 2>/dev/null || true); [ -n \"$payload\" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x \"$root/bin/fm-sessionstart-run.sh\" ] || exit 0; [ -f \"$root/AGENTS.md\" ] || exit 0; [ -f \"$root/.codex/hooks.json\" ] || exit 0; jq -e \"any(.hooks.SessionStart[]?.hooks[]?.command?; type == \\\"string\\\" and contains(\\\"fm-sessionstart-run.sh\\\"))\" \"$root/.codex/hooks.json\" >/dev/null 2>&1 || exit 0; printf \"%s\" \"$payload\" | \"$root/bin/fm-sessionstart-run.sh\"'",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON
+}
 
 # Outside the repo on purpose: each lab is its own git repo, and nesting one
 # inside the checkout would show up as an embedded repository in a working tree
@@ -167,7 +192,12 @@ SH
 
   case "$harness" in
     claude) mkdir -p "$lab/.claude"; cp "$ROOT/.claude/settings.json" "$lab/.claude/settings.json" ;;
-    codex) mkdir -p "$lab/.codex"; cp "$ROOT/.codex/hooks.json" "$lab/.codex/hooks.json" ;;
+    codex)
+      mkdir -p "$lab/.codex"
+      jq -e '.hooks | type == "object" and length == 0' "$ROOT/.codex/hooks.json" >/dev/null \
+        || fail "tracked Codex hooks must remain semantically empty during suspended integration"
+      write_codex_sessionstart_fixture "$lab/.codex/hooks.json"
+      ;;
     pi)
       mkdir -p "$lab/.pi/extensions/lib"
       cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$lab/.pi/extensions/"
@@ -344,7 +374,7 @@ for harness in claude codex pi; do
       probe_process_opens codex "$version" "$lab" resume \
         codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check \
         -- codex exec resume --last --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check
-      note "codex $version: codex exec run-tier evidence refreshed; the interactive TUI remains uncovered because tracked project hooks provide no session-open or re-emit channel there"
+      note "codex $version: dormant codex exec SessionStart transport evidence refreshed; tracked automatic startup remains suspended, and the interactive TUI remains uncovered"
       ;;
     pi)
       probe_process_opens pi "$version" "$lab" resume \
@@ -358,7 +388,7 @@ for harness in claude codex pi; do
 done
 
 [ "$CHECKED" -gt 0 ] \
-  || fail "no run-tier harness was installed, so this guard verified nothing; install claude, codex, or pi before trusting its evidence"
+  || fail "no eligible live harness was installed, so this guard verified nothing; install claude, codex, or pi before trusting its evidence"
 [ -z "$ABSENT" ] \
-  || note "run-tier evidence was refreshed for $CHECKED harness(es); still missing:$ABSENT"
+  || note "live session-open evidence was refreshed for $CHECKED harness(es); still missing:$ABSENT"
 echo "# fm-sessionstart-hook-live-e2e.test.sh: all live assertions passed"
