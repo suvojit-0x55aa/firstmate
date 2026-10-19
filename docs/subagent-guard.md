@@ -181,7 +181,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Harness | Delegation surface | Status |
 | --- | --- | --- |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
-| Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
+| Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. Codex project-hook registrations are currently suspended, and no subagent registration exists. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
@@ -219,7 +219,8 @@ SUBAGENT_TOOL=no
 ```
 
 `multi_tool_use.parallel` batches calls to the tools above; it does not spawn an agent.
-Codex is therefore not applicable today, and this table row is the tripwire: if a future Codex release adds a delegated-agent tool, wire `.codex/hooks.json` the same way its `Bash` PreToolUse entries already forward stdin to a checker.
+Codex is therefore not applicable today, and this table row is the tripwire: if a future Codex release adds a delegated-agent tool, extend the retained `Bash` PreToolUse transport pattern only after Codex project-hook integration is re-enabled with bounded acceptance proof.
+That transport pattern is currently unregistered while all tracked Codex project hooks remain suspended.
 
 ### Grok, OpenCode, and Pi, inspected but not wired
 

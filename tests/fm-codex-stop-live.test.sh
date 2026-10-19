@@ -2,12 +2,15 @@
 # Credentialed native Codex Stop proof in a guarded non-default Herdr session.
 # FM_CODEX_STOP_LIVE=1 tests/fm-codex-stop-live.test.sh
 # Artifacts remain in .no-mistakes/codex-stop-live for review.
+# Automatic project integration remains suspended; this guard installs an
+# isolated fixture registration for the dormant Stop adapter.
 # shellcheck disable=SC2016 # wait_condition evaluates these expressions on each poll
 set -eu
 if [ "${FM_CODEX_STOP_LIVE:-0}" != 1 ]; then
   echo 'skip: set FM_CODEX_STOP_LIVE=1 for native Codex Stop proof'
   exit 0
 fi
+printf '%s\n' '# Codex automatic project-hook integration is suspended; testing the dormant Stop adapter through an isolated fixture registration.'
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 EVIDENCE="$ROOT/.no-mistakes/codex-stop-live"
 PROJECT="$EVIDENCE/project-$$"
@@ -15,19 +18,24 @@ mkdir -p "$PROJECT/.codex" "$PROJECT/state" "$PROJECT/config"
 git init -q "$PROJECT"
 cp -R "$ROOT/bin" "$PROJECT/bin"
 printf '%s\n' 'This is an isolated native hook experiment. Follow the prompt exactly.' > "$PROJECT/AGENTS.md"
-cp "$ROOT/.codex/hooks.json" "$PROJECT/.codex/hooks.json"
-# Keep the tracked Stop command and timeout intact; substitute only session
-# initialization with the unchanged lock owner, avoiding fleet bootstrap.
-python3 - "$PROJECT" <<'PY'
+python3 - "$ROOT/.codex/hooks.json" "$PROJECT" <<'PY'
 import json,sys
-p=sys.argv[1]
+tracked_path,p=sys.argv[1:]
+with open(tracked_path) as stream:
+    tracked=json.load(stream)
+if tracked != {'hooks': {}}:
+    raise SystemExit('tracked Codex hooks must remain semantically empty during suspended integration')
 f=p+'/.codex/hooks.json'
-s=json.load(open(f))
-s['hooks']={'SessionStart':[{'hooks':[{'type':'command','command':'bin/fm-lock.sh','timeout':10}]}], 'Stop':s['hooks']['Stop']}
+stop_command=r'''bash -lc 'payload=$(cat 2>/dev/null || true); [ -n "$payload" ] || exit 0; command -v jq >/dev/null 2>&1 || exit 0; root=$(pwd -P) || exit 0; [ -x "$root/bin/fm-turnend-guard.sh" ] || exit 0; [ -f "$root/AGENTS.md" ] || exit 0; [ -f "$root/.codex/hooks.json" ] || exit 0; jq -e "any(.hooks.Stop[]?.hooks[]?.command?; type == \"string\" and contains(\"fm-turnend-guard.sh --codex\"))" "$root/.codex/hooks.json" >/dev/null 2>&1 || exit 0; printf "%s" "$payload" | "$root/bin/fm-turnend-guard.sh" --codex' '''.strip()
+s={'hooks': {
+    'SessionStart': [{'hooks': [{'type': 'command', 'command': 'bin/fm-lock.sh', 'timeout': 10}]}],
+    'Stop': [{'hooks': [{'type': 'command', 'command': stop_command, 'timeout': 600}]}],
+}}
 original=s['hooks']['Stop'][0]['hooks'][0]['command']
 open(p+'/stop-command','w').write(original)
 s['hooks']['Stop'][0]['hooks'][0]['command']='bash stop-observe.sh # fm-turnend-guard.sh --codex'
-open(f,'w').write(json.dumps(s))
+with open(f,'w') as stream:
+    json.dump(s,stream)
 PY
 # The registration's identity check recognizes the actual tracked guard name.
 cat > "$PROJECT/stop-observe.sh" <<'HOOK'
