@@ -1,6 +1,10 @@
-Mode: Codex native Stop continuation.
+Mode: Codex automatic hook integration suspended.
 
-When this session owns supervision and away mode is not active:
+`.codex/hooks.json` intentionally registers no hooks, so automatic session startup, both PreToolUse guards, and Stop continuation are temporarily suspended pending the replacement runtime.
+Do not rely on or re-enable those paths without bounded acceptance proof from the replacement runtime.
+The inactive Stop adapter contract remains below for implementation reference only.
+
+When the Stop adapter is re-enabled after that proof and this session owns supervision while away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    Handle all presented work, then run the exact `WAKE_ACK_REQUIRED` command it prints.
    Until acknowledgement, the work remains durable for replay after interruption.

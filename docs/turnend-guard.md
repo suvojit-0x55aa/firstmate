@@ -50,7 +50,7 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
 ## Harness integrations
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
-- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard with `--codex`.
+- Codex's tracked `Stop` registration is temporarily suspended pending the replacement runtime; `.codex/hooks.json` registers no hook and automatic continuation does not run.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
@@ -66,11 +66,11 @@ If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot s
   The same marker guard carries every tracked `.claude/settings.json` entry whose event Grok already covers through its own `.grok/hooks/` registration, which is both `Stop` entries, the `SessionStart` entry, and the two `PreToolUse` Bash entries; `bin/fm-subagent-pretool-check.sh` is the one deliberate unguarded exception because no Grok registration covers the subagent-spawn event, recorded in [`subagent-guard.md`](subagent-guard.md) "Known residual gap".
   `tests/fm-turnend-guard.test.sh` pins that inventory so neither the guarded set nor the exception can change silently.
 
-Claude and Codex can block a Stop directly with exit status 2 and stderr.
-Both payloads carry `stop_hook_active`.
+Claude can block a Stop directly with exit status 2 and stderr.
+The inactive Codex adapter remains implemented but has no tracked registration.
 
 Codex's `--codex` branch delegates to `bin/fm-codex-stop.sh`, the sole native continuation owner.
-The [Codex protocol](supervision-protocols/codex.md) owns the operating procedure; the adapter header owns its bounded wait, single-owner, cancellation and handling contract.
+The [Codex protocol](supervision-protocols/codex.md) owns the suspension state and retained adapter contract; the adapter header owns its bounded wait, single-owner, cancellation and handling contract.
 The installed-CLI evidence and paired Claude limit are recorded in [supervision verification](verification/supervision.md#codex-native-stop-continuation).
 
 The default shared mode remains Grok's bounded native path.
